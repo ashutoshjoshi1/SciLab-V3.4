@@ -26,7 +26,6 @@ from ctypes import (
     c_char,
     byref,
     create_string_buffer,
-    windll,
     POINTER,
     c_void_p,
 )
@@ -34,6 +33,7 @@ from ctypes import (
 import numpy as np
 
 from spec_xfus import spec_clock, measurement_timeout_s
+from spectrometers._winapi import windll  # importable on every OS; fails on first use off Windows
 
 
 logger = logging.getLogger(__name__)

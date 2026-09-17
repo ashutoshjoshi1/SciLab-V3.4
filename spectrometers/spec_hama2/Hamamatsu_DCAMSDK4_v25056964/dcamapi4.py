@@ -92,24 +92,43 @@ if __platform_system == 'Windows':
         try:
             if os.path.isabs(dll_path) and hasattr(os, 'add_dll_directory'):
                 os.add_dll_directory(os.path.dirname(dll_path))
-            print("Loading DLL from path: " + str(dll_path))
+            logging.getLogger(__name__).info("Loading DCAM-API DLL from %s", dll_path)
             __dll = windll.LoadLibrary(dll_path)
             break
         except Exception as e:
             load_errors.append('{} -> {}'.format(dll_path, e))
 
     if __dll is None:
-        with open('dcamapi_error.log', 'w') as f:
-            f.write("Cannot load DCAM DLL. Tried candidates:\n")
-            for entry in load_errors:
-                f.write("- {}\n".format(entry))
-        raise FileNotFoundError(
+        __dll_error = (
             "Unable to load '{}' (or one of its dependencies). Install Hamamatsu DCAM-API "
-            "or set DCAMAPI_DLL_PATH to the full dcamapi.dll path. "
-            "See dcamapi_error.log for attempted paths.".format(dll_name)
+            "or set DCAMAPI_DLL_PATH to the full dcamapi.dll path. Tried: {}".format(
+                dll_name, "; ".join(load_errors) or "no candidates")
         )
-else:  # Linux
-    __dll = cdll.LoadLibrary('/usr/local/lib/libdcamapi.so')
+        logging.getLogger(__name__).warning(__dll_error)
+else:  # Linux, macOS, anything else
+    __dll = None
+    __dll_error = "DCAM-API is not available for {}".format(__platform_system)
+    if __platform_system == 'Linux':
+        try:
+            __dll = cdll.LoadLibrary('/usr/local/lib/libdcamapi.so')
+        except OSError as e:
+            __dll_error = "Unable to load /usr/local/lib/libdcamapi.so: {}".format(e)
+
+
+if __dll is None:
+    # Deferred failure: the module stays importable (so the rest of the app,
+    # discovery and tests work on machines without the DCAM runtime) and the
+    # first real DLL call raises a clear OSError instead of an import error.
+    class _UnavailableDLL(object):
+        def __init__(self, reason):
+            self._reason = reason
+
+        def __getattr__(self, name):
+            def _fail(*_args, **_kwargs):
+                raise OSError("DCAM-API '{}' unavailable: {}".format(name, self._reason))
+            return _fail  # a plain function: later `.argtypes`/`.restype` assignments still work
+
+    __dll = _UnavailableDLL(__dll_error)
 
 
 # ==== declare constants ====

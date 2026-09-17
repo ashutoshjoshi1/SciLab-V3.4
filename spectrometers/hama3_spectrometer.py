@@ -1,5 +1,6 @@
 import logging
-from ctypes import windll, byref, c_int, c_uint, c_uint32, c_ushort, c_ubyte, c_bool, create_string_buffer
+from ctypes import byref, c_int, c_uint, c_uint32, c_ushort, c_ubyte, c_bool, create_string_buffer
+from spectrometers._winapi import windll  # importable on every OS; fails on first use off Windows
 from time import sleep
 import numpy as np
 import platform

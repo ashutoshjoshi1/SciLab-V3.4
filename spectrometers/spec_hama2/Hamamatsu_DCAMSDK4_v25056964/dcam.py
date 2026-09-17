@@ -9,7 +9,7 @@ are subject to change without notice.
 
 __date__ = '2025-04-16'
 
-from dcamapi4 import *
+from .dcamapi4 import *  # noqa: F401,F403 - single DCAM-API binding shared with hama2_spectrometer
 # DCAM-API v4 module
 
 import numpy as np
