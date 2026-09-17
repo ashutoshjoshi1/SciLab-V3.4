@@ -172,6 +172,11 @@ class SpectroApp(tk.Tk):
         self.stage = StageController() if StageController else None
         self.stage_config_path = ""
 
+        # Shared laser checkbox state. Created here (not inside a lazily built
+        # tab) so Live View, Check Resolution and Measurements can all bind to
+        # the same variables regardless of which tab is opened first.
+        self.laser_vars: Dict[str, tk.BooleanVar] = {}
+
         self.live_running = threading.Event()
         self.measure_running = threading.Event()
         self._pending_it = None
@@ -292,6 +297,67 @@ class SpectroApp(tk.Tk):
             self.after(0, lambda: messagebox.showerror(title, str(ex)))
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Defaults that lazily built tabs may override. Having them on the class
+    # means Disconnect / on_close / Check Resolution work even if Live View or
+    # Measurements were never opened in this session.
+    # ------------------------------------------------------------------
+
+    def stop_live(self) -> None:
+        self.live_running.clear()
+
+    def stop_measure(self) -> None:
+        self.measure_running.clear()
+
+    def laser_var(self, tag: str) -> tk.BooleanVar:
+        """Return the shared BooleanVar for a source, creating it on first use."""
+        var = self.laser_vars.get(tag)
+        if var is None:
+            var = tk.BooleanVar(master=self, value=False)
+            self.laser_vars[tag] = var
+        return var
+
+    RELAY_CHANNEL_MAP = {"517": 2, "532": 1, "Hg_Ar": 4}
+
+    def set_source_state(self, tag: str, turn_on: bool) -> None:
+        """Turn one light source on or off. Blocking serial I/O; not for the Tk thread."""
+        self.lasers.ensure_open_for_tag(tag)
+        obis_map = self.lasers.OBIS_MAP
+        if tag in obis_map:
+            channel = obis_map[tag]
+            if turn_on:
+                self.lasers.obis_set_power(channel, float(self._get_power(tag)))
+                self.lasers.obis_on(channel)
+            else:
+                self.lasers.obis_off(channel)
+        elif tag == "377":
+            if turn_on:
+                value = float(self._get_power(tag))
+                milliwatts = value * 1000.0 if value <= 0.3 else value
+                self.lasers.cube_on(power_mw=milliwatts)
+            else:
+                self.lasers.cube_off()
+        elif tag in self.RELAY_CHANNEL_MAP:
+            relay = self.RELAY_CHANNEL_MAP[tag]
+            if turn_on:
+                self.lasers.relay_on(relay)
+            else:
+                self.lasers.relay_off(relay)
+        else:
+            raise RuntimeError(f"Unsupported source '{tag}'.")
+
+    def toggle_laser(self, tag: str, turn_on: bool) -> None:
+        """Checkbox handler shared by Live View and Check Resolution."""
+        try:
+            self._update_ports_from_ui()
+            self.set_source_state(tag, turn_on)
+        except Exception as exc:
+            try:
+                self.laser_var(tag).set(not turn_on)
+            except Exception:
+                pass
+            self._post_error(f"Laser {tag}", exc)
 
     def _on_closing(self) -> None:
         handler = getattr(self, "on_close", None)

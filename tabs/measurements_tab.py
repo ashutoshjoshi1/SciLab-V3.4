@@ -221,8 +221,12 @@ def build(app):
         # All lasers in ascending order (including Hg_Ar)
         all_lasers = ["377", "405", "445", "488", "517", "532", "640", "685", "Hg_Ar"]
 
+        preset_state = {"applying": False}
+
         def on_laser_change(*args):
             """When user manually changes lasers, switch to Custom preset."""
+            if preset_state["applying"]:
+                return
             if hasattr(app, 'preset_var') and app.preset_var.get() != "Custom":
                 # Check if current selection matches the active preset
                 preset = app.measurement_presets.get(app.preset_var.get(), {})
@@ -294,25 +298,24 @@ def build(app):
             
             preset = app.measurement_presets.get(preset_name, {})
             selected_lasers = preset.get("lasers", [])
-            
-            # Update laser checkboxes
-            for laser, var in app.measure_vars.items():
-                if laser in selected_lasers:
-                    var.set(True)
-                else:
-                    var.set(False)
-            
-            # Update select all checkbox state
-            all_selected = all(var.get() for var in app.measure_vars.values())
-            none_selected = not any(var.get() for var in app.measure_vars.values())
-            if all_selected:
-                app.select_all_lasers_var.set(True)
-            elif none_selected:
-                app.select_all_lasers_var.set(False)
-            
-            # Clear reference files
-            _clear_all_reference_csvs(app)
-            
+
+            # Update laser checkboxes without letting on_laser_change see a
+            # half-applied selection (which would snap the preset back to Custom).
+            preset_state["applying"] = True
+            try:
+                for laser, var in app.measure_vars.items():
+                    var.set(laser in selected_lasers)
+
+                # Update select all checkbox state
+                all_selected = all(var.get() for var in app.measure_vars.values())
+                none_selected = not any(var.get() for var in app.measure_vars.values())
+                if all_selected:
+                    app.select_all_lasers_var.set(True)
+                elif none_selected:
+                    app.select_all_lasers_var.set(False)
+            finally:
+                preset_state["applying"] = False
+
             # Show info
             description = preset.get("description", "")
             if description:
@@ -580,19 +583,30 @@ def build(app):
         app.measure_thread.start()
 
     def _show_countdown_modal_threadsafe(seconds: int, title: str, message: str):
+        """Block the worker thread while a non-blocking countdown runs on the Tk thread."""
         done = threading.Event()
-        state = {"error": None}
+        state = {"error": None, "top": None}
 
         def _show():
             try:
-                app._countdown_modal(seconds, title, message)
+                state["top"] = app._countdown_modal(seconds, title, message, on_done=done.set)
             except Exception as exc:  # pragma: no cover - UI error path
                 state["error"] = exc
-            finally:
                 done.set()
 
         app.after(0, _show)
-        done.wait()
+        # Wake periodically so a Stop request ends the wait promptly.
+        while not done.wait(0.25):
+            if not app.measure_running.is_set():
+                top = state["top"]
+                if top is not None:
+                    def _close_top(widget=top):
+                        try:
+                            widget.destroy()
+                        except tk.TclError:
+                            pass
+                    app.after(0, _close_top)
+                break
         if state["error"] is not None:
             raise state["error"]
 
@@ -674,27 +688,65 @@ def build(app):
         # Change button back to green (idle state)
         app.run_all_btn.configure(bg=Colors.SUCCESS, activebackground='#15803d')
 
-    def _countdown_modal(self, seconds: int, title: str, message: str):
-        """Blocking modal with countdown; Enter key to skip."""
+    def _countdown_modal(self, seconds: int, title: str, message: str, on_done=None):
+        """Non-blocking countdown dialog driven by ``after``; Enter/Escape skips.
+
+        Runs for the full ``seconds`` (the previous implementation used a
+        ``time.sleep(0.2)`` loop with a nested ``update()`` and lasted only
+        ~0.2 s per second requested). Calls ``on_done`` exactly once when the
+        countdown ends, is skipped, or the dialog is closed. Returns the
+        Toplevel so a caller can destroy it early.
+        """
         top = tk.Toplevel(self)
         top.title(title)
-        top.geometry("500x180+200+200")
-        ttk.Label(top, text=message, wraplength=460).pack(pady=8)
-        lbl = ttk.Label(top, text="", font=Fonts.H1)
-        lbl.pack(pady=10)
+        top.transient(self)
+        top.resizable(False, False)
+        ttk.Label(top, text=message, wraplength=460).pack(padx=16, pady=(14, 6))
+        lbl = ttk.Label(top, text=f"{int(seconds)} sec", font=Fonts.H1)
+        lbl.pack(pady=(4, 6))
+        ttk.Label(top, text="Press Enter to continue now", style="Muted.TLabel").pack(pady=(0, 12))
 
-        skip = {"flag": False}
-        def on_key(ev):
-            skip["flag"] = True
-        top.bind("<Return>", on_key)
+        top.update_idletasks()
+        width, height = max(500, top.winfo_reqwidth()), max(160, top.winfo_reqheight())
+        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - height) // 3
+        top.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
 
-        for s in range(seconds, -1, -1):
-            if skip["flag"]:
-                break
-            lbl.config(text=f"{s} sec")
-            top.update()
-            time.sleep(0.2)
-        top.destroy()
+        state = {"remaining": int(seconds), "after_id": None, "finished": False}
+
+        def _finish(_event=None):
+            if state["finished"]:
+                return
+            state["finished"] = True
+            if state["after_id"] is not None:
+                try:
+                    top.after_cancel(state["after_id"])
+                except tk.TclError:
+                    pass
+            try:
+                top.destroy()
+            except tk.TclError:
+                pass
+            if on_done is not None:
+                on_done()
+
+        def _tick():
+            state["after_id"] = None
+            if state["finished"]:
+                return
+            if state["remaining"] <= 0:
+                _finish()
+                return
+            lbl.config(text=f"{state['remaining']} sec")
+            state["remaining"] -= 1
+            state["after_id"] = top.after(1000, _tick)
+
+        top.bind("<Return>", _finish)
+        top.bind("<Escape>", _finish)
+        top.protocol("WM_DELETE_WINDOW", _finish)
+        top.focus_set()
+        _tick()
+        return top
 
     def _update_last_plots(self, tag: str):
         sig, dark = app.data.last_vectors_for(tag)

@@ -8,7 +8,9 @@ import numpy as np
 
 @dataclass
 class CharacterizationConfig:
-    laser_sequence: Sequence[str] = ("377", "405", "445", "488", "532", "640", "685", "Hg_Ar")
+    # Laser sources analysed as LSFs. The Hg-Ar lamp is handled separately
+    # (peak matching against known_lines_nm), so it must not appear here.
+    laser_sequence: Sequence[str] = ("377", "405", "445", "488", "517", "532", "640", "685")
     laser_reference_map: Dict[str, float] = field(
         default_factory=lambda: {
             "377": 375.0,

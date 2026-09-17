@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# App runtime output (kept locally, not versioned)
+results/
+.write_test
+dcamapi_error.log

@@ -673,10 +673,19 @@ def build(app):
             app._setup_power_column_groups = column_groups
             app._setup_power_laser_count = len(app.laser_configs)
 
+            # Preserve anything the operator has typed but not yet saved so a
+            # resize-triggered rebuild never discards their edits.
+            typed_values = {}
+            for wavelength, entry in getattr(app, "power_entries", {}).items():
+                try:
+                    typed_values[wavelength] = entry.get()
+                except tk.TclError:
+                    pass
+
             # Clear existing widgets
             for widget in power_group.winfo_children():
                 widget.destroy()
-            
+
             app.power_entries = {}
             
             # Sort lasers numerically
@@ -730,7 +739,7 @@ def build(app):
                 
                 # Power entry
                 e = ttk.Entry(power_group, width=10, font=Fonts.BODY)
-                e.insert(0, str(power))
+                e.insert(0, typed_values.get(wavelength, str(power)))
                 e.grid(row=row, column=col_offset+2, sticky="w", padx=(0, 4), pady=4)
                 app.power_entries[wavelength] = e
                 
@@ -987,6 +996,7 @@ def build(app):
     def disconnect_spectrometer():
         try:
             app.stop_live()
+            app.stop_measure()
             if app.spec:
                 try:
                     app.spec.disconnect()
@@ -1034,20 +1044,29 @@ def build(app):
             except Exception:
                 pass
 
+        payload = {
+            "spectrometer_type": app.hw.spectrometer_type,
+            "dll_path": app.hw.dll_path,
+            "com_ports": app.hw.com_ports,
+            "laser_power": app.hw.laser_power,
+            "laser_configs": app.laser_configs,
+            "available_lasers": app.available_lasers,
+            "stage_config_path": app.stage_config_path,
+        }
+        # Atomic write: a crash mid-write must never leave a truncated file
+        # that silently resets every COM port and power value to defaults.
+        tmp_path = f"{SETTINGS_FILE}.tmp"
         try:
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({
-                    "spectrometer_type": app.hw.spectrometer_type,
-                    "dll_path": app.hw.dll_path,
-                    "com_ports": app.hw.com_ports,
-                    "laser_power": app.hw.laser_power,
-                    "laser_configs": app.laser_configs,
-                    "available_lasers": app.available_lasers,
-                    "stage_config_path": app.stage_config_path,
-                }, f, indent=2)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_path, SETTINGS_FILE)
             LOGGER.info("Settings saved to %s", SETTINGS_FILE)
         except Exception as e:
             LOGGER.error("Error saving settings: %s", e)
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
     
     def save_settings():
         """Save all settings including laser configurations."""
@@ -1169,6 +1188,20 @@ def build(app):
         try:
             app.stop_live()
             app.stop_measure()
+            # Give a running acquisition thread a moment to notice the stop
+            # flag before the DLL is torn down underneath it.
+            worker = getattr(app, "measure_thread", None)
+            if worker is not None and worker.is_alive():
+                worker.join(timeout=2.0)
+            try:
+                save_settings_silently()
+            except Exception:
+                LOGGER.exception("Could not save settings on exit")
+            # Safety: never leave a laser emitting after the app closes.
+            try:
+                app.lasers.all_off()
+            except Exception:
+                LOGGER.exception("Could not switch sources off on exit")
             if app.spec:
                 try:
                     app.spec.disconnect()
