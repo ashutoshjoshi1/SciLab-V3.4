@@ -562,11 +562,25 @@ consecutive frames, falls back to `captureStop` followed by reading, and when
 the current mode yields nothing sets each advertised capture mode (mask bits,
 then 1, 2, 3, 4, 8, 16, 64), retries, and restores the original mode if all
 fail. A third connect found the board in mode 2 and every candidate mode
-answering 6 as well, so the mode is not the whole story; the open candidates
-are a long exposure cycle stored in the board, the unit of `setExposureTime`,
-the buffer sizes `getImageData` expects, and the trigger setting.
-`tools/diagnose_c13016.py` isolates each of these on the bench (long poll,
-exposure as seconds, six buffer shapes, all modes) and restores the mode.
+answering 6 as well. The fourth, with a 2.5 s probe window, received a frame
+(`getImageData` 0) and then crashed: a second `captureStart` while the capture
+still ran threw a `SynchronizationLockException` inside the DLL. Together with
+the exposure-cycle limits (1,043 µs to 1.1 s, key-protected, so neither
+readable nor settable by us) this means the board delivers one frame per
+stored exposure cycle, of the order of a second, and must not be restarted
+per frame. A fifth connect, in capture mode 0, received exactly one frame per
+`captureStart` (the same frame is served twice with code 0, then 6 resumes):
+mode 0 is single shot and mode 2 continuous, and `getCaptureStatus` reads 1
+in every state. The driver now issues `captureStart` before each frame until
+a start throws, which marks the capture as continuous and leaves it running;
+new frames are detected by timestamp or changed data, the frame already
+exposing when the integration time changes is discarded in continuous mode,
+and the board's capture mode is never changed. Measurement timeouts include
+one cycle per requested frame. Frame rate is
+therefore bound to the cycle stored by the vendor software until Hamamatsu
+provides the `strCheck` key or the function specification for
+`setExposureCycle`. `tools/diagnose_c13016.py` follows the same rules and
+measures the frame period on the bench.
 
 ### Bench checklist (Windows, real hardware)
 

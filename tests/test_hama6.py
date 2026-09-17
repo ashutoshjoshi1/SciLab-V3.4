@@ -1,11 +1,13 @@
 """Hama6 (C13016 via the MICRO_USB2_CLR .NET assembly) against a reflection-style fake.
 
-The fake reproduces the assembly's real public API as reflected on the bench
-(``Int64 id`` handles from a connection list, seconds as ``Double``, ``ref``
-out-parameters, ``ref UInt16[]`` image buffers) with .NET-like ``MethodInfo`` /
-``ParameterInfo`` objects, so the reflective argument preparation, the
-initialize/open/captureStart/getImageData workflow and the "new frame"
-detection are all exercised without pythonnet.
+The fake reproduces the assembly's public API as reflected on the bench and
+the board's observed behaviour: ``Int64 id`` handles from a connection list,
+microsecond exposures behind a parameter named ``sec``, NUL-padded identity
+strings, capture mode 0 delivering one frame per ``captureStart`` about one
+exposure cycle later and mode 2 delivering frames continuously, ``getImageData``
+answering 6 until a frame exists and then serving it twice with 0 before 6
+resumes, a ``captureStart`` that throws while a continuous capture runs, a
+``captureStop`` that may be ineffective, and a ``getCaptureStatus`` stuck at 1.
 """
 from __future__ import annotations
 
@@ -77,33 +79,37 @@ class FakeReflectedType:
 
 
 OK = 0
-NOT_READY = -1
-BUSY = 6          # what the bench board answered on every getImageData poll while capturing
+NO_FRAME = 6      # what the bench board answers while no new frame exists
+DLL_RACE = ("Exception has been thrown by the target of an invocation. ---> "
+            "System.Threading.SynchronizationLockException: Object synchronization method was called from an unsynchronized block of code.")
 
 
 class FakeMicroUsb2Clr:
-    """Emulates MICRO_USB2_CLR: the real signatures, plausible behaviour, unknown-polarity codes."""
+    """Emulates MICRO_USB2_CLR and the C13016 as observed on the bench."""
 
-    def __init__(self, module_ids=(7,), pixel=288, peak_pixel=120, exposure_us=10000, unit="us"):
+    def __init__(self, module_ids=(7,), pixel=288, peak_pixel=120, exposure_us=10000, unit="us", cycle_s=0.02, mode=0):
         self.module_ids = list(module_ids)
         self.pixel = pixel
         self.peak_pixel = peak_pixel
         self.exposure_s = exposure_us / 1e6
         self.unit_scale = 1e6 if unit == "us" else 1.0      # the bench board works in microseconds
+        self.cycle_s = cycle_s                              # frame period of the continuous capture
         self.rng = np.random.default_rng(11)
         self.calls = []
+        self.argument_types = []
         self.initialized = False
         self.opened = None
+        self.mode = mode                                    # 0: single shot (bench default), 2: continuous
         self.capturing = False
-        self.ready_at = 0.0
-        self.frame_counter = 0
+        self.serves_left = 0                                # the board serves a frame twice with code 0
+        self.stop_ineffective = False                       # captureStop returns 0 but the capture goes on
+        self.produces_frames = True
         self.never_ready = False
-        self.deliver_after_stop = False        # frame readable only once captureStop was called
-        self.frame_pending = False
-        self.mode = 0
-        self.working_modes = None              # None: frames in any mode; else the set of modes that produce frames
-        self.cycle = 0.0
-        self.argument_types = []
+        self.next_frame_at = None
+        self.exposing_with = None
+        self.last_frame = None
+        self.stamp = 0
+        self.frame_counter = 0
         ID = FakeParam("id", T("Int64"))
         methods = [
             FakeMethodInfo("MICRO_USB2_initialize", [], self._initialize),
@@ -189,7 +195,8 @@ class FakeMicroUsb2Clr:
 
     def _exposure_property(self, args):
         s = self.unit_scale
-        args[1], args[2], args[3], args[4], args[5], args[6] = 11e-6 * s, 1.0 * s, 1e-6 * s, 0.0, 10.0 * s, 1e-3 * s
+        args[1], args[2], args[3] = 11e-6 * s, 1.0 * s, 1e-6 * s
+        args[4], args[5], args[6] = 1043e-6 * s, 1.1 * s, 1e-6 * s        # cycle limits as on the bench
         return OK
 
     def _set_exposure(self, args):
@@ -208,22 +215,6 @@ class FakeMicroUsb2Clr:
             return OK
         return -5
 
-    def _capture_start(self, args):
-        self.calls.append("captureStart")
-        self.capturing = True
-        self.ready_at = time.monotonic() + self.exposure_s
-        return OK
-
-    def _capture_stop(self, args):
-        self.calls.append("captureStop")
-        if self.capturing and time.monotonic() >= self.ready_at:
-            self.frame_pending = True
-        self.capturing = False
-        return OK
-
-    def _capture_status(self, args):
-        return 1 if self.capturing else 0
-
     def _get_mode(self, args):
         args[1] = self.mode
         return OK
@@ -233,39 +224,70 @@ class FakeMicroUsb2Clr:
         return OK
 
     def _get_cycle(self, args):
-        args[1] = self.cycle
+        args[1] = 0.0
         return 12 if args[2] == "" else OK       # key-protected on the bench: 12 with an empty key
 
     def _trigger_output(self, args):
-        args[1] = 0
-        return OK
-
-    def _trigger_polarity(self, args):
         args[1] = 1
         return OK
 
+    def _trigger_polarity(self, args):
+        args[1] = 3
+        return OK
+
+    @property
+    def single_shot(self):
+        return self.mode == 0
+
+    def _capture_start(self, args):
+        self.calls.append("captureStart")
+        if self.capturing and not self.single_shot:
+            raise Exception(DLL_RACE)              # the DLL's behaviour on a second start of a continuous capture
+        self.capturing = True
+        self.exposing_with = self.exposure_s
+        self.next_frame_at = time.monotonic() + self.cycle_s
+        return OK
+
+    def _capture_stop(self, args):
+        self.calls.append("captureStop")
+        if not self.stop_ineffective:
+            self.capturing = False
+        return OK
+
+    def _capture_status(self, args):
+        return 1                                   # the bench board answers 1 in every state
+
+    def _make_frame(self, exposure_s):
+        px = np.arange(self.pixel, dtype=float)
+        frame = 700.0 + 0.4e6 * exposure_s * np.exp(-0.5 * ((px - self.peak_pixel) / 2.5) ** 2) + self.rng.normal(0, 3.0, px.size)
+        return np.clip(np.rint(frame), 0, 65535)
+
+    def _advance(self):
+        now = time.monotonic()
+        while self.produces_frames and self.capturing and self.next_frame_at is not None and now >= self.next_frame_at:
+            self.last_frame = self._make_frame(self.exposing_with)   # exposed with the setting at frame start
+            self.exposing_with = self.exposure_s
+            self.stamp += 1
+            self.frame_counter += 1
+            self.serves_left = 2
+            if self.single_shot:
+                self.capturing = False             # the capture ends by itself after one frame
+                self.next_frame_at = None
+            else:
+                self.next_frame_at += self.cycle_s
+
     def _image_data(self, args):
         if self.never_ready:
-            return NOT_READY                        # buffer left untouched (zeros)
-        if self.working_modes is not None and self.mode not in self.working_modes:
-            return BUSY                             # what the bench board did in its start-up mode 0
-        if self.deliver_after_stop:
-            if self.capturing:
-                return BUSY
-            if not self.frame_pending:
-                return NOT_READY
-            self.frame_pending = False
-        elif not self.capturing or time.monotonic() < self.ready_at:
-            return NOT_READY
+            return NO_FRAME
+        self._advance()
+        if self.last_frame is None or self.serves_left <= 0:
+            return NO_FRAME                         # buffer left untouched (zeros)
+        self.serves_left -= 1
         buffer = args[1]
         assert len(buffer) == self.pixel, "getImageData must get a pixel-sized buffer"
-        px = np.arange(self.pixel, dtype=float)
-        frame = 700.0 + 0.4e6 * self.exposure_s * np.exp(-0.5 * ((px - self.peak_pixel) / 2.5) ** 2) + self.rng.normal(0, 3.0, px.size)
-        for i, value in enumerate(np.clip(np.rint(frame), 0, 65535)):
+        for i, value in enumerate(self.last_frame):
             buffer[i] = int(value)
-        self.frame_counter += 1
-        args[2][0] = self.frame_counter * 1000      # single-shot: one frame per captureStart
-        self.capturing = False
+        args[2][0] = self.stamp * 1000              # same frame, same timestamp until the next cycle
         return OK
 
 
@@ -287,6 +309,16 @@ def spec(device):
     backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
     assert backend.connect() == "OK", backend.error
     yield backend
+    backend.disconnect()
+
+
+@pytest.fixture
+def continuous():
+    """Board in capture mode 2: frames flow every cycle, a second captureStart throws."""
+    device = FakeMicroUsb2Clr(mode=2)
+    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
+    assert backend.connect() == "OK", backend.error
+    yield backend, device
     backend.disconnect()
 
 
@@ -319,19 +351,21 @@ def test_connect_follows_initialize_list_open_workflow(spec, device):
     assert spec.module_id == 7 and spec.module_ids == [7]
     assert spec.sn == "326VA021" and spec.name == "Hamamatsu C13016 micro-spectrometer"   # NUL padding stripped
     assert spec.module_info["firmware"] == "1.08"
-    assert spec.capture_modes_supported == 32 and spec.capture_mode == 0 and spec.exposure_cycle == 0.0
-    assert spec.diagnostics["capture_state"]["trigger"] == {"output": 0, "polarity": 1}
-    assert spec.diagnostics["exposure_property"]["cycle"] == {"lower": 0.0, "upper": 10.0 * 1e6, "step": 1e-3 * 1e6}
-    assert not spec._deliver_after_stop
+    assert spec.capture_modes_supported == 32 and spec.capture_mode == 0
+    assert spec.diagnostics["capture_state"]["trigger"] == {"output": 1, "polarity": 3}
+    assert spec.diagnostics["capture_state"]["status_before_start"] == 1
     assert spec.npix_active == 288 and spec.nbits == 16 and spec.eff_saturation_limit == 65535.0
     assert spec.exposure_unit == "us"
     assert spec.min_it_ms == pytest.approx(0.011) and spec.max_it_ms == pytest.approx(1000.0)
     assert spec.it_step_ms == pytest.approx(0.001)
+    assert spec.cycle_limits_s == {"lower": pytest.approx(1.043e-3), "upper": pytest.approx(1.1)}
     assert spec.calibration_coefficients == [310.0, 2.65, -1.1e-3, 0.0, 0.0, 0.0]
     assert spec.wavelengths_nm[0] == pytest.approx(310.0 + 2.65 - 1.1e-3)
     assert spec.it_ms == pytest.approx(10.0)
-    assert spec.rcm.size == 288 and not device.capturing      # probe frames taken, capture stopped
-    assert device.frame_counter == 2                          # a single frame could be a stale buffer
+    assert spec.rcm.size == 288
+    assert device.frame_counter == 2 and device.calls.count("captureStart") == 2   # single shot: a start per frame
+    assert spec._continuous is False and not device.capturing
+    assert spec.frame_period_s == pytest.approx(device.cycle_s, abs=0.015)
     assert spec.diagnostics[h6.M_OPEN] == OK and spec.diagnostics["module_ids"] == [7]
     assert validate_spectrometer_backend(spec) == []
 
@@ -355,6 +389,14 @@ def test_connect_without_modules_is_explained():
     assert h6.LIBRARY.users == 0
 
 
+def test_open_failure_code_is_reported():
+    device = FakeMicroUsb2Clr()
+    device.method(h6.M_OPEN)._func = lambda args: -100
+    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
+    result = backend.connect()
+    assert "open(id=7) returned -100" in result and h6.LIBRARY.users == 0
+
+
 def test_missing_method_reports_api_and_writes_dump():
     device = FakeMicroUsb2Clr()
     device._type._methods = [m for m in device._type._methods if m.Name != h6.M_IMAGE]
@@ -364,10 +406,24 @@ def test_missing_method_reports_api_and_writes_dump():
     assert "MICRO_USB2_captureStart(Int64 id) -> Int64" in h6.API_DUMP_FILE.read_text(encoding="utf-8")
 
 
+def test_stale_frame_alone_does_not_pass_the_probe():
+    device = FakeMicroUsb2Clr()
+    device.last_frame = device._make_frame(0.01)            # left over from the vendor application
+    device.stamp = 41
+    device.serves_left = 2
+    device.produces_frames = False
+    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
+    backend.frame_timeout_s = 0.1
+    result = backend.connect()
+    assert "No new frame within 0.1 s" in result and "getImageData codes {0: " in result
+    assert "cycle limits {'lower': 0.00104" in result
+    assert not device.capturing and device.opened is None    # capture stopped, module closed
+
+
 def test_disconnect_stops_closes_and_uninitializes(spec, device):
     spec.disconnect()
     assert device.opened is None and not device.initialized and not device.capturing
-    assert device.calls[-2:] == ["close:7", "uninitialize"]
+    assert device.calls[-3:] == ["captureStop", "close:7", "uninitialize"]
 
 
 # --------------------------------------------------------------------------- parameters
@@ -377,6 +433,7 @@ def test_set_it_converts_to_the_device_unit(spec, device):
     assert device.exposure_s == pytest.approx(0.25) and spec.it_ms == pytest.approx(250.0)
     assert spec.set_it(0.001) == "OK"                       # clamped to the 11 us floor
     assert device.exposure_s == pytest.approx(11e-6)
+    assert device.calls.count("captureStop") == 0           # set while capturing, no restart needed
 
 
 def test_seconds_based_exposure_api_is_detected():
@@ -388,19 +445,12 @@ def test_seconds_based_exposure_api_is_detected():
     backend.disconnect()
 
 
-def test_open_failure_code_is_reported():
-    device = FakeMicroUsb2Clr()
-    device.method(h6.M_OPEN)._func = lambda args: -100
-    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
-    result = backend.connect()
-    assert "open(id=7) returned -100" in result and h6.LIBRARY.users == 0
-
-
 def test_set_it_rejected_by_device_is_an_error(spec, device):
-    device.method(h6.M_SET_EXPOSURE)._func = lambda args: -3   # device rejects the request
+    device.method(h6.M_SET_EXPOSURE)._func = lambda args: -3   # device rejects the request, also after a stop
     result = spec.set_it(100.0)
     assert result == "Could not set integration time: setExposureTime(100000 us) returned -3"
     assert spec.it_ms == pytest.approx(10.0)
+    assert device.calls.count("captureStop") == 1           # the retry after stopping the capture was tried
 
 
 def test_silently_ignored_exposure_is_detected_by_readback(spec, device):
@@ -409,19 +459,45 @@ def test_silently_ignored_exposure_is_detected_by_readback(spec, device):
     assert result.startswith("Could not set integration time: device kept 10.0000 ms")
 
 
+def test_continuous_frame_exposed_before_an_it_change_is_discarded(continuous):
+    spec, device = continuous
+    assert spec._continuous is True and device.capturing
+    assert spec.set_it(20.0) == "OK"
+    assert spec.measure(ncy=1) == "OK" and spec.wait_for_measurement() == "OK"
+    assert spec.rcm.max() == pytest.approx(700 + 0.4e6 * 0.02, rel=0.02)   # not the 10 ms frame still exposing
+
+
+def test_single_shot_it_change_needs_no_discard(spec, device):
+    assert spec.set_it(20.0) == "OK"
+    starts = device.calls.count("captureStart")
+    assert spec.measure(ncy=1) == "OK" and spec.wait_for_measurement() == "OK"
+    assert device.calls.count("captureStart") == starts + 1                  # exactly one start for one frame
+    assert spec.rcm.max() == pytest.approx(700 + 0.4e6 * 0.02, rel=0.02)
+
+
+def test_continuous_capture_is_left_running(continuous):
+    spec, device = continuous
+    assert device.calls.count("captureStart") == 2                           # the second one threw and taught the driver
+    assert "SynchronizationLockException" in str(spec.diagnostics[h6.M_CAPTURE_START])
+    spec.abort_on_saturation = False
+    assert spec.measure(ncy=4) == "OK" and spec.wait_for_measurement() == "OK"
+    assert spec.ncy_handled == 4 and device.calls.count("captureStart") == 2  # no further starts
+    assert device.capturing
+
+
 # --------------------------------------------------------------------------- acquisition
 
-def test_measure_averages_new_frames_only(spec, device):
+def test_measure_averages_consecutive_frames(spec, device):
     spec.abort_on_saturation = False
     assert spec.set_it(5.0) == "OK"
     assert spec.measure(ncy=5) == "OK"
     assert spec.wait_for_measurement() == "OK"
     assert spec.ncy_handled == 5
-    assert device.frame_counter == 7                        # 2 probe + 5 measured, each a distinct frame
+    assert device.frame_counter == 2 + 5                    # probe frames + measured frames, one start each
     assert int(np.argmax(spec.rcm)) == device.peak_pixel
     assert spec.rcm.max() == pytest.approx(700 + 0.4e6 * 0.005, rel=0.02)
     assert spec.rcs.max() < 20.0                            # noise, not frame duplication
-    assert device.calls[-1] == "captureStop"
+    assert device.calls.count("captureStart") == 7 and device.calls.count("captureStop") == 0
 
 
 def test_frame_timeout_reports_codes(spec, device):
@@ -429,51 +505,14 @@ def test_frame_timeout_reports_codes(spec, device):
     spec.frame_timeout_s = 0.2
     spec.measure(ncy=1)
     result = spec.wait_for_measurement()
-    assert result.startswith("Acquisition failed: No frame within 0.2 s")
-    assert "captureStart=0" in result and f"getImageData codes {{{NOT_READY}: " in result
-    assert "captureStatus=0" in result and "tried after captureStop: True" in result   # fallback was attempted
-    assert "capture mode 0 of supported 32" in result and "diagnose_c13016.py" in result
-
-
-def test_frames_readable_only_after_stop_are_learned():
-    device = FakeMicroUsb2Clr()
-    device.deliver_after_stop = True
-    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
-    assert backend.connect() == "OK", backend.error          # probe frame arrives via the fallback
-    assert backend._deliver_after_stop
-    backend.abort_on_saturation = False
-    backend.set_it(5.0)
-    assert backend.measure(ncy=3) == "OK"
-    assert backend.wait_for_measurement() == "OK"
-    assert backend.ncy_handled == 3 and device.frame_counter == 5
-    assert device.calls.count("captureStart") == 5 and device.calls.count("captureStop") == 5
-    backend.disconnect()
-
-
-def test_connect_switches_to_an_advertised_capture_mode_when_needed():
-    device = FakeMicroUsb2Clr()
-    device.working_modes = {32}                             # frames only in the advertised mode, not in mode 0
-    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
-    backend.frame_timeout_s = 0.1
-    assert backend.connect() == "OK", backend.error
-    assert device.mode == 32 and backend.capture_mode == 32 and backend.diagnostics["capture_mode_used"] == 32
-    assert backend.measure(ncy=2) == "OK" and backend.wait_for_measurement() == "OK"
-    backend.disconnect()
-
-
-def test_connect_restores_the_mode_when_no_mode_yields_frames():
-    device = FakeMicroUsb2Clr()
-    device.working_modes = set()
-    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
-    backend.frame_timeout_s = 0.1
-    result = backend.connect()
-    assert "no frame in capture mode 0, nor in modes [32, 1, 2, 3, 4, 8, 16, 64]" in result
-    assert "Unplug and re-plug" in result and f"getImageData codes {{{BUSY}: " in result
-    assert device.mode == 0 and device.opened is None and h6.LIBRARY.users == 0
+    assert result.startswith("Acquisition failed: No new frame within 0.2 s")
+    assert f"getImageData codes {{{NO_FRAME}: " in result and "captureStart=0" in result
+    assert "captureStatus=1" in result and "capture mode 0 of supported 32" in result and "diagnose_c13016.py" in result
+    assert not device.capturing                             # stopped so the next attempt starts afresh
 
 
 def test_request_stop_unblocks_waiter(spec, device):
-    spec.set_it(300.0)
+    device.cycle_s = 0.3
     spec.measure(ncy=20)
     threading.Timer(0.15, spec.request_stop).start()
     t0 = time.monotonic()
@@ -481,6 +520,26 @@ def test_request_stop_unblocks_waiter(spec, device):
     assert time.monotonic() - t0 < 2.0
     assert result == "Measurement stopped by user"
     assert not device.capturing
+
+
+def test_wait_timeout_accounts_for_the_frame_period(spec):
+    spec.frame_period_s = 1.1
+    spec.ncy_requested = 20
+    spec._done.set()
+    started = time.monotonic()
+    assert spec.wait_for_measurement() == "OK"
+    assert time.monotonic() - started < 0.5                 # returns at once when done...
+    assert spec._frame_period_s() == pytest.approx(1.1)     # ...and the derived timeout includes ncy * period
+
+
+def test_capture_start_race_is_tolerated(continuous):
+    spec, device = continuous
+    device.stop_ineffective = True                          # captureStop returns 0 but the board keeps capturing
+    spec.abort()
+    assert device.capturing
+    assert spec.measure(ncy=2) == "OK" and spec.wait_for_measurement() == "OK"
+    assert "raised" in str(spec.diagnostics[h6.M_CAPTURE_START])
+    assert spec.ncy_handled == 2
 
 
 # --------------------------------------------------------------------------- discovery + environment

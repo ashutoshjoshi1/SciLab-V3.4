@@ -115,11 +115,14 @@ assembly through pythonnet.
 
 SciLab drives the assembly's own workflow (`MICRO_USB2_initialize`, module
 connection list, `open`, module properties, `setExposureTime` in seconds,
-`captureStart` / `getImageData` / `captureStop`) through .NET reflection, so
-its `ref` parameters and `Int64` handles work from Python. The exposure API
-works in microseconds (the driver reads the unit from the device's exposure
-limits), status code 0 means success, and the driver still checks each step by
-its effect and prints all codes in the connect log line and in any error. A failed
+one continuous `captureStart` / `getImageData` capture) through .NET
+reflection, so its `ref` parameters and `Int64` handles work from Python. The
+exposure API works in microseconds (the driver reads the unit from the device's
+exposure limits), status code 0 means success, and the driver checks each step
+by its effect and prints all codes in the connect log line and in any error.
+Frames arrive once per exposure *cycle* stored in the board (up to 1.1 s); the
+cycle is key-protected in the DLL, so ask Hamamatsu for the `strCheck` value or
+set a short cycle in u-ApsSpecEvaluation before using SciLab. A failed
 Connect also writes the assembly's public API to
 `spectrometers/micro_usb2_api_dump.txt`; send that file with the error text
 when reporting a problem. If Connect works but Live View reports "No frame
@@ -129,10 +132,11 @@ within ...", run the read-out experiment script and send its output:
 python tools/diagnose_c13016.py > c13016-diagnostics.txt
 ```
 
-It takes about a minute and records how `getImageData` answers over time
-without a start, after `captureStart` (10 s), after `captureStop`, with the
-exposure given in seconds instead of microseconds, with each buffer size, and
-under each candidate capture mode; the board's mode is restored at the end.
+It takes about a minute and records how `getImageData` answers before any
+start, during one continuous capture (frame period from the timestamps), after
+an exposure change, with each buffer size, after `captureStop`, and after a
+restart; add `--modes` to try the candidate capture modes as well. The board's
+mode is restored at the end.
 
 ## Files
 
