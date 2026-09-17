@@ -516,6 +516,58 @@ table covers C9407MA (`0661:2906`), C10082CA/C10083CA (`0661:2909`), and C11007M
 SciLab's Hama5 implementation still requires physical bench validation for a
 confirmed supported device.
 
+### Hamamatsu C13016 (Hama6)
+
+Hamamatsu's "Mini-spectrometers Technical Information" (KACC9003E, table 2-9)
+assigns the C13016 evaluation circuit and the C13985 module to
+`MICRO_USB2_CLR.dll` + `u-ApsSpecEvaluation.exe`; an NI forum moderator
+confirms the DLL is a .NET assembly rather than a C export library. The board
+(C12880MA/C16767MA datasheet KACC1226E): USB 2.0, 16-bit A/D, 288 pixels,
+5 MHz clock, integration 11 µs to 1,000,000 µs, six wavelength conversion
+factors (λ = a0 + a1·p + … + a5·p⁵).
+
+`spectrometers/hama6_spectrometer.py` loads the assembly with pythonnet. Its
+public API was reflected on the bench on 2026-09-17: class `MICRO_USB2_CLR`, a
+one-to-one mirror of the C-style `MICRO_USB2` library (`MICRO_USB2_initialize`,
+`getModuleConnectionList(Int16[] list, ref UInt16 number)`, `open(Int64 id)`,
+`getModulePropertyForLabVIEW` for pixel count / bit depth / capture mode,
+`setExposureTime(Int64 id, Double sec)`, `getCalibrationCoefficient`,
+`captureStart` / `getImageData(Int64 id, ref UInt16[] imageData, ref UInt64[]
+time)` / `captureStop`; every method returns an `Int64` status code). The
+driver follows that workflow explicitly. Two pythonnet 3 traps drove the call
+layer: its overload resolution rejects `ref` parameters and typed scalars
+("No method matches given arguments"), and a Python `int` stored into an
+`object[]` becomes a `Python.Runtime.PyInt` that `MethodInfo.Invoke` cannot
+convert. Calls therefore go through reflection with each scalar boxed inside
+the CLR (one-element typed array copied into the `object[]`). Hamamatsu's
+function specification (status-code meanings, capture modes, capture status)
+is only shipped inside the software download, so the driver never gates on a
+status code: it checks module properties after `open`, the exposure readback
+after `setExposureTime`, and accepts a frame only when its timestamp or pixel
+data changed. All codes are kept in `diagnostics` and appear in every error
+message; a failed Connect also writes `spectrometers/micro_usb2_api_dump.txt`.
+Acquisition, averaging, timeouts and Stop follow the same shape as Hama5.
+First bench connection (C13016 serial 326VA021, firmware 1.08, 2026-09-17):
+every call returned 0, so 0 is the success code; the exposure API works in
+microseconds although its parameter is named `sec` (limits 11 to 1,000,000,
+step 1), and the driver derives the unit from `getExposurePropertyForLabVIEW`
+on each connect; identity strings are NUL-padded; the module id was 0 and the
+the module property `capturemode` read 32 (probably a supported-modes mask).
+Live View at 10 ms then failed: `captureStart` 0, `getImageData` 6 on every
+poll, before and after `captureStop`, `getCaptureStatus` 1 throughout; a second
+connect showed the first probe frame had been a stale buffer. `getCaptureMode`
+reads 0 while the property advertises 32, and key-protected methods answer 12
+to an empty `strCheck`. The driver therefore proves a capture with two
+consecutive frames, falls back to `captureStop` followed by reading, and when
+the current mode yields nothing sets each advertised capture mode (mask bits,
+then 1, 2, 3, 4, 8, 16, 64), retries, and restores the original mode if all
+fail. A third connect found the board in mode 2 and every candidate mode
+answering 6 as well, so the mode is not the whole story; the open candidates
+are a long exposure cycle stored in the board, the unit of `setExposureTime`,
+the buffer sizes `getImageData` expects, and the trigger setting.
+`tools/diagnose_c13016.py` isolates each of these on the bench (long poll,
+exposure as seconds, six buffer shapes, all modes) and restores the mode.
+
 ### Bench checklist (Windows, real hardware)
 
 1. Baseline: run the default settings once on a known source (e.g. 405 nm) and keep the `metrics_*.json`.
@@ -526,6 +578,8 @@ confirmed supported device.
    - *Framed serial replies*: watch the log for "timeout" on OBIS/CUBE/relay commands.
 4. Stop button during a 50-cycle capture: the run must end within one frame.
 5. Ava1/Hama2/Hama3/Hama4: one full run each to exercise the shared `wait_for_measurement` timeout and the in-place accumulators.
+
+6. C13016 (Hama6): install Hamamatsu's evaluation software, copy `MICRO_USB2_CLR.dll` next to the other DLLs, `pip install pythonnet`; Setup → Hama6 → Connect. Read the "codes" in the connect log line to learn the status-code polarity (initialize/open/setExposureTime/getImageData), then verify 288 pixels, the wavelength coefficients against the calibration sheet, a known line, and that Live View frames advance at short and long integration times (the driver detects new frames by timestamp).
 
 ### Known limitations left in v3.4
 

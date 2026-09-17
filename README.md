@@ -15,7 +15,7 @@ measurements with auto-exposure, and LSF / dispersion / resolution analysis.
 | Live plot | Full redraw every frame, layout solver on each draw, unbounded frame rate | Blitted trace over a cached background, 25 fps cap, hysteresis on autoscale |
 | Thread safety | Tk called from worker threads (crashes on some builds); no ownership of the spectrometer handle | One main-thread UI pump; single-owner acquisition guard; Stop aborts the device immediately |
 | Bugs fixed | EEPROM tab non-functional (`NameError`); Hg-Ar analysis crashed on every run; Check Resolution blank if opened before Live View; countdown ran 0.2 s per second; lasers not switched off on exit; settings not saved on exit; power values lost on resize | all fixed, with regression tests |
-| Hardware | Ava1, Hama2, Hama3, Hama4, MiniSpec | + **Hama5** (supported Hamamatsu TM/TG/RC mini-spectrometers over USB) and a **Simulated** backend |
+| Hardware | Ava1, Hama2, Hama3, Hama4, MiniSpec | + **Hama5** (supported Hamamatsu TM/TG/RC mini-spectrometers over USB), **Hama6** (Hamamatsu C13016 / C13985 micro-spectrometer circuit via its .NET DLL) and a **Simulated** backend |
 | Tests | none shipped | 58 unit/golden/orchestrator tests + 5 GUI smoke tests |
 
 ## Windows setup (operators)
@@ -97,6 +97,42 @@ Three further speedups change laser/serial timing and are **off by default**
 until validated on the bench with a reference spectrum: turn off only the lit
 source between lasers, pre-arm the 377 nm CUBE during the previous dark, and
 framed serial replies instead of fixed waits. They are saved with Settings.
+
+### Hama6: Hamamatsu C13016 evaluation circuit / C13985 module
+
+The C13016 drives the fingertip micro-spectrometer heads (C12880MA, C16767MA;
+288 pixels, 16-bit A/D, integration 11 µs to 1 s). Hamamatsu's PC software for
+it is `u-ApsSpecEvaluation.exe` with **`MICRO_USB2_CLR.dll`**, a .NET assembly
+(source: Hamamatsu technical note KACC9003E, table 2-9). SciLab loads that
+assembly through pythonnet.
+
+1. Install Hamamatsu's evaluation software for the C13016 (it installs the USB
+   driver; keep that driver, do not use Zadig here) and confirm
+   `u-ApsSpecEvaluation.exe` sees the board.
+2. Copy `MICRO_USB2_CLR.dll` from that installation into `spectrometers dll files/`
+   (or point the Setup tab's DLL path at it) and run `pip install pythonnet`.
+3. Setup → type **Hama6** → Connect.
+
+SciLab drives the assembly's own workflow (`MICRO_USB2_initialize`, module
+connection list, `open`, module properties, `setExposureTime` in seconds,
+`captureStart` / `getImageData` / `captureStop`) through .NET reflection, so
+its `ref` parameters and `Int64` handles work from Python. The exposure API
+works in microseconds (the driver reads the unit from the device's exposure
+limits), status code 0 means success, and the driver still checks each step by
+its effect and prints all codes in the connect log line and in any error. A failed
+Connect also writes the assembly's public API to
+`spectrometers/micro_usb2_api_dump.txt`; send that file with the error text
+when reporting a problem. If Connect works but Live View reports "No frame
+within ...", run the read-out experiment script and send its output:
+
+```powershell
+python tools/diagnose_c13016.py > c13016-diagnostics.txt
+```
+
+It takes about a minute and records how `getImageData` answers over time
+without a start, after `captureStart` (10 s), after `captureStop`, with the
+exposure given in seconds instead of microseconds, with each buffer size, and
+under each candidate capture mode; the board's mode is restored at the end.
 
 ## Files
 

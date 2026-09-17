@@ -14,3 +14,6 @@ Pillow>=10.0
 # on Windows; retain the working vendor driver for C10785/MiniSpec devices.
 pyusb>=1.2
 libusb-package>=1.0.26
+# Hama6 backend (Hamamatsu C13016 / C13985 micro-spectrometer circuit): the vendor
+# MICRO_USB2_CLR.dll is a .NET assembly, loaded through pythonnet on Windows.
+pythonnet>=3.0; sys_platform == "win32"

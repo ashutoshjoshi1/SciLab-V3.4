@@ -11,3 +11,6 @@ __pycache__/
 results/
 .write_test
 dcamapi_error.log
+
+# Hama6 (C13016) operator-specific runtime files
+spectrometers/micro_usb2_api_dump.txt

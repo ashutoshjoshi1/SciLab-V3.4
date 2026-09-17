@@ -17,7 +17,9 @@ DLLS_DIR = PROJECT_ROOT / "spectrometers dll files"
 # "Hama5" = Hamamatsu mini-spectrometers on the specu1b USB protocol (TM/TG/RC
 # series) via pyusb; no vendor DLL. "Simulated" is explicit opt-in only: Auto never
 # falls back to fake data.
-SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "Hama5", "MiniSpec", "Simulated"]
+# "Hama6" = Hamamatsu C13016 evaluation circuit / C13985 module via the vendor .NET
+# assembly MICRO_USB2_CLR.dll (pythonnet).
+SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "Hama5", "Hama6", "MiniSpec", "Simulated"]
 
 
 def normalize_spec_type(spec_type: Optional[str]) -> str:
@@ -42,6 +44,8 @@ def infer_spec_type_from_dll_path(dll_path: Optional[str]) -> Optional[str]:
         return "Hama2"
     if name == "dcamusb.dll":
         return "MiniSpec"
+    if name == "micro_usb2_clr.dll":
+        return "Hama6"
     return None
 
 
@@ -52,6 +56,7 @@ def suggest_default_dll_path(spec_type: Optional[str]) -> str:
         "Hama3": DLLS_DIR / "DcIcUSB.dll",
         "Hama4": DLLS_DIR / "HiasApi.dll",
         "MiniSpec": DLLS_DIR / "DCamUSB.dll",
+        "Hama6": DLLS_DIR / "MICRO_USB2_CLR.dll",  # not bundled: copy from Hamamatsu's u-ApsSpecEvaluation folder
     }
     path = suggestions.get(normalized)
     return str(path.resolve()) if path and path.exists() else ""
@@ -83,7 +88,7 @@ def _clean_text(value) -> str:
 
 # Default Auto probe order. Hama5 only claims Hamamatsu USB devices that are not
 # DCamUSB units, so it is safe to try last.
-AUTO_PROBE_ORDER = ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5"]
+AUTO_PROBE_ORDER = ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5", "Hama6"]
 
 # USB vendor IDs each backend can possibly talk to. In Auto mode a backend is not
 # even loaded when no device of its vendor is attached: each skipped probe saves a
@@ -97,6 +102,7 @@ BACKEND_USB_VENDORS: Dict[str, frozenset] = {
     "Hama4": frozenset({HAMAMATSU_VENDOR_ID}),
     "MiniSpec": frozenset({HAMAMATSU_VENDOR_ID}),
     "Hama5": frozenset({HAMAMATSU_VENDOR_ID}),
+    "Hama6": frozenset({HAMAMATSU_VENDOR_ID}),
 }
 
 
@@ -214,6 +220,9 @@ def _import_backend_class(spec_type: str, dll_path: Optional[str] = None):
     if normalized == "Hama5":
         module = importlib.import_module("spectrometers.hama5_spectrometer")
         return module.Hama5_Spectrometer
+    if normalized == "Hama6":
+        module = importlib.import_module("spectrometers.hama6_spectrometer")
+        return module.Hama6_Spectrometer
     if normalized == "Simulated":
         module = importlib.import_module("spectrometers.simulated_spectrometer")
         return module.SimulatedSpectrometer
@@ -385,6 +394,17 @@ def _discover_hama5(_dll_path: Optional[str]) -> List[Dict[str, str]]:
     return module.enumerate_devices()
 
 
+def _discover_hama6(dll_path: Optional[str]) -> List[Dict[str, str]]:
+    module = importlib.import_module("spectrometers.hama6_spectrometer")
+    resolved = _resolve_dll_path("Hama6", dll_path)
+    if not resolved or not Path(resolved).is_file():
+        raise RuntimeError(
+            f"{module.DLL_NAME} not found. If a C13016 / C13985 is attached, copy the DLL from Hamamatsu's "
+            f"u-ApsSpecEvaluation folder into '{DLLS_DIR.name}/' or point the DLL path at it."
+        )
+    return module.enumerate_devices(resolved)
+
+
 def _discover_simulated(_dll_path: Optional[str]) -> List[Dict[str, str]]:
     return [{"serial": "SIM-0001", "label": "SIM-0001 (Simulated spectrometer) [Simulated]", "type": "Simulated"}]
 
@@ -403,6 +423,8 @@ def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str
         return _discover_minispec(dll_path)
     if normalized == "Hama5":
         return _discover_hama5(dll_path)
+    if normalized == "Hama6":
+        return _discover_hama6(dll_path)
     if normalized == "Simulated":
         return _discover_simulated(dll_path)
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
