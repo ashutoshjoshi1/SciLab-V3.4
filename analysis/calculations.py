@@ -306,7 +306,14 @@ def compute_characterization(
         if lsf is None:
             summary_lines.append(f"Missing/invalid LSF for {tag} nm; skipped.")
             continue
-        wavelength_nm = float(config.laser_reference_map.get(tag, float(tag)))
+        reference_nm = config.laser_reference_map.get(tag)
+        if reference_nm is None:
+            try:
+                reference_nm = float(tag)
+            except ValueError:
+                summary_lines.append(f"No reference wavelength for '{tag}'; skipped.")
+                continue
+        wavelength_nm = float(reference_nm)
         peak_pixel = int(np.nanargmax(lsf))
         laser_lsfs.append(LsfSample(label=tag, wavelength_nm=wavelength_nm, pixel_index=peak_pixel, values=lsf))
         pixel_locations.append(peak_pixel)

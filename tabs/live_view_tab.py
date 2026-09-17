@@ -101,12 +101,11 @@ def build(app):
         # === Laser Controls Section ===
         laser_frame = ttk.LabelFrame(controls_grid, text="Laser Controls", padding=8)
         laser_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-        app.laser_vars = {}
 
-        # All lasers in ascending order
-        for tag in ["377", "405", "445", "488", "517", "532", "640", "685"]:
-            var = tk.BooleanVar(value=False)
-            label_text = f"{tag} nm"
+        # All sources in ascending order; variables are shared app-wide.
+        for tag in ["377", "405", "445", "488", "517", "532", "640", "685", "Hg_Ar"]:
+            var = app.laser_var(tag)
+            label_text = "Hg_Ar" if tag == "Hg_Ar" else f"{tag} nm"
             btn = ttk.Checkbutton(
                 laser_frame,
                 text=label_text,
@@ -114,18 +113,6 @@ def build(app):
                 command=lambda t=tag, v=var: app.toggle_laser(t, v.get())
             )
             btn.pack(anchor="w", pady=1)
-            app.laser_vars[tag] = var
-        
-        # Hg_Ar calibration lamp
-        var = tk.BooleanVar(value=False)
-        btn = ttk.Checkbutton(
-            laser_frame,
-            text="Hg_Ar",
-            variable=var,
-            command=lambda t="Hg_Ar", v=var: app.toggle_laser(t, v.get())
-        )
-        btn.pack(anchor="w", pady=1)
-        app.laser_vars["Hg_Ar"] = var
 
         ttk.Separator(laser_frame, orient="horizontal").pack(fill="x", pady=(6, 4))
         app.check_spec_btn = ttk.Button(
@@ -487,7 +474,7 @@ def build(app):
                 app.filterwheel_cmd_var.set("")
         
         # Bind the command execution to dropdown selection changes
-        app.filterwheel_cmd_var.trace('w', execute_filterwheel_command)
+        app.filterwheel_cmd_var.trace_add("write", execute_filterwheel_command)
         
         def toggle_headsensor():
             """Toggle Head Sensor on/off with automatic detection."""
@@ -513,27 +500,23 @@ def build(app):
                         
                         # === RESET BOTH FILTERWHEELS 1 AND 2 ===
                         # This ensures filterwheels are at home position (Position 1) on enable
-                        print("🔄 Resetting Filterwheel 1...")
+                        LOGGER.info("Resetting filterwheel 1...")
                         fw1_reset = app.filterwheel.reset_filterwheel(1)
                         if fw1_reset:
-                            print("✓ Filterwheel 1 reset successful")
-                            app.fw1_position = 1
-                            update_position_status(1, 1)
+                            LOGGER.info("Filterwheel 1 reset successful")
                         else:
-                            print("⚠️ Filterwheel 1 reset may have timed out (common behavior)")
-                            app.fw1_position = 1  # Assume success even on timeout
-                            update_position_status(1, 1)
-                        
-                        print("🔄 Resetting Filterwheel 2...")
+                            LOGGER.warning("Filterwheel 1 reset may have timed out (common behavior)")
+                        app.fw1_position = 1  # Assume home position even on timeout
+                        update_position_status(1, 1)
+
+                        LOGGER.info("Resetting filterwheel 2...")
                         fw2_reset = app.filterwheel.reset_filterwheel(2)
                         if fw2_reset:
-                            print("✓ Filterwheel 2 reset successful")
-                            app.fw2_position = 1
-                            update_position_status(2, 1)
+                            LOGGER.info("Filterwheel 2 reset successful")
                         else:
-                            print("⚠️ Filterwheel 2 reset may have timed out (common behavior)")
-                            app.fw2_position = 1  # Assume success even on timeout
-                            update_position_status(2, 1)
+                            LOGGER.warning("Filterwheel 2 reset may have timed out (common behavior)")
+                        app.fw2_position = 1  # Assume home position even on timeout
+                        update_position_status(2, 1)
                         
                         # Update final status
                         app.headsensor_status_label.config(
@@ -548,7 +531,7 @@ def build(app):
                         app.filterwheel_var.set(1)  # Default to Filter Wheel 1
                         app.filterwheel_cmd_var.set("")  # Clear command selection
                         
-                        print("✅ Head Sensor enabled with both filterwheels reset to Position 1")
+                        LOGGER.info("Head sensor enabled; both filterwheels reset to position 1")
                     else:
                         # Not a valid device or no response
                         app.headsensor_enabled.set(False)  # Turn off the switch
@@ -739,70 +722,11 @@ def build(app):
         app._live_plot_redraw_id = app.after(16, update)
 
 
-    def toggle_laser(self, tag: str, turn_on: bool):
-        try:
-            # make sure we use the latest COM port entries
-            app._update_ports_from_ui()
-            # open the right serial port lazily
-            app.lasers.ensure_open_for_tag(tag)
-
-            if tag in OBIS_LASER_MAP:
-                ch = OBIS_LASER_MAP[tag]
-                if turn_on:
-                    watts = float(app._get_power(tag))
-                    app.lasers.obis_set_power(ch, watts)
-                    app.lasers.obis_on(ch)
-                else:
-                    app.lasers.obis_off(ch)
-
-            elif tag == "377":
-                if turn_on:
-                    val = float(app._get_power(tag))
-                    mw = val * 1000.0 if val <= 0.3 else val
-                    app.lasers.cube_on(power_mw=mw)
-                else:
-                    app.lasers.cube_off()
-
-            elif tag == "517":
-                if turn_on:
-                    app.lasers.relay_on(2)
-                else:
-                    app.lasers.relay_off(2)
-
-            elif tag == "532":
-                if turn_on:
-                    app.lasers.relay_on(1)
-                else:
-                    app.lasers.relay_off(1)
-            
-            elif tag == "640":
-                ch = OBIS_LASER_MAP[tag]
-                if turn_on:
-                    watts = float(app._get_power(tag))
-                    app.lasers.obis_set_power(ch, watts)
-                    app.lasers.obis_on(ch)
-                else:
-                    app.lasers.obis_off(ch)
-            
-            elif tag == "685":
-                # New 685 nm laser on OBIS
-                ch = OBIS_LASER_MAP[tag]
-                if turn_on:
-                    watts = float(app._get_power(tag))
-                    app.lasers.obis_set_power(ch, watts)
-                    app.lasers.obis_on(ch)
-                else:
-                    app.lasers.obis_off(ch)
-
-        except Exception as e:
-            app._post_error(f"Laser {tag}", e)
-
-
     # Bind live-view helpers before building the UI so button commands capture the correct callables.
+    # (toggle_laser lives on SpectroApp so it is available before this tab is built.)
     app.apply_it = apply_it
     app.start_live = start_live
     app.stop_live = stop_live
-    app.toggle_laser = MethodType(toggle_laser, app)
     app._update_live_plot = MethodType(_update_live_plot, app)
     app._live_loop = _live_loop
 

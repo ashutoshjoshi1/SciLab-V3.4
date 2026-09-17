@@ -1,0 +1,29 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [
+    "spectrometers/spec_hama2",
+    "spectrometers dll files",
+    "results",
+    ".venv",
+]
+
+[tool.ruff.lint]
+# Keep the rule set small and high-signal: real errors, unused names, pyflakes.
+select = ["E", "F", "W", "B006", "B008"]
+ignore = [
+    "E501",  # line length handled loosely in the large vendor-facing drivers
+    "E402",  # imports after sys.path manipulation in tests/tools
+    "E731",  # lambda assignments are used deliberately for Tk callbacks
+    "E741",  # ambiguous variable names in the scientific code (l, I) are conventional there
+]
+
+[tool.ruff.lint.per-file-ignores]
+"spectrometers/*.py" = ["F401", "F841", "E722", "E711", "E712", "F811", "W605"]
