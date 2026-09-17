@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import shutil
@@ -16,20 +17,10 @@ import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-try:
-    import pandas as pd
-except Exception:  # pragma: no cover - runtime dependency on target machine
-    pd = None
-
-try:
-    from PIL import Image, ImageTk
-except Exception:  # pragma: no cover
-    Image = None
-    ImageTk = None
-
 from domain.measurement import MeasurementData
 from hardware.controllers import FilterWheelController, LaserController
-from services.analysis_service import AnalysisService
+from services.acquisition_guard import AcquisitionGuard
+from tabs.ui_pump import ThrottledRedraw, UiPump
 
 try:
     from stage.stage_controller import StageController
@@ -39,6 +30,20 @@ except ImportError:
 
 LOGGER = logging.getLogger(__name__)
 
+# Analysis-tab previews retained before the oldest run tab is destroyed. Each run
+# holds ~10 MB of PhotoImage data, which used to accumulate for the whole session.
+MAX_ANALYSIS_RUN_TABS = 5
+PREVIEW_MAX_SIZE = (720, 440)
+
+
+def _pandas():
+    """pandas is only needed to save/load measurement CSVs; import it on first use."""
+    try:
+        import pandas as pd
+    except Exception as exc:  # pragma: no cover - runtime dependency on target machine
+        raise RuntimeError("pandas is required for this operation.") from exc
+    return pd
+
 
 def get_resource_path(relative_path: str) -> str:
     """Return a bundled-resource path that also works for frozen apps."""
@@ -46,19 +51,25 @@ def get_resource_path(relative_path: str) -> str:
     return str((base_dir / relative_path).resolve())
 
 
-def get_writable_path(relative_path: str) -> str:
-    """Return a writable path near the app, falling back to the user home."""
+@functools.lru_cache(maxsize=1)
+def _writable_base() -> Path:
+    """Directory the app may write to: next to the code, else under the user's home."""
     preferred_base = Path(__file__).resolve().parent
     try:
         preferred_base.mkdir(parents=True, exist_ok=True)
         test_path = preferred_base / ".write_test"
         test_path.write_text("ok", encoding="utf-8")
         test_path.unlink(missing_ok=True)
-        return str((preferred_base / relative_path).resolve())
+        return preferred_base
     except Exception:
         fallback_base = Path.home() / ".head-scilab"
         fallback_base.mkdir(parents=True, exist_ok=True)
-        return str((fallback_base / relative_path).resolve())
+        return fallback_base
+
+
+def get_writable_path(relative_path: str) -> str:
+    """Return a writable path near the app, falling back to the user home."""
+    return str((_writable_base() / relative_path).resolve())
 
 
 def _clean_text(value: object) -> str:
@@ -110,13 +121,16 @@ class SpectroApp(tk.Tk):
 
     IT_MIN = 0.2
     IT_MAX = 3000.0
-    IT_STEP_UP = 0.3
-    IT_STEP_DOWN = 0.1
-    MAX_IT_ADJUST_ITERS = 1000
+    # Proportional auto-IT converges in 2-5 frames; 12 leaves room for a noisy source.
+    MAX_IT_ADJUST_ITERS = 12
     SAT_THRESH = 65400
+    # Bench-validated speed options, persisted in the settings file (see setup tab).
+    DEFAULT_MEASUREMENT_FLAGS = {"smart_source_off": False, "cube_prearm": False, "framed_serial_reads": False}
 
-    SETTINGS_FILE = get_writable_path("spectro_gui_settings.json")
-    RESULTS_ROOT = Path(get_writable_path("results"))
+    # Resolved on first instantiation (not at import time, which used to touch the
+    # filesystem twice before the splash even appeared). Tests may override these.
+    SETTINGS_FILE: Optional[str] = None
+    RESULTS_ROOT: Optional[Path] = None
 
     def _configure_initial_geometry(self) -> None:
         screen_width = max(800, self.winfo_screenwidth())
@@ -138,6 +152,11 @@ class SpectroApp(tk.Tk):
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
         super().__init__()
 
+        if self.SETTINGS_FILE is None:
+            self.SETTINGS_FILE = get_writable_path("spectro_gui_settings.json")
+        if self.RESULTS_ROOT is None:
+            self.RESULTS_ROOT = Path(get_writable_path("results"))
+
         self.title("SciGlob Spectrometer Characterization System")
         self._configure_initial_geometry()
 
@@ -150,6 +169,14 @@ class SpectroApp(tk.Tk):
         from tabs.theme import apply_theme
         apply_theme(self)
 
+        # Every worker -> UI hand-off goes through this queue; it is drained by
+        # one after() loop on the Tk thread, so no other thread ever calls Tk.
+        self.pump = UiPump(self)
+        self.pump.start()
+        # Single-owner token for the spectrometer handle (Live View, Measurement,
+        # Check Resolution, Check Spectrometer, Apply IT, EEPROM).
+        self.acq = AcquisitionGuard()
+
         self.npix = 2048
         self.sn = "Unknown"
         self.spec = None
@@ -161,10 +188,10 @@ class SpectroApp(tk.Tk):
             com_ports=dict(self.DEFAULT_COM_PORTS),
             laser_power=dict(self.DEFAULT_LASER_POWERS),
         )
-        self.analysis_service = AnalysisService()
         self.data = MeasurementData(npix=self.npix, serial_number=self.sn)
         self.available_lasers = list(self.DEFAULT_ALL_LASERS)
         self.laser_configs = self._build_default_laser_configs()
+        self.measurement_flags: Dict[str, bool] = dict(self.DEFAULT_MEASUREMENT_FLAGS)
 
         self.lasers = LaserController(self.hw.com_ports)
         self.filterwheel = FilterWheelController(self.hw.com_ports["HEADSENSOR"])
@@ -182,10 +209,6 @@ class SpectroApp(tk.Tk):
         self._pending_it = None
         self._it_updating = False
         self.it_history: List[Tuple[float, float]] = []
-        self._pending_live_plot = None
-        self._live_plot_redraw_id = None
-        self._pending_measurement_plot = None
-        self._measurement_plot_redraw_id = None
 
         self.analysis_artifacts: List = []
         self.analysis_summary_lines: List[str] = []
@@ -195,10 +218,14 @@ class SpectroApp(tk.Tk):
         self._latest_results_dir: Optional[Path] = None
         self._latest_csv_path: Optional[Path] = None
         self._latest_results_timestamp: Optional[str] = None
-        self._analysis_images: List[object] = []
         self._analysis_metrics = None
-        self._auto_it_redraw_id = None
-        self._pending_auto_it_plot = None
+
+        from tabs.ui_utils import StatusBar
+
+        # Persistent status strip (messages, progress, toasts) replaces the ad-hoc
+        # window-title messages and most informational pop-ups.
+        self.status = StatusBar(self)
+        self.status.pack(fill="x", side="bottom")
 
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=6, pady=(6, 4))
@@ -231,6 +258,9 @@ class SpectroApp(tk.Tk):
             str(self.check_res_tab): self._build_check_resolution_tab,
             str(self.eeprom_tab): self._build_eeprom_tab,
         }
+        # One-shot hooks run the first time an already-built tab is shown (e.g. the
+        # Measurements plot is created only when the tab is first opened).
+        self._tab_show_hooks: Dict[str, object] = getattr(self, "_tab_show_hooks", {})
         self._built_tabs = {str(self.setup_tab), str(self.measure_tab), str(self.analysis_tab)}
         self._current_tab_id = str(self.setup_tab)
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -241,7 +271,71 @@ class SpectroApp(tk.Tk):
             except Exception:
                 LOGGER.exception("Failed to load saved settings")
 
+        self._bind_shortcuts()
+        self._add_tooltips()
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
+        self.status.set("Ready. Connect a spectrometer in Setup (Ctrl+1) to begin.")
+
+    # ------------------------------------------------------------------
+    # Keyboard shortcuts / tooltips
+    # ------------------------------------------------------------------
+
+    def _bind_shortcuts(self) -> None:
+        tabs = [self.setup_tab, self.live_tab, self.measure_tab, self.check_res_tab, self.analysis_tab, self.eeprom_tab]
+        for index, tab in enumerate(tabs):
+            self.bind_all(f"<Control-Key-{index + 1}>", lambda _event, t=tab: self.nb.select(t))
+        self.bind_all("<F5>", lambda _event: self._shortcut(getattr(self, "refresh_ports", None)))
+        self.bind_all("<Control-s>", lambda _event: self._shortcut(self._save_settings_quietly))
+        self.bind_all("<Control-l>", lambda _event: self._shortcut(self._toggle_live))
+
+    def _shortcut(self, action) -> str:
+        if callable(action):
+            try:
+                action()
+            except Exception as exc:
+                self._post_error("Shortcut", exc)
+        return "break"
+
+    def _save_settings_quietly(self) -> None:
+        saver = getattr(self, "save_settings_silently", None)
+        if callable(saver):
+            saver()
+            self.status.toast("Settings saved")
+
+    def _toggle_live(self) -> None:
+        if self.live_running.is_set():
+            self.stop_live()
+        else:
+            self.nb.select(self.live_tab)
+            starter = getattr(self, "start_live", None)
+            if callable(starter):
+                starter()
+
+    def _add_tooltips(self) -> None:
+        from tabs.ui_utils import Tooltip
+
+        tips = {
+            "dll_entry": "Vendor DLL for DLL-backed backends (Ava1, Hama2/3/4, MiniSpec). Leave empty to use the "
+                         "bundled default; not used by Hama5 (USB) or the Simulated backend.",
+            "auto_it_entry": "Starting integration time (ms) for the auto-exposure search. Leave empty to use the "
+                             "per-source defaults; the controller then jumps to the target band in a few frames.",
+            "spec_type_combo": "Auto probes each hardware backend in turn. Pick Simulated to exercise the whole "
+                               "workflow without instruments.",
+        }
+        for attribute, text in tips.items():
+            widget = getattr(self, attribute, None)
+            if widget is not None:
+                Tooltip(widget, text)
+
+    def laser_tags(self) -> List[str]:
+        """Configured sources in ascending wavelength order, Hg-Ar lamp last."""
+        def _key(tag: str):
+            try:
+                return (0, float(tag))
+            except ValueError:
+                return (1, tag)
+        tags = set(self.laser_configs) | {"Hg_Ar"}
+        return sorted(tags, key=_key)
 
     def _build_live_view_tab(self) -> None:
         from tabs import live_view_tab
@@ -270,7 +364,24 @@ class SpectroApp(tk.Tk):
                 except Exception:
                     LOGGER.exception("Failed to build tab %s", selected)
                 self._built_tabs.add(selected)
+        hook = self._tab_show_hooks.pop(selected, None)
+        if hook is not None:
+            try:
+                hook()
+            except Exception:
+                LOGGER.exception("Tab show hook failed for %s", selected)
         self._current_tab_id = selected
+
+    @property
+    def analysis_service(self):
+        """Created on first use: importing the analysis stack costs ~2 s and is not needed at startup."""
+        service = self.__dict__.get("_analysis_service")
+        if service is None:
+            from services.analysis_service import AnalysisService
+
+            service = AnalysisService()
+            self._analysis_service = service
+        return service
 
     def _is_tab_visible(self, tab_widget) -> bool:
         try:
@@ -291,12 +402,37 @@ class SpectroApp(tk.Tk):
         return configs
 
     def _post_error(self, title: str, ex: Exception) -> None:
+        """Log an exception and show it to the operator. Safe from any thread."""
         tb = "".join(traceback.format_exception(type(ex), ex, ex.__traceback__))
         LOGGER.error("[%s] %s\n%s", title, ex, tb)
+        self.pump.post(messagebox.showerror, title, str(ex))
+
+    # ------------------------------------------------------------------
+    # Spectrometer ownership. Every Start path claims the device first so two
+    # threads can never drive one handle; Stop asks the backend to wake any
+    # blocked wait immediately.
+    # ------------------------------------------------------------------
+
+    def claim_spectrometer(self, owner: str, title: Optional[str] = None) -> bool:
+        if not self.spec:
+            messagebox.showwarning(title or owner, "No spectrometer connected.")
+            return False
+        if not self.acq.try_acquire(owner):
+            messagebox.showwarning(title or owner, self.acq.busy_reason() or "Spectrometer is busy.")
+            return False
+        return True
+
+    def release_spectrometer(self, owner: str) -> None:
+        self.acq.release(owner)
+
+    def request_spectrometer_stop(self) -> None:
+        spec = self.spec
+        if spec is None:
+            return
         try:
-            self.after(0, lambda: messagebox.showerror(title, str(ex)))
+            spec.request_stop()
         except Exception:
-            pass
+            LOGGER.warning("Spectrometer stop request failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Defaults that lazily built tabs may override. Having them on the class
@@ -306,9 +442,11 @@ class SpectroApp(tk.Tk):
 
     def stop_live(self) -> None:
         self.live_running.clear()
+        self.request_spectrometer_stop()
 
     def stop_measure(self) -> None:
         self.measure_running.clear()
+        self.request_spectrometer_stop()
 
     def laser_var(self, tag: str) -> tk.BooleanVar:
         """Return the shared BooleanVar for a source, creating it on first use."""
@@ -319,6 +457,16 @@ class SpectroApp(tk.Tk):
         return var
 
     RELAY_CHANNEL_MAP = {"517": 2, "532": 1, "Hg_Ar": 4}
+
+    def apply_measurement_flags(self) -> None:
+        """Push the persisted bench options to the objects that consume them."""
+        framed = bool(self.measurement_flags.get("framed_serial_reads", False))
+        for controller in (self.lasers, getattr(self, "_hardware_lasers", None)):
+            if controller is not None and hasattr(controller, "framed_reads"):
+                controller.framed_reads = framed
+        enabled = [name for name, value in self.measurement_flags.items() if value]
+        if enabled:
+            LOGGER.info("Bench-validated measurement options enabled: %s", ", ".join(enabled))
 
     def install_laser_controller_for_backend(self, backend_type: Optional[str]) -> None:
         """Pair the simulated spectrometer with the simulated light bench; real serial lasers otherwise."""
@@ -362,18 +510,38 @@ class SpectroApp(tk.Tk):
             raise RuntimeError(f"Unsupported source '{tag}'.")
 
     def toggle_laser(self, tag: str, turn_on: bool) -> None:
-        """Checkbox handler shared by Live View and Check Resolution."""
+        """Checkbox handler shared by Live View and Check Resolution.
+
+        The serial commands (up to ~6 s of fixed waits for the CUBE) run on a
+        worker thread; the checkbox is reverted if the device refuses.
+        """
+        from tabs.ui_utils import run_in_worker
+
         try:
-            self._update_ports_from_ui()
-            self.set_source_state(tag, turn_on)
+            self._update_ports_from_ui()  # reads Tk entries: main thread only
         except Exception as exc:
+            self._post_error(f"Laser {tag}", exc)
+            return
+
+        def _revert(exc):
             try:
                 self.laser_var(tag).set(not turn_on)
             except Exception:
                 pass
+            self.status.progress_end(f"{tag}: switching failed", kind="error")
             self._post_error(f"Laser {tag}", exc)
 
+        def _done(_result):
+            self.status.progress_end(f"{tag} nm {'on' if turn_on else 'off'}" if tag != "Hg_Ar" else f"Hg-Ar lamp {'on' if turn_on else 'off'}",
+                                     kind="success")
+
+        self.status.progress_begin(f"Switching {tag} {'on' if turn_on else 'off'}…")
+        run_in_worker(self, lambda: self.set_source_state(tag, turn_on), on_done=_done, on_error=_revert, name=f"laser-{tag}")
+
     def _on_closing(self) -> None:
+        # Stop marshalling first: nothing posted from a worker may touch Tk
+        # once teardown has started.
+        self.pump.stop()
         handler = getattr(self, "on_close", None)
         if callable(handler):
             try:
@@ -389,6 +557,9 @@ class SpectroApp(tk.Tk):
             if hasattr(self, "live_ax"):
                 self.live_ax.relim()
                 self.live_ax.autoscale_view()
+            blit = getattr(self, "_live_blit", None)
+            if blit is not None:
+                blit.request_full()
             if hasattr(self, "live_canvas"):
                 self.live_canvas.draw_idle()
         except Exception as exc:
@@ -414,7 +585,6 @@ class SpectroApp(tk.Tk):
         """Reset current-run analysis state. Previous run tabs are preserved."""
         self.analysis_artifacts = []
         self.analysis_summary_lines = []
-        self._analysis_images = []
         self._analysis_metrics = None
         self._latest_results_dir = None
         self._latest_csv_path = None
@@ -433,8 +603,6 @@ class SpectroApp(tk.Tk):
     def save_measurement_data(self) -> Optional[str]:
         if not self.data.rows:
             return None
-        if pd is None:
-            raise RuntimeError("pandas is required to save measurement data.")
 
         output_dir = self._ensure_results_dir()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -447,11 +615,8 @@ class SpectroApp(tk.Tk):
 
     def run_analysis_and_save_plots(self, csv_path: Optional[str] = None):
         """Run comprehensive analysis using the analysis service and save all plots."""
-        if pd is None:
-            raise RuntimeError("pandas is required to run analysis.")
-
         if csv_path:
-            df = pd.read_csv(csv_path)
+            df = _pandas().read_csv(csv_path)
             results_dir = Path(csv_path).resolve().parent
             self._latest_csv_path = Path(csv_path).resolve()
             self._latest_results_dir = results_dir
@@ -498,10 +663,12 @@ class SpectroApp(tk.Tk):
         self._analysis_metrics = result.metrics if result else None
         self._latest_results_timestamp = timestamp
 
-        if hasattr(self, "export_plots_btn"):
-            self.export_plots_btn.state(["!disabled"] if self.analysis_artifacts else ["disabled"])
-        if hasattr(self, "open_folder_btn"):
-            self.open_folder_btn.state(["!disabled"] if self.analysis_artifacts else ["disabled"])
+        # This runs on the measurement worker; widget state changes go through the pump.
+        button_state = ["!disabled"] if self.analysis_artifacts else ["disabled"]
+        for name in ("export_plots_btn", "open_folder_btn"):
+            button = getattr(self, name, None)
+            if button is not None:
+                self.pump.post(button.state, button_state)
 
         paths = [getattr(art, "path", "") for art in self.analysis_artifacts]
         LOGGER.info("Analysis complete. %d plots generated to: %s", len(paths), plots_dir)
@@ -513,13 +680,7 @@ class SpectroApp(tk.Tk):
 
     def run_check_spectrometer(self) -> None:
         """Launch Check Spectrometer in a background thread."""
-        if not self.spec:
-            messagebox.showwarning("Check Spectrometer", "No spectrometer connected.")
-            return
-        if self.measure_running.is_set():
-            messagebox.showwarning(
-                "Check Spectrometer", "A measurement is already running. Please stop it first."
-            )
+        if not self.claim_spectrometer("Check Spectrometer"):
             return
 
         btn = getattr(self, "check_spec_btn", None)
@@ -556,7 +717,7 @@ class SpectroApp(tk.Tk):
                 summary_lines = [
                     "=== Check Spectrometer Results ===",
                     f"  Auto-IT (settled)    : {result.auto_it_ms:.4f} ms",
-                    f"  Measure IT           : 3000.0 ms",
+                    "  Measure IT           : 3000.0 ms",
                     f"  Center pixel (xcen)  : {result.xcen:.2f}",
                     f"  Width (resolfit)     : {result.resolfit:.3f} px",
                     f"  Shape exponent (n)   : {result.shape_exponent:.4f}",
@@ -575,81 +736,93 @@ class SpectroApp(tk.Tk):
                     self._latest_results_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     self.refresh_analysis_view()
 
-                self.after(0, _show)
+                self.pump.post(_show)
 
             except Exception as exc:
                 self._post_error("Check Spectrometer", exc)
             finally:
+                self.release_spectrometer("Check Spectrometer")
                 if btn:
-                    self.after(0, lambda: btn.configure(state="normal"))
+                    self.pump.post(btn.configure, {"state": "normal"})
 
-        threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(target=_run, daemon=True, name="check-spectrometer").start()
+
+    def _start_background_analysis(self, csv_path: str) -> bool:
+        """Run the analysis pipeline on a worker and show the result when it lands."""
+        worker = getattr(self, "_analysis_thread", None)
+        if worker is not None and worker.is_alive():
+            messagebox.showinfo("Analysis", "An analysis is already running.")
+            return False
+
+        def _work():
+            try:
+                self.run_analysis_and_save_plots(csv_path)
+            except Exception as exc:
+                self._post_error("Analysis", exc)
+                return
+            self.pump.post(self.refresh_analysis_view)
+
+        self._analysis_thread = threading.Thread(target=_work, daemon=True, name="analysis")
+        self._analysis_thread.start()
+        return True
 
     def refresh_analysis_view(self):
         """Add a new run tab to the analysis notebook with saved plot previews."""
         if not self.analysis_artifacts:
+            csv_path = None
             if self._latest_csv_path and Path(self._latest_csv_path).is_file():
-                self.run_analysis_and_save_plots(str(self._latest_csv_path))
+                csv_path = str(self._latest_csv_path)
             elif self.data.rows:
                 csv_path = self.save_measurement_data()
-                if csv_path:
-                    self.run_analysis_and_save_plots(csv_path)
-            else:
+            if not csv_path:
                 messagebox.showwarning("Analysis", "No measurement data available.")
                 return
-
-        if not self.analysis_artifacts:
-            messagebox.showwarning("Analysis", "No analysis plots were generated.")
+            if getattr(self, "_analysis_view_pending", False):
+                # The background run finished with nothing to show.
+                self._analysis_view_pending = False
+                messagebox.showwarning("Analysis", "No analysis plots were generated.")
+                return
+            # Several seconds of matplotlib rendering: never on the Tk thread.
+            self._analysis_view_pending = self._start_background_analysis(csv_path)
             return
+        self._analysis_view_pending = False
 
         notebook = getattr(self, "analysis_measurements_notebook", None)
         if notebook is None:
             return
 
+        from tabs.theme import Colors, Fonts
+        from tabs.ui_utils import ScrollableFrame
+
         self.analysis_measurement_counter += 1
         timestamp = getattr(self, "_latest_results_timestamp", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
         tab_name = f"Run #{self.analysis_measurement_counter} ({timestamp})"
 
-        # Remove welcome tab if it exists
-        if hasattr(self, "analysis_welcome_tab"):
+        # Remove welcome tab if it exists (destroy, not just forget, so Tk frees it)
+        welcome = getattr(self, "analysis_welcome_tab", None)
+        if welcome is not None:
             try:
-                notebook.forget(self.analysis_welcome_tab)
+                notebook.forget(welcome)
+                welcome.destroy()
             except Exception:
                 pass
+            self.analysis_welcome_tab = None
+
+        # Bound memory: each run keeps ~10 MB of preview images alive.
+        self._prune_analysis_tabs(notebook, keep=MAX_ANALYSIS_RUN_TABS - 1)
 
         # Create new tab for this measurement run
         measurement_tab = ttk.Frame(notebook)
         notebook.add(measurement_tab, text=tab_name)
 
-        # Scrollable canvas for plots
-        canvas_container = tk.Canvas(measurement_tab, highlightthickness=0)
-        scrollbar_y = ttk.Scrollbar(measurement_tab, orient="vertical", command=canvas_container.yview)
-        scrollbar_x = ttk.Scrollbar(measurement_tab, orient="horizontal", command=canvas_container.xview)
-        scrollable_frame = ttk.Frame(canvas_container)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas_container.configure(scrollregion=canvas_container.bbox("all")),
-        )
-        canvas_container.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas_container.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
-
-        def _on_mousewheel(event):
-            canvas_container.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        canvas_container.bind("<Enter>", lambda e: canvas_container.bind_all("<MouseWheel>", _on_mousewheel))
-        canvas_container.bind("<Leave>", lambda e: canvas_container.unbind_all("<MouseWheel>"))
-
-        canvas_container.grid(row=0, column=0, sticky="nsew")
-        scrollbar_y.grid(row=0, column=1, sticky="ns")
-        scrollbar_x.grid(row=1, column=0, sticky="ew")
-        measurement_tab.grid_rowconfigure(0, weight=1)
-        measurement_tab.grid_columnconfigure(0, weight=1)
+        scroll = ScrollableFrame(measurement_tab, x_scroll=True, y_scroll=True, background=Colors.BG_PRIMARY)
+        scroll.pack(fill="both", expand=True)
+        scrollable_frame = scroll.content
 
         # Arrange plots in a 2-column grid
         num_plots = len(self.analysis_artifacts)
         cols = 2 if num_plots > 1 else 1
-        tab_images = []
+        preview_targets = []
 
         for idx, artifact in enumerate(self.analysis_artifacts):
             row = idx // cols
@@ -666,7 +839,7 @@ class SpectroApp(tk.Tk):
             ttk.Label(
                 actions_frame,
                 text=art_path.name if art_path.name else "Plot file unavailable",
-                foreground="#6c757d",
+                style="Secondary.TLabel",
             ).pack(side="left")
             ttk.Button(
                 actions_frame,
@@ -675,17 +848,10 @@ class SpectroApp(tk.Tk):
                 width=12,
             ).pack(side="right")
 
-            preview_label = ttk.Label(plot_frame, text="Preview unavailable", anchor="center")
+            preview_label = ttk.Label(plot_frame, text="Loading preview…", anchor="center", style="Muted.TLabel")
             preview_label.pack(fill="both", expand=True, padx=5, pady=5)
-
-            preview = self._build_analysis_preview_image(art_path)
-            if preview is not None:
-                preview_label.configure(image=preview, text="")
-                preview_label.image = preview
-                preview_label.bind("<Button-1>", lambda _event, p=art_path: self._open_path_with_default_app(p, "Analysis Plot"))
-                tab_images.append(preview)
-            elif art_path.is_file():
-                preview_label.configure(text=f"Saved plot:\n{art_path.name}")
+            if art_path.is_file():
+                preview_targets.append((preview_label, art_path))
             else:
                 preview_label.configure(text="Plot file missing.")
 
@@ -699,8 +865,8 @@ class SpectroApp(tk.Tk):
 
         summary_text_widget = tk.Text(
             summary_frame, height=10, wrap="word",
-            font=("TkDefaultFont", 9), relief="flat",
-            bg="#f8f9fa", fg="#212529", padx=10, pady=10,
+            font=Fonts.MONO_SMALL, relief="flat",
+            bg=Colors.BG_PRIMARY, fg=Colors.TEXT_PRIMARY, padx=10, pady=10,
         )
         summary_text = "\n".join(self.analysis_summary_lines) if self.analysis_summary_lines else "No summary available."
         summary_text_widget.insert("1.0", summary_text)
@@ -708,12 +874,15 @@ class SpectroApp(tk.Tk):
         summary_text_widget.pack(fill="both", expand=True)
 
         # Store tab reference
-        self.analysis_measurement_tabs[tab_name] = {
+        record = {
             "tab": measurement_tab,
             "timestamp": timestamp,
             "csv_path": str(self._latest_csv_path) if self._latest_csv_path else None,
-            "images": tab_images,
+            "images": [],
         }
+        self.analysis_measurement_tabs[tab_name] = record
+        # Decode + thumbnail the PNGs on a worker; only the PhotoImage creation touches Tk.
+        self._load_analysis_previews_async(preview_targets, record)
 
         if hasattr(self, "export_plots_btn"):
             self.export_plots_btn.state(["!disabled"])
@@ -774,18 +943,70 @@ class SpectroApp(tk.Tk):
             return
         self._open_path_with_default_app(folder, "Results Folder")
 
-    def _build_analysis_preview_image(self, image_path: Path):
-        if Image is None or ImageTk is None or not image_path.is_file():
-            return None
-        try:
-            with Image.open(image_path) as raw_image:
-                preview = raw_image.copy()
+    def _prune_analysis_tabs(self, notebook, keep: int) -> None:
+        """Destroy the oldest run tabs (and release their images) beyond ``keep``."""
+        while len(self.analysis_measurement_tabs) > max(0, keep):
+            oldest_name = next(iter(self.analysis_measurement_tabs))
+            record = self.analysis_measurement_tabs.pop(oldest_name)
+            record["images"] = []
+            widget = record.get("tab")
+            if widget is not None:
+                try:
+                    notebook.forget(widget)
+                except Exception:
+                    pass
+                try:
+                    widget.destroy()
+                except Exception:
+                    pass
+            LOGGER.info("Released analysis tab %s to bound memory use", oldest_name)
+
+    def _load_analysis_previews_async(self, targets, record) -> None:
+        """Decode and thumbnail plot PNGs off the Tk thread, then attach them via the pump."""
+        if not targets:
+            return
+
+        def _decode():
+            try:
+                from PIL import Image
+            except Exception as exc:
+                LOGGER.warning("Pillow unavailable; analysis previews disabled: %s", exc)
+                return
             resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
-            preview.thumbnail((720, 440), resampling)
-            return ImageTk.PhotoImage(preview)
+            decoded = []
+            for label, path in targets:
+                try:
+                    with Image.open(path) as raw_image:
+                        preview = raw_image.convert("RGB")
+                    preview.thumbnail(PREVIEW_MAX_SIZE, resampling)
+                    decoded.append((label, path, preview))
+                except Exception:
+                    LOGGER.exception("Unable to build analysis preview for %s", path)
+                    decoded.append((label, path, None))
+            self.pump.post(self._attach_analysis_previews, decoded, record)
+
+        threading.Thread(target=_decode, daemon=True, name="analysis-previews").start()
+
+    def _attach_analysis_previews(self, decoded, record) -> None:
+        """Main thread: turn decoded previews into PhotoImages on their labels."""
+        try:
+            from PIL import ImageTk
         except Exception:
-            LOGGER.exception("Unable to build analysis preview for %s", image_path)
-            return None
+            return
+        for label, path, preview in decoded:
+            try:
+                if not label.winfo_exists():
+                    continue
+                if preview is None:
+                    label.configure(text=f"Saved plot:\n{path.name}")
+                    continue
+                photo = ImageTk.PhotoImage(preview, master=self)
+                label.configure(image=photo, text="")
+                label.image = photo
+                label.bind("<Button-1>", lambda _event, p=path: self._open_path_with_default_app(p, "Analysis Plot"))
+                record["images"].append(photo)
+            except tk.TclError:
+                continue
 
     def _open_path_with_default_app(self, path: Path, title: str) -> None:
         if not path.exists():
@@ -801,49 +1022,29 @@ class SpectroApp(tk.Tk):
         except Exception as exc:
             self._post_error(title, exc)
 
+    def _render_auto_it_plot(self, payload) -> None:
+        """Main thread: draw the latest Auto-IT frame on the Measurements plot."""
+        plot_tag, plot_spectrum, plot_it_ms, plot_peak = payload
+        xs = np.arange(len(plot_spectrum))
+        self.meas_sig_line.set_data(xs, plot_spectrum)
+        self.meas_ax.set_xlim(0, max(10, len(plot_spectrum) - 1))
+        self.meas_ax.set_ylim(0, 65000)
+        self.meas_ax.set_title(
+            f"Auto-IT: {plot_tag} nm | IT={plot_it_ms:.2f} ms | Peak={plot_peak:.0f}",
+            fontsize=13, fontweight="bold", pad=8,
+        )
+
     def _update_auto_it_plot(self, tag, spectrum, it_ms, peak):
-        """Update measurement plot during Auto-IT adjustment without flooding the UI thread."""
-        self._pending_auto_it_plot = (str(tag), np.asarray(spectrum, dtype=float), float(it_ms), float(peak))
-        if self._auto_it_redraw_id is not None:
-            return
-
-        def _flush_auto_it_plot():
-            self._auto_it_redraw_id = None
-            pending = self._pending_auto_it_plot
-            if pending is None:
-                return
-            plot_tag, plot_spectrum, plot_it_ms, plot_peak = pending
-            try:
-                xs = np.arange(len(plot_spectrum))
-                self.meas_sig_line.set_data(xs, plot_spectrum)
-                self.meas_ax.set_xlim(0, max(10, len(plot_spectrum) - 1))
-                self.meas_ax.set_ylim(0, 65000)
-                self.meas_ax.set_title(
-                    f"Auto-IT: {plot_tag} nm | IT={plot_it_ms:.2f} ms | Peak={plot_peak:.0f}",
-                    fontsize=13, fontweight="bold", pad=8,
-                )
-
-                # Auto-IT inset is currently disabled; skip inset updates
-                if False and getattr(self, "meas_inset", None) is not None:
-                    steps = list(getattr(self, "it_history", []))
-                    if steps:
-                        st = np.arange(len(steps))
-                        peaks = [value for (_, value) in steps]
-                        its = [value for (value, _) in steps]
-                        self.inset_peak_line.set_data(st, peaks)
-                        self.inset_it_line.set_data(st, its)
-                        self.meas_inset.set_xlim(-0.5, max(0.5, len(st) - 0.5))
-                        self.meas_inset.relim()
-                        self.meas_inset.autoscale_view()
-                        self.meas_inset2.relim()
-                        self.meas_inset2.autoscale_view()
-
-                if self._is_tab_visible(self.measure_tab):
-                    self.meas_canvas.draw_idle()
-            except Exception:
-                LOGGER.debug("Auto-IT plot update skipped (UI not ready)")
-
-        self._auto_it_redraw_id = self.after(16, _flush_auto_it_plot)
-
-    def _finalize_measurement_run(self):
-        return None
+        """Worker thread: queue the newest Auto-IT frame; at most one redraw per pump tick."""
+        redraw = getattr(self, "_auto_it_redraw", None)
+        if redraw is None:
+            if getattr(self, "meas_canvas", None) is None:
+                return  # Measurements plot not built yet
+            redraw = ThrottledRedraw(
+                self.pump,
+                self._render_auto_it_plot,
+                draw=self.meas_canvas.draw_idle,
+                visible=lambda: self._is_tab_visible(self.measure_tab),
+            )
+            self._auto_it_redraw = redraw
+        redraw.submit((str(tag), np.asarray(spectrum, dtype=float), float(it_ms), float(peak)))

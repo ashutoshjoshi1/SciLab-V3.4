@@ -1837,10 +1837,12 @@ class Avantes_Spectrometer():
         """
         cycle_index=ncy_read-1 #0-based index of the cycle read
 
-        #Convert raw counts ctypes array to numpy array
-        rc=np.array(rc)
-        #Convert to float64
-        rc=rc.astype(np.float64)
+        #Convert raw counts (ctypes c_double array from AVS_GetScopeData, or an ndarray in simulation) to float64.
+        #np.ctypeslib.as_array is a zero-copy view; astype(copy=False) only copies when the dtype differs.
+        if isinstance(rc, ctypes.Array):
+            rc=np.ctypeslib.as_array(rc).astype(np.float64, copy=False)
+        else:
+            rc=np.asarray(rc, dtype=np.float64)
         #Apply discriminator factor:
         if self.discriminator_factor!=1:
             rc=rc*float(self.discriminator_factor)
@@ -1869,9 +1871,9 @@ class Avantes_Spectrometer():
         else: #Continue even if saturation is detected:
 
             #Add cycle data to accumulated data for active pixels:
-            self.sy=self.sy+rc
-            self.syy=self.syy+rc**2
-            self.sxy=self.sxy+cycle_index*rc # cycle index must be 0-based here, so it is the same as ncy_read-1
+            self.sy+=rc
+            self.syy+=rc*rc
+            self.sxy+=cycle_index*rc # cycle index must be 0-based here, so it is the same as ncy_read-1
 
             #Do the same for blind pixels (if any):
             if len(rc_blind_left)>0:
@@ -1882,9 +1884,9 @@ class Avantes_Spectrometer():
                 #Apply discriminator factor:
                 rc_blind_left=rc_blind_left*float(self.discriminator_factor)
                 #Add data to accumulated data:
-                self.sy_blind_left=self.sy_blind_left+rc_blind_left
-                self.syy_blind_left=self.syy_blind_left+rc_blind_left**2
-                self.sxy_blind_left=self.sxy_blind_left+cycle_index*rc_blind_left
+                self.sy_blind_left+=rc_blind_left
+                self.syy_blind_left+=rc_blind_left*rc_blind_left
+                self.sxy_blind_left+=cycle_index*rc_blind_left
 
             self.ncy_handled+=1
             if issat:

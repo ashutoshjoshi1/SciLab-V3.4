@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from domain.spectrometer import assert_spectrometer_backend
 
@@ -14,8 +14,10 @@ LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DLLS_DIR = PROJECT_ROOT / "spectrometers dll files"
-# "Simulated" is explicit opt-in only: Auto never falls back to fake data.
-SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "MiniSpec", "Simulated"]
+# "Hama5" = Hamamatsu mini-spectrometers on the specu1b USB protocol (C10785, TM/TG/RC
+# series) via pyusb; no vendor DLL. "Simulated" is explicit opt-in only: Auto never
+# falls back to fake data.
+SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "Hama5", "MiniSpec", "Simulated"]
 
 
 def normalize_spec_type(spec_type: Optional[str]) -> str:
@@ -87,7 +89,9 @@ def _candidate_types(spec_type: Optional[str], dll_path: Optional[str]) -> List[
     inferred = infer_spec_type_from_dll_path(dll_path)
     if inferred:
         return [inferred]
-    return ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec"]
+    # Hama5 probes only Hamamatsu USB devices that are not DCamUSB units, so it is
+    # safe to try last in Auto mode.
+    return ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5"]
 
 
 def _candidate_dll_path(candidate: str, requested_type: Optional[str], dll_path: Optional[str]) -> str:
@@ -133,6 +137,9 @@ def _import_backend_class(spec_type: str, dll_path: Optional[str] = None):
     if normalized == "MiniSpec":
         module = importlib.import_module("spectrometers.minispec_spectrometer")
         return module.MiniSpec_Spectrometer
+    if normalized == "Hama5":
+        module = importlib.import_module("spectrometers.hama5_spectrometer")
+        return module.Hama5_Spectrometer
     if normalized == "Simulated":
         module = importlib.import_module("spectrometers.simulated_spectrometer")
         return module.SimulatedSpectrometer
@@ -315,6 +322,11 @@ def _discover_minispec(dll_path: Optional[str]) -> List[Dict[str, str]]:
     return devices
 
 
+def _discover_hama5(_dll_path: Optional[str]) -> List[Dict[str, str]]:
+    module = importlib.import_module("spectrometers.hama5_spectrometer")
+    return module.enumerate_devices()
+
+
 def _discover_simulated(_dll_path: Optional[str]) -> List[Dict[str, str]]:
     return [{"serial": "SIM-0001", "label": "SIM-0001 (Simulated spectrometer) [Simulated]", "type": "Simulated"}]
 
@@ -331,6 +343,8 @@ def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str
         return _discover_hama4(dll_path)
     if normalized == "MiniSpec":
         return _discover_minispec(dll_path)
+    if normalized == "Hama5":
+        return _discover_hama5(dll_path)
     if normalized == "Simulated":
         return _discover_simulated(dll_path)
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")

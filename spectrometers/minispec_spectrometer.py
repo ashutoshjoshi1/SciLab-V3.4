@@ -11,6 +11,7 @@ Tested against: C11288-01.
 
 Note: older Hamamatsu mini-spectrometer modules (e.g. C10785, TM/TG series)
 use a different USB interface and SDK and are NOT covered by DCamUSB.dll.
+They are handled by the ``Hama5`` backend (spectrometers/hama5_spectrometer.py).
 """
 
 import logging
@@ -155,7 +156,8 @@ def _augment_minispec_error(msg):
             " Only the generic V300 boot PID is present — DcamInitialize "
             "could not upload firmware to switch the device to a model PID. "
             "This SDK supports C11287-01/C11288-01/C11160/C11165/C11513 only; "
-            "older modules (e.g. C10785, TM/TG series) need a different SDK."
+            "older modules (e.g. C10785, TM/TG series) are supported by the "
+            "'Hama5' spectrometer type instead."
         )
     elif "no driver" in msg.lower():
         # Windows sees the device at a supported model PID, but DCamUSB.dll

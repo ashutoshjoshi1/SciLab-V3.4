@@ -1657,9 +1657,9 @@ class Hama2_Spectrometer():
         else: #Continue even if saturation is detected:
 
             #Add cycle data to accumulated data for active pixels:
-            self.sy=self.sy+rc
-            self.syy=self.syy+rc**2
-            self.sxy=self.sxy+cycle_index*rc
+            self.sy+=rc
+            self.syy+=rc*rc
+            self.sxy+=cycle_index*rc
 
             #Do the same for blind pixels (if any):
             if len(rc_blind_left)>0:
@@ -1669,9 +1669,9 @@ class Hama2_Spectrometer():
                 if self.discriminator_factor!=1:
                     rc_blind_left=rc_blind_left*float(self.discriminator_factor)
                 #Add data to accumulated data:
-                self.sy_blind_left=self.sy_blind_left+rc_blind_left
-                self.syy_blind_left=self.syy_blind_left+rc_blind_left**2
-                self.sxy_blind_left=self.sxy_blind_left+cycle_index*rc_blind_left
+                self.sy_blind_left+=rc_blind_left
+                self.syy_blind_left+=rc_blind_left*rc_blind_left
+                self.sxy_blind_left+=cycle_index*rc_blind_left
 
             if len(rc_blind_right)>0:
                 #Convert to float64
@@ -1680,9 +1680,9 @@ class Hama2_Spectrometer():
                 if self.discriminator_factor!=1:
                     rc_blind_right=rc_blind_right*float(self.discriminator_factor)
                 #Add data to accumulated data:
-                self.sy_blind_right=self.sy_blind_right+rc_blind_right
-                self.syy_blind_right=self.syy_blind_right+rc_blind_right**2
-                self.sxy_blind_right=self.sxy_blind_right+cycle_index*rc_blind_right
+                self.sy_blind_right+=rc_blind_right
+                self.syy_blind_right+=rc_blind_right*rc_blind_right
+                self.sxy_blind_right+=cycle_index*rc_blind_right
 
             self.ncy_handled+=1
             if issat:

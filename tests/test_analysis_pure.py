@@ -53,7 +53,6 @@ def test_width_at_half_equals_fwhm_and_20_percent_width():
     assert calc.compute_width_at_percent_max(x, y, 0.2) == pytest.approx(expected_20, rel=0.01)
 
 
-@pytest.mark.xfail(strict=True, reason="v3.3 compute_fwhm spans the outermost samples above half-max; fixed in Phase 4")
 def test_compute_fwhm_ignores_second_line_in_window():
     """Two Hg lines 20 px apart share the fit window; FWHM must describe the brightest line only."""
     sigma = 2.0

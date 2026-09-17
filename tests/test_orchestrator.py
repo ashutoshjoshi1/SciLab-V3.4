@@ -25,9 +25,7 @@ APP_CONFIG = dict(
     target_mid=62500,
     it_min=0.2,
     it_max=3000.0,
-    it_step_up=0.3,
-    it_step_down=0.1,
-    max_it_adjust_iters=1000,
+    max_it_adjust_iters=12,
     sat_thresh=65400,
     n_sig=50,
     n_dark=50,
@@ -131,13 +129,43 @@ def test_auto_it_converges_into_target_band(make_orchestrator):
         assert APP_CONFIG["target_low"] - 1500 <= counts.max() <= APP_CONFIG["target_high"] + 1500, tag
 
 
-@pytest.mark.xfail(strict=True, reason="v3.3 additive auto-IT needs hundreds of frames; proportional controller lands in Phase 3")
 def test_auto_it_iteration_budget(make_orchestrator):
+    """The proportional controller settles in a handful of frames (v3.3 needed 80-450 per source)."""
     orchestrator, _data, log, _completed = make_orchestrator()
-    orchestrator.run(["377", "405", "445", "488", "532", "685", "Hg_Ar"])
+    result = orchestrator.run(["377", "405", "445", "488", "532", "685", "Hg_Ar"])
+    assert result.errors == []
     frames = _frames_per_tag(log)
     assert frames, "no auto-IT frames recorded"
-    assert max(frames.values()) <= 8, frames
+    assert max(frames.values()) <= 6, frames
+
+
+def test_saturated_at_minimum_it_is_reported_not_spun(make_orchestrator, sim_spec):
+    """A source too bright even at it_min must fail fast instead of looping to the iteration cap."""
+    sim_spec.lines = tuple(
+        line if line.tag != "488" else line.__class__("488", 488.0, 5.0e6) for line in sim_spec.lines
+    )
+    orchestrator, _data, log, _completed = make_orchestrator()
+    result = orchestrator.run(["488"])
+    assert result.errors and "minimum integration time" in result.errors[0]
+    assert len(log) <= 12
+
+
+def test_smart_source_off_turns_off_only_the_lit_source(make_orchestrator, sim_lasers):
+    orchestrator, _data, _log, _completed = make_orchestrator(smart_source_off=True)
+    result = orchestrator.run(["377", "405"])
+    assert result.errors == []
+    all_off_calls = [entry for entry in sim_lasers.log if entry[0] == "all_off"]
+    # Only at run start and in the final cleanup, never between sources.
+    assert len(all_off_calls) == 2, sim_lasers.log
+
+
+def test_cube_prearm_arms_during_previous_dark(make_orchestrator, sim_lasers):
+    orchestrator, _data, _log, _completed = make_orchestrator(cube_prearm=True)
+    result = orchestrator.run(["405", "377"])
+    assert result.errors == []
+    names = [entry[0] for entry in sim_lasers.log]
+    assert "cube_arm" in names and "cube_emit" in names and "cube_on" not in names
+    assert names.index("cube_arm") < names.index("cube_emit")
 
 
 def test_saturated_start_backs_off_then_settles(make_orchestrator):

@@ -2,7 +2,6 @@
 import logging
 import os
 import threading
-import time
 from datetime import datetime
 from types import MethodType
 from typing import Dict
@@ -10,23 +9,19 @@ from typing import Dict
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
 
 from services.measurement_orchestrator import (
     MeasurementOrchestrator,
     MeasurementOrchestratorCallbacks,
     MeasurementOrchestratorConfig,
 )
-from .ui_utils import ScrollableFrame, bind_debounced_configure
+from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure
+
+from .theme import Colors, Fonts, configure_matplotlib_style, make_run_button
 
 LOGGER = logging.getLogger(__name__)
 
 def build(app):
-    from .theme import Colors, Fonts, Spacing, configure_matplotlib_style, make_run_button
-
-    # Import constants from app
-    DEFAULT_ALL_LASERS = app.DEFAULT_ALL_LASERS
     def _add_reference_csv(app):
         """Add reference CSV files for analysis (supports multiple selection)."""
         try:
@@ -46,19 +41,19 @@ def build(app):
             # Validate each CSV structure
             import pandas as pd
             required_columns = ['Wavelength_nm', 'WavelengthOffset_nm', 'LSF_Normalized']
-            
+
             for file_path in file_paths_list:
                 # Ensure file_path is a string
                 if not isinstance(file_path, str):
                     LOGGER.warning("Skipping invalid path type: %s", type(file_path))
                     continue
-                
+
                 try:
                     # Check if file exists
                     if not os.path.isfile(file_path):
                         messagebox.showerror("File Not Found", f"File does not exist:\n{file_path}")
                         continue
-                    
+
                     df = pd.read_csv(file_path)
                     if all(col in df.columns for col in required_columns):
                         filename = os.path.basename(file_path)
@@ -72,13 +67,13 @@ def build(app):
                                            f"{os.path.basename(file_path)}\n\nCSV must contain columns: {', '.join(required_columns)}")
                 except Exception as e:
                     messagebox.showerror("CSV Error", f"Error reading {os.path.basename(file_path)}:\n{str(e)}")
-            
+
             # Update count label
             app.reference_csv_count_label.config(text=f"({len(app.reference_csv_paths)} file(s) selected)")
         except Exception as e:
             LOGGER.exception("Error in _add_reference_csv")
             messagebox.showerror("Upload Error", f"Error uploading file:\n{str(e)}")
-    
+
     def _remove_selected_reference_csv(app):
         """Remove selected reference CSV from the list."""
         try:
@@ -86,18 +81,18 @@ def build(app):
             if not selection:
                 messagebox.showwarning("Remove CSV", "Please select a CSV file to remove.")
                 return
-            
+
             # Remove from listbox (in reverse to maintain indices)
             for idx in reversed(selection):
                 app.reference_csv_listbox.delete(idx)
                 app.reference_csv_paths.pop(idx)
-            
+
             # Update count label
             app.reference_csv_count_label.config(text=f"({len(app.reference_csv_paths)} file(s) selected)")
             LOGGER.info("Reference CSV(s) removed. %d remaining.", len(app.reference_csv_paths))
         except Exception as e:
             messagebox.showerror("Remove Error", f"Error removing file:\n{e}")
-    
+
     def _clear_all_reference_csvs(app):
         """Clear all reference CSVs."""
         app.reference_csv_listbox.delete(0, tk.END)
@@ -114,45 +109,57 @@ def build(app):
         plot_frame = ttk.Frame(main_frame)
         plot_frame.pack(fill="both", expand=True, pady=(0, 4))
 
-        # Add matplotlib plot
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        from matplotlib.figure import Figure
-        import numpy as np
+        def _ensure_measure_figure():
+            """Create the matplotlib figure the first time the tab is shown.
 
-        app.measure_fig = Figure(figsize=(14, 7), dpi=100, constrained_layout=True)
-        app.measure_ax = app.measure_fig.add_subplot(111)
-        configure_matplotlib_style(app.measure_fig, app.measure_ax, title="Live Measurement")
-        app.measure_ax.set_xticks(np.arange(0, 2048, 100))
-        app.measure_ax.set_ylim(0, 65000)
+            The Measurements tab itself is built eagerly (its controls are needed by
+            the Run flow), but a 14x7 in figure + canvas + first draw is ~0.3 s of
+            startup that nobody sees until this tab is opened.
+            """
+            if getattr(app, "meas_canvas", None) is not None:
+                return
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
 
-        # Initialize empty plot lines - signal (blue) and dark (black dashed)
-        app.measure_line, = app.measure_ax.plot(np.zeros(2048), lw=1.5, color='#2563eb', label='Signal (Laser ON)')
-        app.measure_dark_line, = app.measure_ax.plot(np.zeros(2048), lw=1.5, color='#1e293b', linestyle='--', label='Dark (Laser OFF)')
-        # Saturation overlay lines – hidden until data exceeds clamp
-        app.meas_sig_sat_line, = app.measure_ax.plot([], [], lw=2, color=Colors.DANGER, label='Saturated Signal')
-        app.meas_dark_sat_line, = app.measure_ax.plot([], [], lw=2, color=Colors.DANGER, linestyle='--', label='Saturated Dark')
-        app.meas_sig_sat_line.set_visible(False)
-        app.meas_dark_sat_line.set_visible(False)
-        app.measure_ax.legend(loc='upper right')
+            from .theme import screen_dpi
 
-        # Add canvas to plot frame
-        canvas = FigureCanvasTkAgg(app.measure_fig, plot_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-        app.meas_canvas = canvas
-        app.meas_ax = app.measure_ax
-        app.meas_sig_line = app.measure_line
-        app.meas_dark_line = app.measure_dark_line
-        # app.meas_inset = app.measure_ax.inset_axes([0.60, 0.55, 0.34, 0.34])
-        # app.meas_inset.set_title("Auto-IT", fontsize=8)
-        # app.meas_inset.grid(True, alpha=0.25)
-        # app.inset_peak_line, = app.meas_inset.plot([], [], color="#d62728", marker="o", label="Peak")
-        # app.meas_inset2 = app.meas_inset.twinx()
-        # app.inset_it_line, = app.meas_inset2.plot([], [], color="#2ca02c", marker="s", label="IT")
-        app.meas_inset = None
-        app.meas_inset2 = None
-        app.inset_peak_line = None
-        app.inset_it_line = None
+            npix = int(getattr(app, "npix", 2048) or 2048)
+            app.measure_fig = Figure(figsize=(14, 7), dpi=screen_dpi(app))
+            app.measure_fig.subplots_adjust(left=0.06, right=0.985, top=0.92, bottom=0.09)
+            app.measure_ax = app.measure_fig.add_subplot(111)
+            configure_matplotlib_style(app.measure_fig, app.measure_ax, title="Live Measurement")
+            app.measure_ax.set_xticks(np.arange(0, npix, 100))
+            app.measure_ax.set_xlim(0, max(10, npix - 1))
+            app.measure_ax.set_ylim(0, 65000)
+
+            # Initialize empty plot lines - signal (blue) and dark (black dashed)
+            app.measure_line, = app.measure_ax.plot([], [], lw=1.5, color=Colors.ACCENT, label='Signal (Laser ON)')
+            app.measure_dark_line, = app.measure_ax.plot([], [], lw=1.5, color=Colors.TEXT_PRIMARY, linestyle='--', label='Dark (Laser OFF)')
+            # Saturation overlay lines – hidden until data exceeds clamp
+            app.meas_sig_sat_line, = app.measure_ax.plot([], [], lw=2, color=Colors.DANGER, label='Saturated Signal')
+            app.meas_dark_sat_line, = app.measure_ax.plot([], [], lw=2, color=Colors.DANGER, linestyle='--', label='Saturated Dark')
+            app.meas_sig_sat_line.set_visible(False)
+            app.meas_dark_sat_line.set_visible(False)
+            app.measure_ax.legend(loc='upper right')
+
+            canvas = FigureCanvasTkAgg(app.measure_fig, plot_frame)
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+            app.meas_canvas = canvas
+            app.meas_ax = app.measure_ax
+            app.meas_sig_line = app.measure_line
+            app.meas_dark_line = app.measure_dark_line
+            app.meas_inset = None
+            app.meas_inset2 = None
+            app.inset_peak_line = None
+            app.inset_it_line = None
+            canvas.draw_idle()
+
+        app.meas_canvas = None
+        app._ensure_measure_figure = _ensure_measure_figure
+        hooks = getattr(app, "_tab_show_hooks", None)
+        if hooks is None:
+            hooks = app._tab_show_hooks = {}
+        hooks[str(app.measure_tab)] = _ensure_measure_figure
 
         # Bottom section - responsive, scrollable controls
         controls_host = ttk.Frame(main_frame, relief="flat")
@@ -173,9 +180,9 @@ def build(app):
         select_all_frame = ttk.Frame(laser_frame)
         select_all_frame.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 4))
         select_all_frame.columnconfigure(0, weight=1)
-        
+
         app.select_all_lasers_var = tk.BooleanVar(value=True)
-        
+
         def toggle_all_lasers():
             """Toggle all laser checkboxes on/off."""
             state = app.select_all_lasers_var.get()
@@ -184,16 +191,16 @@ def build(app):
             # Switch to custom preset when manually toggling
             if hasattr(app, 'preset_var'):
                 app.preset_var.set("Custom")
-        
+
         select_all_chk = ttk.Checkbutton(
-            select_all_frame, 
-            text="Select All / Deselect All", 
+            select_all_frame,
+            text="Select All / Deselect All",
             variable=app.select_all_lasers_var,
             command=toggle_all_lasers,
             style='Large.TCheckbutton'
         )
         select_all_chk.grid(row=0, column=0, sticky="w")
-        
+
         # Add quick preset buttons
         quick_label = ttk.Label(select_all_frame, text="Quick:", font=Fonts.BODY_SMALL)
         quick_label.grid(row=0, column=1, sticky="w", padx=(8, 4))
@@ -211,7 +218,7 @@ def build(app):
             command=lambda: app.preset_var.set("Full Spectrum") if hasattr(app, 'preset_var') else None,
         )
         full_spectrum_btn.grid(row=0, column=3, sticky="w", padx=2)
-        
+
         # Add separator
         laser_separator = ttk.Separator(laser_frame, orient="horizontal")
         laser_separator.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 4))
@@ -219,7 +226,7 @@ def build(app):
         app.measure_vars = {}
         measure_checkbuttons = []
         # All lasers in ascending order (including Hg_Ar)
-        all_lasers = ["377", "405", "445", "488", "517", "532", "640", "685", "Hg_Ar"]
+        all_lasers = app.laser_tags()
 
         preset_state = {"applying": False}
 
@@ -231,10 +238,10 @@ def build(app):
                 # Check if current selection matches the active preset
                 preset = app.measurement_presets.get(app.preset_var.get(), {})
                 selected_lasers = preset.get("lasers", [])
-                
+
                 # Get currently selected lasers
                 current_selection = [tag for tag, var in app.measure_vars.items() if var.get()]
-                
+
                 # If they don't match, switch to Custom
                 if set(current_selection) != set(selected_lasers):
                     app.preset_var.set("Custom")
@@ -243,7 +250,7 @@ def build(app):
         for i, tag in enumerate(all_lasers):
             v = tk.BooleanVar(value=True)  # Default all selected
             label_text = f"{tag} nm" if tag != "Hg_Ar" else "Hg_Ar"
-            chk = ttk.Checkbutton(laser_frame, text=label_text, variable=v, 
+            chk = ttk.Checkbutton(laser_frame, text=label_text, variable=v,
                                  style='Large.TCheckbutton')
             chk.grid(row=(i // 4) + 2, column=i % 4, padx=8, pady=3, sticky="w")
             app.measure_vars[tag] = v
@@ -259,11 +266,11 @@ def build(app):
         # Grid layout for settings
         settings_grid = ttk.Frame(settings_frame)
         settings_grid.pack(fill="both", expand=True)
-        
+
         # ===== MEASUREMENT PRESETS =====
         ttk.Label(settings_grid, text="Measurement Preset:", font=Fonts.BODY_SMALL_BOLD).grid(
             row=0, column=0, sticky="w", pady=3)
-        
+
         # Define presets
         app.measurement_presets = {
             "Quick Scan": {
@@ -282,20 +289,20 @@ def build(app):
                 "description": "Manual configuration"
             }
         }
-        
+
         # Preset dropdown
         app.preset_var = tk.StringVar(value="Custom")
-        preset_combo = ttk.Combobox(settings_grid, textvariable=app.preset_var, 
+        preset_combo = ttk.Combobox(settings_grid, textvariable=app.preset_var,
                                     values=list(app.measurement_presets.keys()),
                                     width=15, font=Fonts.BODY_SMALL, state="readonly")
         preset_combo.grid(row=0, column=1, sticky="w", pady=3, padx=(6, 0))
-        
+
         def apply_preset(*args):
             """Apply the selected measurement preset."""
             preset_name = app.preset_var.get()
             if preset_name == "Custom":
                 return  # Don't change anything for custom
-            
+
             preset = app.measurement_presets.get(preset_name, {})
             selected_lasers = preset.get("lasers", [])
 
@@ -321,26 +328,26 @@ def build(app):
             if description:
                 # Update a status label if we have one, or just print
                 LOGGER.info("Applied preset: %s - %s", preset_name, description)
-        
+
         app.preset_var.trace_add("write", apply_preset)
-        
+
         # Preset description label
-        app.preset_desc_label = ttk.Label(settings_grid, text="", 
-                                         font=Fonts.CAPTION, foreground="gray")
+        app.preset_desc_label = ttk.Label(settings_grid, text="",
+                                         font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED)
         app.preset_desc_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 5))
-        
+
         def update_preset_description(*args):
             """Update the description label when preset changes."""
             preset_name = app.preset_var.get()
             preset = app.measurement_presets.get(preset_name, {})
             description = preset.get("description", "")
             app.preset_desc_label.config(text=description)
-        
+
         app.preset_var.trace_add("write", update_preset_description)
         update_preset_description()  # Set initial description
-        
+
         ttk.Separator(settings_grid, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", pady=5)
-        
+
         # Target Peak Count - Larger font
         ttk.Label(settings_grid, text="Target Peak Count (mid):", font=Fonts.BODY_SMALL).grid(
             row=3, column=0, sticky="w", pady=3)
@@ -349,15 +356,15 @@ def build(app):
         except Exception:
             default_mid = 62500
         app.target_peak_var = tk.IntVar(value=default_mid)
-        app.target_peak_entry = ttk.Entry(settings_grid, width=12, textvariable=app.target_peak_var, 
+        app.target_peak_entry = ttk.Entry(settings_grid, width=12, textvariable=app.target_peak_var,
                                          font=Fonts.BODY_SMALL)
         app.target_peak_entry.grid(row=3, column=1, sticky="w", pady=3, padx=(6, 0))
 
         # Target window display - Larger font
         try:
-            app.target_band_label = ttk.Label(settings_grid, 
+            app.target_band_label = ttk.Label(settings_grid,
                 text=f"Target window: {getattr(app, 'TARGET_LOW', default_mid-2500)}–{getattr(app, 'TARGET_HIGH', default_mid+2500)}",
-                font=Fonts.CAPTION, foreground="gray")
+                font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED)
             app.target_band_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 5))
         except Exception:
             pass
@@ -370,7 +377,7 @@ def build(app):
                     app.update_target_peak(app.target_peak_var.get())
             except Exception as e:
                 LOGGER.warning("Error updating target peak: %s", e)
-        
+
         app.target_peak_var.trace_add("write", _on_target_peak_change)
 
         # Auto-IT start - Larger font
@@ -379,41 +386,41 @@ def build(app):
         app.auto_it_entry = ttk.Entry(settings_grid, width=12, font=Fonts.BODY_SMALL)
         app.auto_it_entry.insert(0, "")
         app.auto_it_entry.grid(row=5, column=1, sticky="w", pady=3, padx=(6, 0))
-        
-        ttk.Label(settings_grid, text="(Leave blank for defaults)", 
-                 font=Fonts.CAPTION, foreground="gray").grid(
+
+        ttk.Label(settings_grid, text="(Leave blank for defaults)",
+                 font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED).grid(
             row=6, column=0, columnspan=2, sticky="w", pady=(0, 5))
 
         # === MIDDLE CENTER: Reference CSV Files ===
         reference_frame = ttk.LabelFrame(controls_frame, text="Reference CSV Files", padding=(10, 6, 10, 6))
         reference_frame.grid(row=0, column=2, sticky="nsew", padx=6)
-        
+
         # Header with file count
         ref_header_frame = ttk.Frame(reference_frame)
         ref_header_frame.pack(fill="x", pady=(0, 4))
-        app.reference_csv_count_label = ttk.Label(ref_header_frame, text="(0 file(s) selected)", 
-                                                  foreground="gray", font=Fonts.BODY_SMALL)
+        app.reference_csv_count_label = ttk.Label(ref_header_frame, text="(0 file(s) selected)",
+                                                  foreground=Colors.TEXT_MUTED, font=Fonts.BODY_SMALL)
         app.reference_csv_count_label.pack(side="left")
 
         # Listbox with scrollbar - Larger
         listbox_frame = ttk.Frame(reference_frame)
         listbox_frame.pack(fill="both", expand=True, pady=(0, 6))
-        
+
         scrollbar = ttk.Scrollbar(listbox_frame, orient="vertical")
-        app.reference_csv_listbox = tk.Listbox(listbox_frame, height=3, 
+        app.reference_csv_listbox = tk.Listbox(listbox_frame, height=3,
                                                yscrollcommand=scrollbar.set,
                                                selectmode=tk.MULTIPLE,
                                                font=Fonts.BODY_SMALL)
         scrollbar.config(command=app.reference_csv_listbox.yview)
         app.reference_csv_listbox.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        
+
         app.reference_csv_paths = []
-        
+
         # Buttons - Larger and more visible
         ref_buttons_frame = ttk.Frame(reference_frame)
         ref_buttons_frame.pack(fill="x")
-        
+
         ttk.Button(ref_buttons_frame, text="+ Add", width=8,
                   command=lambda: _add_reference_csv(app)).pack(side="top", fill="x", pady=(0, 3))
         ttk.Button(ref_buttons_frame, text="- Remove", width=8,
@@ -545,15 +552,15 @@ def build(app):
 
 
     def run_all_selected():
-        if not app.spec:
-            messagebox.showwarning("Spectrometer", "Not connected.")
-            return
         if app.measure_running.is_set():
             return
         tags = [t for t, v in app.measure_vars.items() if v.get()]
         if not tags:
             messagebox.showwarning("Run", "No lasers selected.")
             return
+        if not app.claim_spectrometer("Measurement"):
+            return
+        app._ensure_measure_figure()
         start_it_override = None
         try:
             txt = app.auto_it_entry.get().strip()
@@ -567,13 +574,14 @@ def build(app):
 
         # Clear previous data
         app.data.clear()
-        
+
         # Clear analysis window when new measurement starts
-        app.after(0, lambda: app._clear_analysis_window())
+        app._clear_analysis_window()
 
         # Change button to light red (running state)
         app.run_all_btn.configure(bg=Colors.WARNING, activebackground=Colors.WARNING)
 
+        app.status.progress_begin("Measurement starting…", total=len(tags))
         app.measure_running.set()
         app.measure_thread = threading.Thread(
             target=run_measurement_with_analysis,
@@ -594,7 +602,7 @@ def build(app):
                 state["error"] = exc
                 done.set()
 
-        app.after(0, _show)
+        app.pump.post(_show)
         # Wake periodically so a Stop request ends the wait promptly.
         while not done.wait(0.25):
             if not app.measure_running.is_set():
@@ -605,7 +613,7 @@ def build(app):
                             widget.destroy()
                         except tk.TclError:
                             pass
-                    app.after(0, _close_top)
+                    app.pump.post(_close_top)
                 break
         if state["error"] is not None:
             raise state["error"]
@@ -618,14 +626,14 @@ def build(app):
             target_mid=app.TARGET_MID,
             it_min=app.IT_MIN,
             it_max=app.IT_MAX,
-            it_step_up=app.IT_STEP_UP,
-            it_step_down=app.IT_STEP_DOWN,
             max_it_adjust_iters=app.MAX_IT_ADJUST_ITERS,
             sat_thresh=app.SAT_THRESH,
             n_sig=app.N_SIG,
             n_dark=app.N_DARK,
             n_sig_640=app.N_SIG_640,
             n_dark_640=app.N_DARK_640,
+            smart_source_off=bool(app.measurement_flags.get("smart_source_off", False)),
+            cube_prearm=bool(app.measurement_flags.get("cube_prearm", False)),
         )
         callbacks = MeasurementOrchestratorCallbacks(
             prepare_devices=lambda: None,
@@ -634,6 +642,9 @@ def build(app):
             measurement_completed=lambda tag: app._update_last_plots(tag),
             countdown=_show_countdown_modal_threadsafe,
             error_handler=app._post_error,
+            source_started=lambda tag, index, total: app.pump.post(
+                app.status.progress_update, index - 1, f"Measuring {tag} nm…", f"{index}/{total}"
+            ),
         )
         return MeasurementOrchestrator(
             spectrometer=app.spec,
@@ -646,6 +657,7 @@ def build(app):
 
     def run_measurement_with_analysis(tags, start_it_override, power_snapshot):
         """Run measurement sequence and automatically generate analysis."""
+        end_text, end_kind = "Measurement finished", "success"
         try:
             orchestrator = _build_measurement_orchestrator(power_snapshot)
             run_result = orchestrator.run(
@@ -653,13 +665,18 @@ def build(app):
                 start_it_override,
                 should_continue=app.measure_running.is_set,
             )
+            if run_result.stopped_early:
+                end_text, end_kind = "Measurement stopped", "warning"
+            elif run_result.errors:
+                end_text, end_kind = f"Measurement finished with {len(run_result.errors)} warning(s)", "warning"
 
             # Save data to CSV
             csv_path = app.save_measurement_data()
             if csv_path:
                 # Generate analysis plots
+                app.pump.post(app.status.progress_update, len(tags), "Analysing results…", "")
                 plot_paths = app.run_analysis_and_save_plots(csv_path)
-                app.after(0, app.refresh_analysis_view)
+                app.pump.post(app.refresh_analysis_view)
 
                 # Show completion message
                 status_label = "Measurement and analysis complete!"
@@ -667,24 +684,29 @@ def build(app):
                     status_label = "Measurement stopped early; saved partial results."
                 if run_result.errors:
                     status_label += f"\n\nCompleted with {len(run_result.errors)} warning(s)."
-                app.after(0, lambda: messagebox.showinfo(
+                app.pump.post(
+                    messagebox.showinfo,
                     "Measurement Complete",
                     f"{status_label}\n\n"
                     f"Data saved to: {os.path.basename(csv_path)}\n"
                     f"Generated {len(plot_paths)} analysis plots.\n\n"
-                    f"Check the Analysis tab for results."
-                ))
+                    f"Check the Analysis tab for results.",
+                )
             elif run_result.stopped_early:
-                app.after(0, lambda: messagebox.showinfo("Measurement", "Measurement stopped before any data was saved."))
+                app.pump.post(messagebox.showinfo, "Measurement", "Measurement stopped before any data was saved.")
         except Exception as e:
+            end_text, end_kind = "Measurement failed", "error"
             app._post_error("Measurement", e)
         finally:
             app.measure_running.clear()
+            app.release_spectrometer("Measurement")
+            app.pump.post(app.status.progress_end, end_text, end_kind)
             # Change button back to green (idle state)
-            app.after(0, lambda: app.run_all_btn.configure(bg=Colors.SUCCESS, activebackground='#15803d'))
+            app.pump.post(app.run_all_btn.configure, {"bg": Colors.SUCCESS, "activebackground": "#15803d"})
 
     def stop_measure():
         app.measure_running.clear()
+        app.request_spectrometer_stop()
         # Change button back to green (idle state)
         app.run_all_btn.configure(bg=Colors.SUCCESS, activebackground='#15803d')
 
@@ -749,87 +771,71 @@ def build(app):
         return top
 
     def _update_last_plots(self, tag: str):
+        """Worker thread: queue the latest signal/dark pair for the Measurements plot."""
         sig, dark = app.data.last_vectors_for(tag)
-        app._pending_measurement_plot = (sig, dark)
-        if getattr(app, "_measurement_plot_redraw_id", None) is not None:
-            return
+        if getattr(app, "meas_canvas", None) is None:
+            return  # figure not created yet (tab never shown); nothing to draw on
+        redraw = getattr(app, "_meas_redraw", None)
+        if redraw is None:
+            redraw = ThrottledRedraw(
+                app.pump,
+                _render_last_plots,
+                draw=app.meas_canvas.draw_idle,
+                visible=lambda: app._is_tab_visible(app.measure_tab),
+            )
+            app._meas_redraw = redraw
+        redraw.submit((sig, dark))
 
+    def _render_last_plots(pending):
         CLAMP = 65000  # counts ceiling for display
 
-        def update():
-            app._measurement_plot_redraw_id = None
-            pending = getattr(app, "_pending_measurement_plot", None)
-            if pending is None:
-                return
-            sig_pending, dark_pending = pending
-            # main overlay
-            xmax = 10
-            any_sat = False
+        sig_pending, dark_pending = pending
+        # main overlay
+        xmax = 10
+        any_sat = False
 
-            if sig_pending is not None:
-                xs = np.arange(len(sig_pending))
-                sig_sat = np.any(sig_pending > CLAMP)
-                sig_display = np.clip(sig_pending, None, CLAMP)
-                app.meas_sig_line.set_data(xs, sig_display)
-                xmax = max(xmax, len(sig_pending)-1)
-                if sig_sat:
-                    any_sat = True
-                    y_sat = np.where(sig_pending > CLAMP, CLAMP, np.nan)
-                    app.meas_sig_sat_line.set_data(xs, y_sat)
-                    app.meas_sig_sat_line.set_visible(True)
-                else:
-                    app.meas_sig_sat_line.set_visible(False)
+        if sig_pending is not None:
+            xs = np.arange(len(sig_pending))
+            sig_sat = np.any(sig_pending > CLAMP)
+            sig_display = np.clip(sig_pending, None, CLAMP)
+            app.meas_sig_line.set_data(xs, sig_display)
+            xmax = max(xmax, len(sig_pending)-1)
+            if sig_sat:
+                any_sat = True
+                y_sat = np.where(sig_pending > CLAMP, CLAMP, np.nan)
+                app.meas_sig_sat_line.set_data(xs, y_sat)
+                app.meas_sig_sat_line.set_visible(True)
             else:
                 app.meas_sig_sat_line.set_visible(False)
+        else:
+            app.meas_sig_sat_line.set_visible(False)
 
-            if dark_pending is not None:
-                xd = np.arange(len(dark_pending))
-                dark_sat = np.any(dark_pending > CLAMP)
-                dark_display = np.clip(dark_pending, None, CLAMP)
-                app.meas_dark_line.set_data(xd, dark_display)
-                xmax = max(xmax, len(dark_pending)-1)
-                if dark_sat:
-                    any_sat = True
-                    y_sat = np.where(dark_pending > CLAMP, CLAMP, np.nan)
-                    app.meas_dark_sat_line.set_data(xd, y_sat)
-                    app.meas_dark_sat_line.set_visible(True)
-                else:
-                    app.meas_dark_sat_line.set_visible(False)
+        if dark_pending is not None:
+            xd = np.arange(len(dark_pending))
+            dark_sat = np.any(dark_pending > CLAMP)
+            dark_display = np.clip(dark_pending, None, CLAMP)
+            app.meas_dark_line.set_data(xd, dark_display)
+            xmax = max(xmax, len(dark_pending)-1)
+            if dark_sat:
+                any_sat = True
+                y_sat = np.where(dark_pending > CLAMP, CLAMP, np.nan)
+                app.meas_dark_sat_line.set_data(xd, y_sat)
+                app.meas_dark_sat_line.set_visible(True)
             else:
                 app.meas_dark_sat_line.set_visible(False)
+        else:
+            app.meas_dark_sat_line.set_visible(False)
 
-            app.meas_ax.set_xlim(0, xmax)
-            app.meas_ax.set_ylim(0, 65000)
+        app.meas_ax.set_xlim(0, xmax)
+        app.meas_ax.set_ylim(0, 65000)
 
-            # Visual saturation indicator in title
-            title = "Live Measurement"
-            if any_sat:
-                title += "  [SATURATED]"
-            app.meas_ax.set_title(title, fontsize=13, fontweight="bold",
-                                  pad=8, color="red" if any_sat else "black")
+        # Visual saturation indicator in title
+        title = "Live Measurement"
+        if any_sat:
+            title += "  [SATURATED]"
+        app.meas_ax.set_title(title, fontsize=13, fontweight="bold",
+                              pad=8, color="red" if any_sat else "black")
 
-            # inset: Auto-IT step history (peaks & IT) — commented out
-            # if app.meas_inset is not None:
-            #     steps = list(getattr(app, "it_history", []))
-            #     if steps:
-            #         st = np.arange(len(steps))
-            #         peaks = [p for (_, p) in steps]
-            #         its   = [it for (it, _) in steps]
-            #         app.meas_inset.set_xlim(-0.5, len(st)-0.5 if len(st) else 0.5)
-            #         app.inset_peak_line.set_data(st, peaks)
-            #         app.inset_it_line.set_data(st, its)
-            #         app.meas_inset.relim();  app.meas_inset.autoscale_view()
-            #         app.meas_inset2.relim(); app.meas_inset2.autoscale_view()
-            #     else:
-            #         app.inset_peak_line.set_data([], [])
-            #         app.inset_it_line.set_data([], [])
-            #         app.meas_inset.relim();  app.meas_inset.autoscale_view()
-            #         app.meas_inset2.relim(); app.meas_inset2.autoscale_view()
-
-            if getattr(app, "_is_tab_visible", lambda _w: True)(app.measure_tab):
-                app.meas_canvas.draw_idle()
-
-        app._measurement_plot_redraw_id = app.after(16, update)
 
 
     def save_csv():

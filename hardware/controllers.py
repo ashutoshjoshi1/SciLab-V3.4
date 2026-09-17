@@ -73,8 +73,10 @@ class SerialDevice:
                 **self.serial_kwargs,
             )
             return True
-        except Exception:
-            LOGGER.exception("Unable to open serial port %s for %s", self.port, self.name)
+        except Exception as exc:
+            # A missing/locked port is an operator-facing condition, not a crash:
+            # one line, no traceback.
+            LOGGER.warning("Unable to open serial port %s for %s: %s", self.port, self.name, exc)
             self._ser = None
             return False
 
@@ -111,11 +113,55 @@ class SerialDevice:
             return ""
         return data.decode("utf-8", errors="ignore").strip()
 
+    def read_line_text(self) -> str:
+        """Read one reply framed by ``line_ending`` (bounded by the port timeout)."""
+        if self._ser is None:
+            return ""
+        try:
+            data = self._ser.read_until(self.line_ending.encode("utf-8"))
+        except Exception:
+            return ""
+        return data.decode("utf-8", errors="ignore").strip()
+
+    def command(
+        self,
+        text: str,
+        *,
+        pause_s: float,
+        retries: int = 1,
+        reset: bool = True,
+        framed: bool = False,
+    ) -> str:
+        """Send ``text`` and return the device reply.
+
+        ``framed=False`` reproduces the historical behaviour: sleep ``pause_s``
+        then read whatever is buffered. ``framed=True`` (bench option) waits for
+        the reply terminator instead, so a fast device answers in milliseconds
+        and a slow one is not cut off mid-reply.
+        """
+        if not self.open():
+            raise RuntimeError(f"Unable to open {self.name} port '{self.port}'.")
+        response = ""
+        for _ in range(max(1, int(retries))):
+            if reset:
+                self.reset_buffers()
+            self.write_text(text)
+            if framed:
+                response = self.read_line_text()
+            else:
+                time.sleep(pause_s)
+                response = self.read_all_text()
+            if response:
+                break
+        return response
+
 
 class LaserController:
     OBIS_MAP = {"405": 5, "445": 4, "488": 3, "640": 2, "685": 6}
 
-    def __init__(self, com_ports: Optional[Dict[str, str]] = None):
+    def __init__(self, com_ports: Optional[Dict[str, str]] = None, *, framed_reads: bool = False):
+        # Bench option: framed replies instead of fixed sleeps (see SerialDevice.command).
+        self.framed_reads = bool(framed_reads)
         cube_kwargs = {}
         if serial is not None:
             cube_kwargs = {
@@ -151,12 +197,7 @@ class LaserController:
                 raise RuntimeError(f"Unable to open RELAY port '{self.relay.port}'.")
 
     def obis_cmd(self, command: str) -> str:
-        if not self.obis.open():
-            raise RuntimeError(f"Unable to open OBIS port '{self.obis.port}'.")
-        self.obis.reset_buffers()
-        self.obis.write_text(command)
-        time.sleep(0.2)
-        return self.obis.read_all_text()
+        return self.obis.command(command, pause_s=0.2, framed=self.framed_reads)
 
     def obis_on(self, channel: int) -> None:
         self.obis_cmd(f"SOUR{channel}:AM:STAT ON")
@@ -168,37 +209,32 @@ class LaserController:
         self.obis_cmd(f"SOUR{channel}:POW:LEV:IMM:AMPL {float(power_watts):.4f}")
 
     def cube_cmd(self, command: str) -> str:
-        if not self.cube.open():
-            raise RuntimeError(f"Unable to open CUBE port '{self.cube.port}'.")
-        last_response = ""
-        for _ in range(3):
-            self.cube.reset_buffers()
-            self.cube.write_text(command)
-            time.sleep(0.4)
-            last_response = self.cube.read_all_text()
-            if last_response:
-                break
-        return last_response
+        return self.cube.command(command, pause_s=0.4, retries=3, framed=self.framed_reads)
 
-    def cube_on(self, power_mw: float = 12.0) -> None:
+    def cube_arm(self, power_mw: float = 12.0) -> None:
+        """Configure the CUBE (external control, CW, power). Emits no light."""
         self.cube_cmd("EXT=1")
         time.sleep(1.0)
         self.cube_cmd("CW=1")
         time.sleep(1.0)
         self.cube_cmd(f"P={float(power_mw):.3f}")
         time.sleep(1.0)
+
+    def cube_emit(self) -> None:
+        """Open the CUBE shutter and wait for the output to settle."""
         self.cube_cmd("L=1")
         time.sleep(3.0)
+
+    def cube_on(self, power_mw: float = 12.0) -> None:
+        self.cube_arm(power_mw)
+        self.cube_emit()
 
     def cube_off(self) -> None:
         self.cube_cmd("L=0")
 
     def relay_cmd(self, command: str) -> str:
-        if not self.relay.open():
-            raise RuntimeError(f"Unable to open RELAY port '{self.relay.port}'.")
-        self.relay.write_text(command)
-        time.sleep(0.05)
-        return self.relay.read_all_text()
+        # The relay board never had its buffers reset before a command; keep that.
+        return self.relay.command(command, pause_s=0.05, reset=False, framed=self.framed_reads)
 
     def relay_on(self, relay_number: int) -> None:
         self.relay_cmd(f"R{int(relay_number)}S")
@@ -206,21 +242,36 @@ class LaserController:
     def relay_off(self, relay_number: int) -> None:
         self.relay_cmd(f"R{int(relay_number)}R")
 
-    def all_off(self) -> None:
-        for channel in self.OBIS_MAP.values():
+    def all_off(self) -> list:
+        """Switch every source off. Returns the names of devices that could not be reached.
+
+        This is the safety path, so failures are logged (once per device) instead
+        of being swallowed silently; ports that are not configured are skipped.
+        """
+        failed = []
+        if self.obis.port:
+            for channel in self.OBIS_MAP.values():
+                try:
+                    self.obis_off(channel)
+                except Exception as exc:
+                    LOGGER.warning("all_off: could not switch OBIS channel %s off: %s", channel, exc)
+                    failed.append("OBIS")
+                    break
+        if self.relay.port:
+            for relay_number in (1, 2, 3, 4):
+                try:
+                    self.relay_off(relay_number)
+                except Exception as exc:
+                    LOGGER.warning("all_off: could not release relay %s: %s", relay_number, exc)
+                    failed.append("RELAY")
+                    break
+        if self.cube.port:
             try:
-                self.obis_off(channel)
-            except Exception:
-                pass
-        for relay_number in (1, 2, 3, 4):
-            try:
-                self.relay_off(relay_number)
-            except Exception:
-                pass
-        try:
-            self.cube_off()
-        except Exception:
-            pass
+                self.cube_off()
+            except Exception as exc:
+                LOGGER.warning("all_off: could not switch the CUBE off: %s", exc)
+                failed.append("CUBE")
+        return failed
 
 
 class FilterWheelController:
@@ -253,10 +304,7 @@ class FilterWheelController:
             return False, status
 
         try:
-            self.device.reset_buffers()
-            self.device.write_text(command)
-            time.sleep(pause_s)
-            response = self.device.read_all_text()
+            response = self.device.command(command, pause_s=pause_s)
             status = response or "timeout"
             self._record_status(status)
             return True, status

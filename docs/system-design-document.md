@@ -420,3 +420,91 @@ The important thing about this revision is that it keeps the right parts intact.
 What changed is the internal shape of the code. The backend interface is explicit now. The measurement sequence has a real home. Analysis has been split into calculation and rendering layers. And the UI is doing less unnecessary work while the application is busy.
 
 That is the right kind of progress for this project: lower risk, better structure, no drama.
+
+---
+
+## Revision 1.2 — v3.4 (2026-09-17)
+
+This revision is a performance and robustness pass over the v3.3 code, plus
+two new backends. The operator workflow and the file layout are unchanged.
+
+### Measured effect
+
+| Metric | v3.3 | v3.4 |
+| --- | --- | --- |
+| Time to first pixel on screen at startup | ~2.5 s (imports, blank) | ~0.1 s (splash), window ~1.5 s later |
+| Auto-exposure frames per source (simulator, 7 sources) | 80–450 | ≤ 6 |
+| `compute_characterization` on a real 4-laser run | ~290 ms | ~40 ms |
+| Full analysis (compute + PNGs) | ~4.7 s | ~1.4 s |
+| Plot output per run | 12 PNGs, ~3 MB, 2 of them blank | 8 PNGs, ~1.1 MB, + metrics JSON |
+| `import app` | ~2.5 s (pandas, scipy, matplotlib) | ~0.2 s (loaded behind the splash instead) |
+
+### Structural additions
+
+- `tabs/ui_pump.py` — `UiPump` (one queue drained by a single main-thread `after` loop; every worker→UI hand-off uses `pump.post`) and `ThrottledRedraw` (latest-frame-wins rendering, one redraw per tick, skipped while the tab is hidden). Replaces four copy-pasted throttles and all cross-thread Tk calls.
+- `services/acquisition_guard.py` — single-owner token for the spectrometer handle. Live View, Measurements, Check Resolution, Check Spectrometer, Apply-IT and the EEPROM tools all claim it; the operator gets one consistent "X is running" message.
+- `spectrometers/simulated_spectrometer.py` — `SimulatedSpectrometer` + `SimulatedLaserController` implementing the full backend contract with a realistic optical model. Selected as spectrometer type "Simulated"; Auto never falls back to it.
+- `spectrometers/hama5_spectrometer.py` — Hamamatsu mini-spectrometer USB backend (C10785, TM/TG/RC series) on pyusb. See below.
+- `spectrometers/_winapi.py` — `ctypes.windll` shim so every driver imports on macOS/Linux and fails on first use instead.
+- `domain/spectrometer.py` — the backend contract now covers what callers really use (`rcs`, `it_ms`, `eff_saturation_limit`, `abort`, `request_stop`, `wait_for_measurement(timeout)`).
+- `tests/` — pure-function tests with synthetic Gaussians, golden regression against four real CSVs, orchestrator end-to-end on the simulator, Hama5 protocol tests against a fake USB device, UI-pump/guard tests, and a Tk smoke test that builds every tab and streams simulated frames.
+
+### Driver changes (targeted, no consolidation)
+
+- `wait_for_measurement(timeout=None)` on all backends: the timeout defaults to twice the expected duration plus a margin, so a dead watchdog thread can no longer hang the app. New `request_stop()` wakes a waiting thread immediately when the operator presses Stop.
+- Hama2/Hama4 `handle_cycle_data` now returns `(issat, data_ok)` like Ava1/Hama3 (Hama4 treats negative counts as a warning only, since HiasApi frames may be background-corrected).
+- Hot paths: in-place accumulation in all four drivers, zero-copy ctypes→numpy in Ava1, `np.frombuffer(...).copy()` instead of `deepcopy` and a reused pack buffer in Hama3, poll sleep clamped to 2–50 ms in Hama3, unused X array skipped in Hama4.
+- `spec_xfus.calc_msl` accepts an optional `shift` (accumulate around the first frame to avoid the negative-variance cancellation) and no longer uses mutable default arguments.
+- The two divergent `dcamapi4.py` copies were merged into the `spec_hama2` package copy; the root shims `dcamapi4.py`, `avantes_spectrometer.py` and the dead `characterization_analysis.py` were removed. Hama2 no longer loads DCAM-API twice.
+
+### Analysis changes
+
+- Hg-Ar branch fixed (`float("Hg_Ar")` was evaluated eagerly as a dict default and raised on every run that had a lamp measurement).
+- SDF fill vectorized; pixel matrix hoisted once per run; reference CSVs cached by path+mtime in `AnalysisService`.
+- `compute_fwhm` walks outward from the peak (a second line inside the window inflated widths by up to 5×); slit-function fits are bounded with a data-derived starting width; the resolution curve leaves gaps instead of substituting an arbitrary exponent.
+- Magic numbers moved onto `CharacterizationConfig` with identical defaults. Plots at 150 dpi; blank figures are no longer written. `metrics_<sn>_<ts>.json` persists every number next to the plots.
+- Golden snapshot drift from these changes: ≤ 1.2e-4 relative on the slit polynomials, none on peak pixels or dispersion.
+
+### Hamamatsu C10785 (Hama5) — what the research found
+
+No public Hamamatsu page, datasheet or distributor listing exists for a "C10785";
+the NI LabVIEW wrapper for Hamamatsu's specu1b USB SDK lists 24 mini-spectrometer
+models and the C10785 is not among them. The v3.3 MiniSpec driver already
+classified it with the TM/TG series ("different USB interface and SDK"). The
+Hama5 backend therefore implements that family's USB protocol, taken from the
+open-source `usbspecdrivers` kernel driver and pyusb library (verified by its
+authors on C10082/C10083/C9407): vendor requests for EEPROM (serial, sensor
+name, six wavelength-calibration coefficients), integration time, gain and
+temperature, and a bulk endpoint delivering framed 16-bit spectra. Any Hamamatsu
+USB device (VID 0x0661) that is not a DCamUSB unit is accepted and labelled with
+the product ID and the EEPROM identity, so an OEM part number works without a
+code change. **Hardware validation is still required**: connect the unit, confirm
+the serial/sensor in the status bar, and compare a known line against the
+EEPROM wavelength calibration.
+
+### Bench checklist (Windows, real hardware)
+
+1. Baseline: run the default settings once on a known source (e.g. 405 nm) and keep the `metrics_*.json`.
+2. Hama5: Zadig → WinUSB; Setup → Hama5 → Connect; check serial, sensor and pixel count; Live View with a lamp; compare peak wavelength.
+3. Advanced flags, one at a time, each followed by a full run and a diff of `metrics_*.json` against the baseline (peak pixels identical, FWHM within noise):
+   - *Turn off only the lit source*: inspect the dark frames of every source for residual light.
+   - *Pre-arm the CUBE*: inspect the dark frame preceding 377 nm for stray 377 nm light.
+   - *Framed serial replies*: watch the log for "timeout" on OBIS/CUBE/relay commands.
+4. Stop button during a 50-cycle capture: the run must end within one frame.
+5. Ava1/Hama2/Hama3/Hama4: one full run each to exercise the shared `wait_for_measurement` timeout and the in-place accumulators.
+
+### Known limitations left in v3.4
+
+- EEPROM read/write DLL calls still run on the Tk thread (they are rare, seconds-long, and guarded against concurrent acquisition).
+- Lasers added in Setup appear in Live View / Measurements / Check Resolution after a restart (the lists are configuration-driven at build time, not rebuilt live).
+- The four vendor drivers still carry ~2,500 duplicated lines; consolidation into a base class was deliberately deferred until a bench is available.
+- Reference-CSV overlays and the Hg-Ar branch have no golden data (no run in `results/` contains a lamp measurement); they are covered by synthetic tests only.
+
+### Verification commands
+
+```
+python3 -m pytest tests -q --ignore=tests/test_smoke_gui.py    # 58 passed
+.venv/bin/python -m pytest tests/test_smoke_gui.py -q          # 5 passed
+.venv/bin/ruff check .
+python3 tests/golden/make_snapshot.py                          # regenerate only on intended numeric change
+```

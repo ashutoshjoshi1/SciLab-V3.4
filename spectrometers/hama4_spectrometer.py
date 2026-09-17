@@ -660,7 +660,7 @@ class Hama4_Spectrometer(object):
                 return "OK"
 
             # Wait for a frame
-            x_data, y_data = self._wait_and_get_frame()
+            _x_unused, y_data = self._wait_and_get_frame(want_x=False)
             arrival_time = spec_clock.now()
 
             if y_data is None:
@@ -1205,7 +1205,7 @@ class Hama4_Spectrometer(object):
             pass
         self.is_streaming = False
 
-    def _wait_and_get_frame(self, timeout_ms=None):
+    def _wait_and_get_frame(self, timeout_ms=None, want_x=True):
         """
         Wait for the next frame and return (x_array, y_array) as numpy arrays.
         Returns (None, None) on timeout / error.
@@ -1254,10 +1254,12 @@ class Hama4_Spectrometer(object):
         x_ctype = _HIAS_DATA_TYPES.get(xy.x_type, ctypes.c_double)
         y_ctype = _HIAS_DATA_TYPES.get(xy.y_type, ctypes.c_double)
 
-        x_buf = ctypes.cast(xy.buffer_x, ctypes.POINTER(x_ctype * num_pixels))
         y_buf = ctypes.cast(xy.buffer_y, ctypes.POINTER(y_ctype * num_pixels))
-
-        return np.array(x_buf.contents, dtype=np.float64), np.array(y_buf.contents, dtype=np.float64)
+        y_data = np.array(y_buf.contents, dtype=np.float64)
+        if not want_x:
+            return None, y_data  # the acquisition loop discards X; skip the second 16 KB copy per frame
+        x_buf = ctypes.cast(xy.buffer_x, ctypes.POINTER(x_ctype * num_pixels))
+        return np.array(x_buf.contents, dtype=np.float64), y_data
 
     def _close_device(self, ignore_errors=False):
         """Free buffer, close device handle."""
@@ -1427,9 +1429,9 @@ class Hama4_Spectrometer(object):
             return issat, data_ok
 
         # Accumulate
-        self.sy  = self.sy + rc
-        self.syy = self.syy + rc ** 2
-        self.sxy = self.sxy + cycle_index * rc
+        self.sy += rc
+        self.syy += rc * rc
+        self.sxy += cycle_index * rc
         self.ncy_handled += 1
         if issat:
             self.ncy_saturated += 1
@@ -1637,7 +1639,7 @@ if __name__ == "__main__":
         SP[i].alias = str(i + 1)
 
         if instr == "TestBench":
-            SP[i].sn = "725YA001" 
+            SP[i].sn = "725YA001"
             SP[i].npix_active = 256
             SP[i].min_it_ms = 0.005
             SP[i].performance_test_it_ms_list = np.arange(0.05, 10.1, 1.0)

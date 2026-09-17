@@ -167,6 +167,13 @@ class SimulatedLaserController:
         self.log.append(("cube_on", f"{float(power_mw):.3f}"))
         self.bench.set_source("377", True)
 
+    def cube_arm(self, power_mw: float = 12.0) -> None:
+        self.log.append(("cube_arm", f"{float(power_mw):.3f}"))   # EXT/CW/P: no light yet
+
+    def cube_emit(self) -> None:
+        self.log.append(("cube_emit",))
+        self.bench.set_source("377", True)
+
     def cube_off(self) -> None:
         self.log.append(("cube_off",))
         self.bench.set_source("377", False)

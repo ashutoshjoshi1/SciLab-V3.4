@@ -48,12 +48,17 @@ def split_cycles(max_ncy_per_meas, ncy):
     return ncy_per_meas, npacks_info
 
 
-def calc_msl(spec_alias,x,sxy,sy,syy,nav=[],syw=[]):
+def calc_msl(spec_alias,x,sxy,sy,syy,nav=None,syw=None,shift=None):
     """
-    res,m,s,l=calc_msl(spec_alias,x,sxy,sy,syy,nav=[],syw=[])
+    res,m,s,l=calc_msl(spec_alias,x,sxy,sy,syy,nav=[],syw=[],shift=None)
 
     This function calculates the mean <m>, standard deviation <s>,
     and the rms to a fitted straight line <l>.
+
+    <shift> (optional, dimension (npix,1)): if the caller accumulated sy/syy/sxy from counts with
+    <shift> subtracted (typically the first cycle), pass it here. <s> and <l> are shift-invariant and
+    the shift is added back to <m>. Accumulating shifted counts avoids the catastrophic cancellation
+    in syy - n*m**2 that produced negative variances at high count levels.
 
     Params:
 
@@ -82,10 +87,11 @@ def calc_msl(spec_alias,x,sxy,sy,syy,nav=[],syw=[]):
     sxy=np.array(sxy,dtype=np.float64) #must be positive or zero. Not nans.
     sy=np.array(sy,dtype=np.float64)
     syy=np.array(syy,dtype=np.float64)
+    use_nav=nav is not None and len(nav)>0
     #mean
     if n>0:
         m=sy/n
-        if nav!=[]:
+        if use_nav:
             nav=np.array(nav,dtype=np.float64)
             syw=np.array(syw,dtype=np.float64)
             mw=syw/nav.sum()
@@ -94,7 +100,8 @@ def calc_msl(spec_alias,x,sxy,sy,syy,nav=[],syw=[]):
     #standard deviation
     if n>1:
         s=(syy-n*(m**2))/(n-1)
-        if nav!=[]:
+        s=np.maximum(s,0.0) #rounding can leave tiny negative values when the spread is ~0
+        if use_nav:
             navr=nav-1
             i0=navr==0
             navr[i0]=1
@@ -112,8 +119,11 @@ def calc_msl(spec_alias,x,sxy,sy,syy,nav=[],syw=[]):
         d=(sxx*sy-sx*sxy)/delta
         k=(n*sxy-sx*sy)/delta
         l=(syy-2*k*sxy-2*d*sy+(k**2)*sxx+2*k*d*sx+n*(d**2))/(n-2)
-        if nav!=[]:
+        if use_nav:
             l=l*fact
+        #Tiny negatives are rounding noise from the sum-of-squares formula; only report real ones.
+        tol=1e-9*np.maximum(syy/max(n-2,1),1.0)
+        l=np.where((l<0)&(l>-tol),0.0,l)
         if np.any(l<0):
             logger.warning("Negative value found in l while calculating calc_msl, for spec "+spec_alias+".")
             try:
@@ -145,8 +155,10 @@ def calc_msl(spec_alias,x,sxy,sy,syy,nav=[],syw=[]):
             l=l**(0.5)
     else:
         l=[]
-    if (n>1)and(nav!=[]):
+    if (n>1)and use_nav:
         m=mw #this is the best estimate for the mean
+    if shift is not None and n>0:
+        m=m+np.asarray(shift,dtype=np.float64)
     return res,m,s,l
 
 

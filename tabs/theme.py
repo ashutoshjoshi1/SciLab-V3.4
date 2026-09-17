@@ -7,7 +7,6 @@ the root Tk window.
 
 from __future__ import annotations
 
-import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -18,20 +17,42 @@ from tkinter import ttk
 FONT_FAMILY = "Segoe UI"
 _FALLBACKS = ("Helvetica Neue", "Helvetica", "Arial", "sans-serif")
 
-# Resolve first available family at import time so downstream code can
-# reference FONT_FAMILY directly.
-def _resolve_font() -> str:
+_MPL_FONT_CACHE: dict = {}
+
+
+def matplotlib_font_family() -> str:
+    """Font family for matplotlib text: Segoe UI where installed, else matplotlib's default.
+
+    Resolved once; asking matplotlib for a missing family logs a warning on every
+    draw, which is what happened on non-Windows machines before.
+    """
+    cached = _MPL_FONT_CACHE.get("family")
+    if cached is not None:
+        return cached
+    family = "sans-serif"
     try:
-        _tmp = tk.Tk()
-        _tmp.withdraw()
-        available = set(tk.font.families())
-        _tmp.destroy()
-        for fam in (FONT_FAMILY, *_FALLBACKS):
-            if fam in available:
-                return fam
+        from matplotlib import font_manager
+
+        available = {entry.name for entry in font_manager.fontManager.ttflist}
+        for candidate in (FONT_FAMILY, *_FALLBACKS):
+            if candidate in available:
+                family = candidate
+                break
     except Exception:
         pass
-    return FONT_FAMILY  # let Tk fall back gracefully
+    _MPL_FONT_CACHE["family"] = family
+    return family
+
+
+def screen_dpi(root, default: float = 100.0) -> float:
+    """Figure DPI matching the display so plots are crisp on scaled (125-150 %) monitors."""
+    try:
+        dpi = float(root.winfo_fpixels("1i"))
+    except Exception:
+        return default
+    if not (48.0 <= dpi <= 240.0):
+        return default
+    return dpi
 
 # ---------------------------------------------------------------------------
 # Color palette -- professional blue-gray tones
@@ -358,19 +379,20 @@ def configure_matplotlib_style(fig, ax, *, title: str = "",
                                 xlabel: str = "Pixel Index",
                                 ylabel: str = "Counts") -> None:
     """Apply consistent styling to a matplotlib Figure + Axes."""
-    fig.patch.set_facecolor("#ffffff")
+    fig.patch.set_facecolor(Colors.BG_SURFACE)
     ax.set_facecolor("#fafbfc")
+    family = matplotlib_font_family()
 
     if title:
         ax.set_title(title, fontsize=13, fontweight="bold",
-                     fontfamily=FONT_FAMILY, pad=10,
+                     fontfamily=family, pad=10,
                      color=Colors.TEXT_PRIMARY)
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=10, fontweight="semibold",
-                      fontfamily=FONT_FAMILY, color=Colors.TEXT_SECONDARY)
+                      fontfamily=family, color=Colors.TEXT_SECONDARY)
     if ylabel:
         ax.set_ylabel(ylabel, fontsize=10, fontweight="semibold",
-                      fontfamily=FONT_FAMILY, color=Colors.TEXT_SECONDARY)
+                      fontfamily=family, color=Colors.TEXT_SECONDARY)
 
     ax.grid(True, which="major", linestyle="-", linewidth=0.4,
             alpha=0.25, color="#94a3b8")
