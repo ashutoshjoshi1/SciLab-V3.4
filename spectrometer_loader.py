@@ -14,7 +14,8 @@ LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DLLS_DIR = PROJECT_ROOT / "spectrometers dll files"
-SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "MiniSpec"]
+# "Simulated" is explicit opt-in only: Auto never falls back to fake data.
+SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "MiniSpec", "Simulated"]
 
 
 def normalize_spec_type(spec_type: Optional[str]) -> str:
@@ -132,6 +133,9 @@ def _import_backend_class(spec_type: str, dll_path: Optional[str] = None):
     if normalized == "MiniSpec":
         module = importlib.import_module("spectrometers.minispec_spectrometer")
         return module.MiniSpec_Spectrometer
+    if normalized == "Simulated":
+        module = importlib.import_module("spectrometers.simulated_spectrometer")
+        return module.SimulatedSpectrometer
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 
@@ -311,6 +315,10 @@ def _discover_minispec(dll_path: Optional[str]) -> List[Dict[str, str]]:
     return devices
 
 
+def _discover_simulated(_dll_path: Optional[str]) -> List[Dict[str, str]]:
+    return [{"serial": "SIM-0001", "label": "SIM-0001 (Simulated spectrometer) [Simulated]", "type": "Simulated"}]
+
+
 def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str, str]]:
     normalized = normalize_spec_type(spec_type)
     if normalized == "Ava1":
@@ -323,6 +331,8 @@ def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str
         return _discover_hama4(dll_path)
     if normalized == "MiniSpec":
         return _discover_minispec(dll_path)
+    if normalized == "Simulated":
+        return _discover_simulated(dll_path)
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 
@@ -349,17 +359,25 @@ def connect_spectrometer(
     dll_path: Optional[str] = None,
     serial: Optional[str] = None,
     debug_mode: int = 1,
+    devices: Optional[List[Dict[str, str]]] = None,
 ):
+    """Connect to a spectrometer of ``spec_type`` (or the first that responds for "Auto").
+
+    Pass ``devices`` (the list returned by ``discover_spectrometers``) to reuse an
+    enumeration the caller already performed; otherwise the hardware is
+    enumerated again here, which for some DLLs means a second full init cycle.
+    """
     candidates = _candidate_types(spec_type, dll_path)
     last_error = None
 
     for candidate in candidates:
         candidate_dll = _candidate_dll_path(candidate, spec_type, dll_path)
         try:
-            devices = _discover_for_type(candidate, candidate_dll)
-            if not devices:
+            known = [device for device in (devices or []) if device.get("type", candidate) == candidate]
+            found = known or _discover_for_type(candidate, candidate_dll)
+            if not found:
                 continue
-            selected_serial = serial or devices[0]["serial"]
+            selected_serial = serial or found[0]["serial"]
             spec = _new_spec_instance(candidate, candidate_dll, selected_serial, debug_mode=debug_mode)
             res = spec.connect()
             if res != "OK":

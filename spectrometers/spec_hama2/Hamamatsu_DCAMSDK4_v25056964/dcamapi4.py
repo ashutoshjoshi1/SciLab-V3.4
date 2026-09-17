@@ -2,6 +2,7 @@
 # Sightly adjusted for python 2 compatibility.
 
 
+import logging
 import platform
 from enum import Enum, IntEnum
 from ctypes import *

@@ -580,7 +580,7 @@ class MiniSpec_Spectrometer(object):
         if not self._meas_lock.acquire(blocking=False):
             return "Measurement already in progress"
 
-        self._meas_done_event.clear()
+        self._meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.error = "OK"
         self.ncy_requested = ncy
         self.ncy_read = 0
@@ -675,9 +675,31 @@ class MiniSpec_Spectrometer(object):
 
         return "OK"
 
-    def wait_for_measurement(self):
-        # measure() blocks already; this just returns the last status.
-        self._meas_done_event.wait()
+    def request_stop(self):
+        """Stop on behalf of the operator and wake any thread blocked in wait_for_measurement()."""
+        self._stop_requested = True
+        res = self.abort(ignore_errors=True)
+        self._meas_done_event.set()
+        return res
+
+    def wait_for_measurement(self, timeout=None):
+        # measure() blocks already; this returns the last status, bounded by a timeout so a
+        # stalled DLL wait can never hang the caller forever.
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested, self.it_ms)
+        if not self._meas_done_event.wait(timeout):
+            self.error = ("Timeout after %.1f s waiting for measurement of spec %s (ncy=%s, IT=%s ms)"
+                          % (timeout, self.alias, self.ncy_requested, self.it_ms))
+            self.logger.error(self.error)
+            try:
+                self.abort(ignore_errors=True)
+            except Exception:
+                self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
+            self._meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
     def abort(self, ignore_errors=False):

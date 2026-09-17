@@ -356,7 +356,7 @@ def read_eeprom_data(app):
         # We need to call it again to get the structure with data
         
         from ctypes import c_uint32, c_uint16, byref
-        from avantes_spectrometer import DeviceConfigType
+        from spectrometers.ava1_spectrometer import DeviceConfigType
         
         devconfig = DeviceConfigType()
         size = c_uint32(63484)

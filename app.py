@@ -320,6 +320,20 @@ class SpectroApp(tk.Tk):
 
     RELAY_CHANNEL_MAP = {"517": 2, "532": 1, "Hg_Ar": 4}
 
+    def install_laser_controller_for_backend(self, backend_type: Optional[str]) -> None:
+        """Pair the simulated spectrometer with the simulated light bench; real serial lasers otherwise."""
+        if backend_type == "Simulated" and self.spec is not None:
+            from spectrometers.simulated_spectrometer import SimulatedLaserController
+
+            if not isinstance(self.lasers, SimulatedLaserController):
+                self._hardware_lasers = self.lasers
+                self.lasers = SimulatedLaserController(self.spec.bench)
+            return
+        hardware = getattr(self, "_hardware_lasers", None)
+        if hardware is not None:
+            self.lasers = hardware
+            self._hardware_lasers = None
+
     def set_source_state(self, tag: str, turn_on: bool) -> None:
         """Turn one light source on or off. Blocking serial I/O; not for the Tk thread."""
         self.lasers.ensure_open_for_tag(tag)

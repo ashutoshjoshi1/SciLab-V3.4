@@ -408,7 +408,7 @@ class Hama4_Spectrometer(object):
         The actual work is done by the data_arrival_watchdog / measure_blocking.
         """
         self.measuring = True
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch = True
         self.error = "OK"
 
@@ -560,7 +560,7 @@ class Hama4_Spectrometer(object):
         self.measuring = True
 
         _ = self.abort(ignore_errors=True)
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch = True
         self.ncy_requested = ncy
         self.reset_spec_data()
@@ -691,6 +691,18 @@ class Hama4_Spectrometer(object):
 
         return "OK"
 
+    def request_stop(self):
+        """Stop on behalf of the operator (UI Stop button) and wake any thread blocked in
+        wait_for_measurement() right away, without waiting for the DLL callback.
+
+        Unlike ``abort()``, which is also used internally on saturation, this marks the
+        measurement as stopped so callers do not consume stale data.
+        """
+        self._stop_requested = True
+        res = self.abort(ignore_errors=True)
+        self.internal_meas_done_event.set()
+        return res
+
     def wait_for_measurement(self, timeout=None):
         """Block until the current measurement is fully handled.
 
@@ -710,6 +722,10 @@ class Hama4_Spectrometer(object):
             except Exception:
                 self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
             self.internal_meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
     # ===================================================================

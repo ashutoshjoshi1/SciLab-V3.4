@@ -172,8 +172,24 @@ class MeasurementOrchestrator:
 
         raise RuntimeError(f"Unsupported measurement tag '{tag}'.")
 
-    def _capture_counts(self, it_ms: float, num_cycles: int) -> np.ndarray:
+    def _apply_it(self, it_ms: float) -> None:
+        """Send set_it only when the value actually changes.
+
+        Signal and dark captures reuse the settled auto-IT value, so this removes
+        two DLL round trips per source (on Hama4 each set_it also stops and
+        restarts the stream with a fixed 0.2 s pause).
+        """
+        current = getattr(self.spec, "it_ms", None)
+        try:
+            unchanged = current is not None and abs(float(current) - float(it_ms)) <= 1e-9
+        except (TypeError, ValueError):
+            unchanged = False
+        if unchanged:
+            return
         self._check_backend_call(self.spec.set_it(it_ms), "set_it")
+
+    def _capture_counts(self, it_ms: float, num_cycles: int) -> np.ndarray:
+        self._apply_it(it_ms)
         self._check_backend_call(self.spec.measure(ncy=num_cycles), "measure")
         self._check_backend_call(self.spec.wait_for_measurement(), "wait_for_measurement")
         raw = getattr(self.spec, "rcm", None)

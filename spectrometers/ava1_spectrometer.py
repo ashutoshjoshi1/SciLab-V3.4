@@ -623,7 +623,7 @@ class Avantes_Spectrometer():
              (only possible if store_to_ram is disabled)
 
         """
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch=True
         self.measuring=True
 
@@ -898,14 +898,46 @@ class Avantes_Spectrometer():
         else:
             return res
 
-    def wait_for_measurement(self):
+    def request_stop(self):
         """
-        res=wait_for_measurement()
-        Wait for the measurement to be complete
+        res=request_stop()
+        Stop the ongoing measurement on behalf of the operator (UI Stop button) and wake up any thread
+        blocked in wait_for_measurement() right away, without waiting for the DLL callback.
+        Unlike abort(), which is also used internally (saturation), this marks the measurement as
+        stopped so callers do not consume stale data.
+        returns:
+            <res>: "OK" or an error description from abort()
+        """
+        self._stop_requested=True
+        res=self.abort(ignore_errors=True)
+        self.internal_meas_done_event.set()
+        return res
+
+    def wait_for_measurement(self, timeout=None):
+        """
+        res=wait_for_measurement(timeout=None)
+        Wait for the measurement to be complete, or until <timeout> seconds elapse (default: twice
+        the expected duration plus a margin, see spec_xfus.measurement_timeout_s). On timeout the
+        measurement is aborted and an error is returned, so a stalled watchdog thread can never hang
+        the caller forever.
         returns:
             <res>: If any problem happened while measuring, the last produced error will be stored in self.error
         """
-        self.internal_meas_done_event.wait()
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested, self.it_ms)
+        if not self.internal_meas_done_event.wait(timeout):
+            self.error = ("Timeout after %.1f s waiting for measurement of spec %s (ncy=%s, IT=%s ms)"
+                          % (timeout, self.alias, self.ncy_requested, self.it_ms))
+            self.logger.error(self.error)
+            try:
+                self.abort(ignore_errors=True)
+            except Exception:
+                self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
+            self.internal_meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
 

@@ -506,7 +506,7 @@ class Hama3_Spectrometer():
         This can be much simpler, but in this way we ensure the spec is already measuring the next cycle while
         we are handling the data of the previous cycle.
         """
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.measuring=True
         self.docatch=True
         self.error="OK" #Reset last error
@@ -744,7 +744,7 @@ class Hama3_Spectrometer():
 
         # Abort any ongoing measurement
         _ = self.abort(ignore_errors=True,log=False)
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.measuring = True
         self.docatch = True
         self.ncy_requested = ncy
@@ -819,6 +819,21 @@ class Hama3_Spectrometer():
 
         return res
 
+    def request_stop(self):
+        """
+        res=request_stop()
+        Stop the ongoing measurement on behalf of the operator (UI Stop button) and wake up any thread
+        blocked in wait_for_measurement() right away, without waiting for the DLL callback.
+        Unlike abort(), which is also used internally (saturation), this marks the measurement as
+        stopped so callers do not consume stale data.
+        returns:
+            <res>: "OK" or an error description from abort()
+        """
+        self._stop_requested=True
+        res=self.abort(ignore_errors=True)
+        self.internal_meas_done_event.set()
+        return res
+
     def wait_for_measurement(self, timeout=None):
         """
         res=wait_for_measurement(timeout=None)
@@ -840,6 +855,10 @@ class Hama3_Spectrometer():
             except Exception:
                 self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
             self.internal_meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
     def initialize_dll(self):

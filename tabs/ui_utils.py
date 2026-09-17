@@ -1,6 +1,8 @@
 import tkinter as tk
 from tkinter import ttk
 
+from .ui_pump import ThrottledRedraw, UiPump  # noqa: F401 - re-exported for the tabs
+
 
 class ScrollableFrame(ttk.Frame):
     """A ttk frame backed by a canvas with optional x/y scrollbars."""

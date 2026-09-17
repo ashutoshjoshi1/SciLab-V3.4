@@ -343,7 +343,7 @@ class Hama2_Spectrometer():
         we are handling the data of the previous cycle.
         """
         self.measuring=True
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch=True
         self.error="OK" #Reset last error
 
@@ -579,7 +579,7 @@ class Hama2_Spectrometer():
 
         #Abort any ongoing measurement
         _ = self.abort(ignore_errors=True)
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
 
         self.ncy_requested=ncy
         self.reset_spec_data() #reset accumulated data and measurements done/handled counters
@@ -761,7 +761,7 @@ class Hama2_Spectrometer():
 
         #Abort any ongoing measurement
         _ = self.abort(ignore_errors=True)
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch=True
 
         self.ncy_requested=ncy
@@ -851,6 +851,21 @@ class Hama2_Spectrometer():
         return res
 
 
+    def request_stop(self):
+        """
+        res=request_stop()
+        Stop the ongoing measurement on behalf of the operator (UI Stop button) and wake up any thread
+        blocked in wait_for_measurement() right away, without waiting for the DLL callback.
+        Unlike abort(), which is also used internally (saturation), this marks the measurement as
+        stopped so callers do not consume stale data.
+        returns:
+            <res>: "OK" or an error description from abort()
+        """
+        self._stop_requested=True
+        res=self.abort(ignore_errors=True)
+        self.internal_meas_done_event.set()
+        return res
+
     def wait_for_measurement(self, timeout=None):
         """
         res=wait_for_measurement(timeout=None)
@@ -873,6 +888,10 @@ class Hama2_Spectrometer():
             except Exception:
                 self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
             self.internal_meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
     #---Auxiliary functions (used by the Main functions)---

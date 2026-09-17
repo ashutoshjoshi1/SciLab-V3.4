@@ -974,12 +974,14 @@ def build(app):
                 dll_path=dll,
                 serial=selected_device.get("serial"),
                 debug_mode=1,
+                devices=devices,  # reuse the enumeration above instead of probing the hardware twice
             )
 
             app.spec = spec
             # Allow saturated data through so the UI can clamp & display it
             spec.abort_on_saturation = False
             app.spec_backend = resolved_type
+            app.install_laser_controller_for_backend(resolved_type)
             app.hw.spectrometer_type = resolved_type
             app.spec_type_var.set(resolved_type)
             app.sn = getattr(spec, "sn", selected_device.get("serial", "Unknown"))
@@ -1004,6 +1006,7 @@ def build(app):
                     pass
             app.spec = None
             app.spec_backend = None
+            app.install_laser_controller_for_backend(None)
             app.spec_status.config(text="● Disconnected", foreground="red")
         except Exception as e:
             app._post_error("Spectrometer Disconnect", e)
