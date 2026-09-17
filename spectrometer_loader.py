@@ -14,7 +14,7 @@ LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DLLS_DIR = PROJECT_ROOT / "spectrometers dll files"
-# "Hama5" = Hamamatsu mini-spectrometers on the specu1b USB protocol (C10785, TM/TG/RC
+# "Hama5" = Hamamatsu mini-spectrometers on the specu1b USB protocol (TM/TG/RC
 # series) via pyusb; no vendor DLL. "Simulated" is explicit opt-in only: Auto never
 # falls back to fake data.
 SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "Hama5", "MiniSpec", "Simulated"]
@@ -358,24 +358,27 @@ def _discover_hama4(dll_path: Optional[str]) -> List[Dict[str, str]]:
 def _discover_minispec(dll_path: Optional[str]) -> List[Dict[str, str]]:
     spec = _new_spec_instance("MiniSpec", dll_path, serial=None, debug_mode=0)
     _require_dll(spec, "MiniSpec", "DCamUSB.dll")
-    _check(spec.load_spec_dll(), "load DLL")
-    _check(spec.initialize_dll(), "initialise DLL")
-    res, count = spec.get_number_of_devices()
-    _check(res, "count devices")
-    if count == 0:
-        return []
-    res, devices_info = spec.get_all_devices_info(count)
-    _check(res, "read device info")
+    try:
+        _check(spec.load_spec_dll(), "load DLL")
+        _check(spec.initialize_dll(), "initialise DLL")
+        res, count = spec.get_number_of_devices()
+        _check(res, "count devices")
+        if count == 0:
+            return []
+        res, devices_info = spec.get_all_devices_info(count)
+        _check(res, "read device info")
 
-    devices = []
-    for index, dev_info in devices_info.items():
-        serial_number = _clean_text(dev_info.get("id", "")) or f"MiniSpec-{index + 1}"
-        model = _clean_text(dev_info.get("model", "Hamamatsu MiniSpec"))
-        devices.append(
-            {"serial": serial_number, "label": f"{serial_number} ({model}) [MiniSpec]", "type": "MiniSpec"}
-        )
-    return devices
+        devices = []
+        for index, dev_info in devices_info.items():
+            serial_number = _clean_text(dev_info.get("id", "")) or f"MiniSpec-{index + 1}"
+            model = _clean_text(dev_info.get("model", "Hamamatsu MiniSpec"))
+            devices.append(
+                {"serial": serial_number, "label": f"{serial_number} ({model}) [MiniSpec]", "type": "MiniSpec"}
+            )
+        return devices
 
+    finally:
+        _release_probe(spec)
 
 def _discover_hama5(_dll_path: Optional[str]) -> List[Dict[str, str]]:
     module = importlib.import_module("spectrometers.hama5_spectrometer")
@@ -443,6 +446,7 @@ def discover_spectrometers(
         vendors = None
 
     errors: List[str] = []
+    attempts: List[str] = []
     skipped: List[str] = []
     for candidate in candidates:
         wanted = BACKEND_USB_VENDORS.get(candidate)
@@ -459,15 +463,17 @@ def discover_spectrometers(
             devices = _discover_for_type(candidate, candidate_dll)
         except Exception as exc:
             errors.append(f"{candidate}: {exc}")
+            attempts.append(errors[-1])
             LOGGER.warning("Unable to discover %s spectrometers: %s", candidate, exc)
             continue
         if devices:
             if skipped:
                 LOGGER.info("Auto probe skipped %s (no matching USB vendor attached)", ", ".join(skipped))
             return devices
+        attempts.append(f"{candidate}: no compatible devices returned")
 
     if errors or skipped:
-        raise RuntimeError(_format_discovery_failure(normalized, errors, skipped, vendors))
+        raise RuntimeError(_format_discovery_failure(normalized, attempts, skipped, vendors))
     return []
 
 

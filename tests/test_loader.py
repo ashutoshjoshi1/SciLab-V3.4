@@ -85,6 +85,17 @@ def test_explicit_type_never_uses_the_usb_prescan(monkeypatch, probe_log):
     assert calls == [] and probe_log["probed"] == ["Hama4"]
 
 
+def test_failed_auto_discovery_includes_backends_that_returned_no_devices(monkeypatch, probe_log):
+    monkeypatch.setattr(loader, "present_usb_vendor_ids", lambda: {loader.HAMAMATSU_VENDOR_ID})
+    probe_log["errors"]["MiniSpec"] = "count devices: No driver was found"
+    with pytest.raises(RuntimeError) as excinfo:
+        loader.discover_spectrometers("Auto")
+    message = str(excinfo.value)
+    assert "MiniSpec: count devices: No driver was found" in message
+    assert "Hama3: no compatible devices returned" in message
+    assert "Hama5: no compatible devices returned" in message
+
+
 def test_connect_only_tries_backends_of_the_discovered_devices(monkeypatch):
     attempted = []
 

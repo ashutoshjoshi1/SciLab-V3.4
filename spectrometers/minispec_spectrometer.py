@@ -1,6 +1,6 @@
 """
-Backend for Hamamatsu Mini-Spectrometer Micro Series Plus (C11287-01, C11288-01,
-C11160, C11165-01/02, C11513) driven by DCamUSB.dll (Hamamatsu DCam-USB SDK,
+Backend for Hamamatsu DCam-USB devices, including C10785 and Micro Series Plus
+(C11287-01, C11288-01, C11160, C11165-01/02, C11513), driven by DCamUSB.dll (
 SingleDevice variant, V300 controller).
 
 This wraps the C API exported by `DCamUSB.dll` via ctypes and exposes the same
@@ -9,9 +9,8 @@ of SciLab can stay agnostic.
 
 Tested against: C11288-01.
 
-Note: older Hamamatsu mini-spectrometer modules (e.g. C10785, TM/TG series)
-use a different USB interface and SDK and are NOT covered by DCamUSB.dll.
-They are handled by the ``Hama5`` backend (spectrometers/hama5_spectrometer.py).
+The bundled DLL explicitly recognizes C10785. Hama5 uses a different USB
+protocol and excludes V300 PID 3400; it is not a fallback for this device.
 """
 
 import logging
@@ -35,6 +34,11 @@ import numpy as np
 
 from spec_xfus import spec_clock, measurement_timeout_s
 from spectrometers._winapi import windll  # importable on every OS; fails on first use off Windows
+from spectrometers.hamamatsu_diagnostics import (
+    BUNDLED_DCAMUSB_INTERFACE_GUID,
+    collect_windows_usb_diagnostics,
+    format_windows_usb_diagnostics,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -90,14 +94,14 @@ dcamusb_errors = {
 
 
 MiniSpec_Spectrometer_Instances = {}
-_dcamusb_initialized = False
+_dcamusb_owner = None
 _dcamusb_initialized_lock = threading.Lock()
 
 
-# Supported PIDs from WinUsbDCamIF.inf (VID = 0x0661 = Hamamatsu Photonics).
-# After firmware upload by the SDK, the device re-enumerates as one of these.
+# Some known PIDs; this is not a complete model-support table. In particular,
+# a generic V300 PID cannot establish the model or whether firmware upload failed.
 _DCAMUSB_SUPPORTED_PIDS = {
-    "3400": "V300 (boot/firmware-not-loaded — generic)",
+    "3400": "V300 USB controller (generic)",
     "4607": "C11287-01",
     "4608": "C11288-01",
     "4609": "C11160",
@@ -108,70 +112,34 @@ _DCAMUSB_SUPPORTED_PIDS = {
 
 
 def _list_hamamatsu_usb_devices():
-    """
-    On Windows, enumerate plugged-in USB devices with VID_0661 (Hamamatsu).
-    Returns a list of "PID xxxx (model)" strings. Empty if none / non-Windows.
-    """
-    if sys.platform != "win32":
-        return []
-    try:
-        import subprocess
-        cmd = (
-            "Get-PnpDevice -PresentOnly | "
-            "Where-Object { $_.InstanceId -like '*VID_0661*' } | "
-            "Select-Object -ExpandProperty InstanceId"
-        )
-        out = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", cmd],
-            capture_output=True, text=True, timeout=5,
-        )
-    except Exception:
-        return []
-
-    found = []
-    for line in (out.stdout or "").splitlines():
-        line = line.strip().upper()
-        idx = line.find("PID_")
-        if idx < 0:
-            continue
-        pid = line[idx + 4:idx + 8]
-        model = _DCAMUSB_SUPPORTED_PIDS.get(pid, "unknown — not supported by DCamUSB.dll")
-        found.append("PID " + pid + " (" + model + ")")
-    return found
+    """Compatibility helper for diagnostic callers; no USB device is opened."""
+    return [
+        f"PID {dev['product_id']} ({_DCAMUSB_SUPPORTED_PIDS.get(dev['product_id'], 'model undetermined')})"
+        for dev in collect_windows_usb_diagnostics()["devices"]
+    ]
 
 
 def _augment_minispec_error(msg):
     """Add Windows USB diagnostic context to a MiniSpec error string."""
-    devices = _list_hamamatsu_usb_devices()
-    if not devices:
-        return (
-            msg + " (No Hamamatsu USB device detected by Windows. "
-            "Check the cable and that Device Manager lists it under "
-            "'Hamamatsu USB Camera Module', not 'Unknown Device'.)"
+    snapshot = collect_windows_usb_diagnostics()
+    details = [msg + ".", format_windows_usb_diagnostics(snapshot)]
+    if snapshot["devices"] or "no driver" in msg.lower():
+        details.append(
+            "DCamUSB could not find or open its device interface; a healthy Device Manager entry "
+            "does not guarantee that the loaded DLL matches the installed driver. Close other "
+            "acquisition programs and retry. For C10785 select MiniSpec and the DCamUSB.dll "
+            "supplied with the working Hamamatsu application/SDK, matching Python's 32/64-bit architecture."
         )
-    only_boot = all("PID 3400" in d for d in devices)
-    suffix = " Plugged in: " + ", ".join(devices) + "."
-    if only_boot:
-        suffix += (
-            " Only the generic V300 boot PID is present — DcamInitialize "
-            "could not upload firmware to switch the device to a model PID. "
-            "This SDK supports C11287-01/C11288-01/C11160/C11165/C11513 only; "
-            "older modules (e.g. C10785, TM/TG series) are supported by the "
-            "'Hama5' spectrometer type instead."
+        details.append(
+            "The bundled DLL requires the Hamamatsu WinUSB interface " + BUNDLED_DCAMUSB_INTERFACE_GUID + ". "
+            "Keep the working vendor driver; do not replace it with Zadig to fix this error."
         )
-    elif "no driver" in msg.lower():
-        # Windows sees the device at a supported model PID, but DCamUSB.dll
-        # reports no driver — WinUsb .inf is not bound to the device.
-        suffix += (
-            " The device is enumerated but the Hamamatsu WinUsb driver is "
-            "not bound to it. Install the Hamamatsu DCam-USB driver "
-            "(WinUsbDCamIF.inf, shipped with the DCam-USB SDK) on this "
-            "computer: open Device Manager, right-click the Hamamatsu "
-            "entry -> 'Update driver' -> 'Browse my computer' -> point to "
-            "the SDK's driver folder. After install the device should "
-            "appear under 'Hamamatsu USB Camera Module'."
+    if any(device["product_id"] == "3400" for device in snapshot["devices"]):
+        details.append(
+            "PID 3400 alone does not identify the model or prove a firmware failure. "
+            "Hama5 excludes this PID and cannot connect to it."
         )
-    return msg + "." + suffix
+    return " ".join(details)
 
 
 class MiniSpec_Spectrometer(object):
@@ -204,6 +172,8 @@ class MiniSpec_Spectrometer(object):
 
         # Internal state
         self.dll_handler = None
+        self._loaded_dll_path = ""
+        self._dll_directory_handle = None
         self.errors = dcamusb_errors
         self.is_open = False
         self.it_ms = None
@@ -279,89 +249,152 @@ class MiniSpec_Spectrometer(object):
             return "OK"
         if not self.dll_path or not os.path.isfile(self.dll_path):
             return "DCamUSB.dll path not set or file missing: '" + str(self.dll_path) + "'"
+        resolved_path = os.path.abspath(self.dll_path)
+        if self.dll_handler is not None:
+            if self._loaded_dll_path == resolved_path:
+                return "OK"
+            if self.is_open:
+                return "Disconnect MiniSpec before selecting a different DCamUSB.dll"
+            res = self.close_spec_dll()
+            if res != "OK":
+                return res
         try:
             if hasattr(os, "add_dll_directory"):
                 try:
-                    os.add_dll_directory(os.path.dirname(self.dll_path))
+                    self._dll_directory_handle = os.add_dll_directory(os.path.dirname(resolved_path))
                 except Exception:
                     pass
-            self.dll_handler = windll.LoadLibrary(self.dll_path)
+            self.dll_handler = windll.LoadLibrary(resolved_path)
+            self.dll_path = self._loaded_dll_path = resolved_path
         except Exception as exc:
+            self.close_spec_dll(ignore_errors=True)
             return "Could not load DCamUSB.dll: " + str(exc)
 
-        # Bind argtypes / restypes for the functions we use.
-        h = self.dll_handler
-        h.DcamInitialize.argtypes = []
-        h.DcamInitialize.restype = c_int
-        h.DcamUninitialize.argtypes = []
-        h.DcamUninitialize.restype = c_int
-        h.DcamOpen.argtypes = []
-        h.DcamOpen.restype = c_int
-        h.DcamClose.argtypes = []
-        h.DcamClose.restype = c_int
-        h.DcamGetDeviceState.argtypes = [POINTER(c_int)]
-        h.DcamGetDeviceState.restype = c_int
-        h.DcamGetImageSize.argtypes = [POINTER(c_int), POINTER(c_int)]
-        h.DcamGetImageSize.restype = c_int
-        h.DcamGetBitPerPixel.argtypes = [POINTER(c_int)]
-        h.DcamGetBitPerPixel.restype = c_int
-        h.DcamGetCaptureBytes.argtypes = [POINTER(c_int)]
-        h.DcamGetCaptureBytes.restype = c_int
-        h.DcamSetMeasureDataCount.argtypes = [c_int]
-        h.DcamSetMeasureDataCount.restype = c_int
-        h.DcamGetMeasureDataCount.argtypes = [POINTER(c_int)]
-        h.DcamGetMeasureDataCount.restype = c_int
-        h.DcamSetBinning.argtypes = [c_int]
-        h.DcamSetBinning.restype = c_int
-        h.DcamGetBinning.argtypes = [POINTER(c_int)]
-        h.DcamGetBinning.restype = c_int
-        h.DcamSetTriggerMode.argtypes = [c_int]
-        h.DcamSetTriggerMode.restype = c_int
-        h.DcamSetExposureTime.argtypes = [c_int]
-        h.DcamSetExposureTime.restype = c_int
-        h.DcamGetExposureTime.argtypes = [POINTER(c_int)]
-        h.DcamGetExposureTime.restype = c_int
-        h.DcamSetGain.argtypes = [c_int]
-        h.DcamSetGain.restype = c_int
-        h.DcamSetOffset.argtypes = [c_int]
-        h.DcamSetOffset.restype = c_int
-        h.DcamSetStandardTimeUnit.argtypes = [c_int]
-        h.DcamSetStandardTimeUnit.restype = c_int
-        h.DcamCapture.argtypes = [c_void_p, c_int]
-        h.DcamCapture.restype = c_int
-        h.DcamStop.argtypes = []
-        h.DcamStop.restype = c_int
-        h.DcamWait.argtypes = [POINTER(c_uint32), c_int]
-        h.DcamWait.restype = c_int
-        h.DcamGetDeviceInformation.argtypes = [c_int, c_void_p, c_int]
-        h.DcamGetDeviceInformation.restype = c_int
-        h.DcamDeviceIsAlive.argtypes = []
-        h.DcamDeviceIsAlive.restype = c_int
-        h.DcamGetLastError.argtypes = []
-        h.DcamGetLastError.restype = c_uint32
+        try:
+            # Bind argtypes / restypes for the functions we use.
+            h = self.dll_handler
+            h.DcamInitialize.argtypes = []
+            h.DcamInitialize.restype = c_int
+            h.DcamUninitialize.argtypes = []
+            h.DcamUninitialize.restype = c_int
+            h.DcamOpen.argtypes = []
+            h.DcamOpen.restype = c_int
+            h.DcamClose.argtypes = []
+            h.DcamClose.restype = c_int
+            h.DcamGetDeviceState.argtypes = [POINTER(c_int)]
+            h.DcamGetDeviceState.restype = c_int
+            h.DcamGetImageSize.argtypes = [POINTER(c_int), POINTER(c_int)]
+            h.DcamGetImageSize.restype = c_int
+            h.DcamGetBitPerPixel.argtypes = [POINTER(c_int)]
+            h.DcamGetBitPerPixel.restype = c_int
+            h.DcamGetCaptureBytes.argtypes = [POINTER(c_int)]
+            h.DcamGetCaptureBytes.restype = c_int
+            h.DcamSetMeasureDataCount.argtypes = [c_int]
+            h.DcamSetMeasureDataCount.restype = c_int
+            h.DcamGetMeasureDataCount.argtypes = [POINTER(c_int)]
+            h.DcamGetMeasureDataCount.restype = c_int
+            h.DcamSetBinning.argtypes = [c_int]
+            h.DcamSetBinning.restype = c_int
+            h.DcamGetBinning.argtypes = [POINTER(c_int)]
+            h.DcamGetBinning.restype = c_int
+            h.DcamSetTriggerMode.argtypes = [c_int]
+            h.DcamSetTriggerMode.restype = c_int
+            h.DcamSetExposureTime.argtypes = [c_int]
+            h.DcamSetExposureTime.restype = c_int
+            h.DcamGetExposureTime.argtypes = [POINTER(c_int)]
+            h.DcamGetExposureTime.restype = c_int
+            h.DcamSetGain.argtypes = [c_int]
+            h.DcamSetGain.restype = c_int
+            h.DcamSetOffset.argtypes = [c_int]
+            h.DcamSetOffset.restype = c_int
+            h.DcamSetStandardTimeUnit.argtypes = [c_int]
+            h.DcamSetStandardTimeUnit.restype = c_int
+            h.DcamCapture.argtypes = [c_void_p, c_int]
+            h.DcamCapture.restype = c_int
+            h.DcamStop.argtypes = []
+            h.DcamStop.restype = c_int
+            h.DcamWait.argtypes = [POINTER(c_uint32), c_int]
+            h.DcamWait.restype = c_int
+            h.DcamGetDeviceInformation.argtypes = [c_int, c_void_p, c_int]
+            h.DcamGetDeviceInformation.restype = c_int
+            h.DcamDeviceIsAlive.argtypes = []
+            h.DcamDeviceIsAlive.restype = c_int
+            h.DcamGetLastError.argtypes = []
+            h.DcamGetLastError.restype = c_uint32
+
+        except Exception as exc:
+            self.close_spec_dll(ignore_errors=True)
+            return "Invalid DCamUSB.dll API: " + str(exc)
 
         return "OK"
 
     def initialize_dll(self):
         """
-        Call DcamInitialize() once globally. Idempotent across instances.
-        Returns "OK" or a description.
+        Initialize the SingleDevice SDK for this instance only.
+
+        Discovery and runtime must own separate sessions: initialization creates
+        a thread-owned window, so discovery releases its session before returning.
         """
-        global _dcamusb_initialized
+        global _dcamusb_owner
         if self.simulation_mode:
             return "OK"
         with _dcamusb_initialized_lock:
-            if _dcamusb_initialized:
+            if _dcamusb_owner is self:
                 return "OK"
+            if _dcamusb_owner is not None:
+                return "DCamUSB is already in use by another MiniSpec instance"
+            if self.dll_handler is None:
+                return "DCamUSB.dll is not loaded"
             ok = self.dll_handler.DcamInitialize()
             res = self.get_error(ok)
             if res == "OK":
-                _dcamusb_initialized = True
-            elif self.last_errcode == 3:
-                # Already initialized — treat as OK
-                _dcamusb_initialized = True
-                res = "OK"
+                _dcamusb_owner = self
             return res
+
+    def close_spec_dll(self, ignore_errors=False):
+        """Release only this instance's SDK session and DLL search directory."""
+        global _dcamusb_owner
+        res = "OK"
+        with _dcamusb_initialized_lock:
+            if _dcamusb_owner is self:
+                if self.is_open:
+                    try:
+                        self.dll_handler.DcamStop()
+                    except Exception:
+                        pass
+                    try:
+                        res = self.get_error(self.dll_handler.DcamClose())
+                    except Exception as exc:
+                        res = "DcamClose() raised: " + str(exc)
+                    self.is_open = False
+                try:
+                    uninit_res = self.get_error(self.dll_handler.DcamUninitialize())
+                except Exception as exc:
+                    uninit_res = "DcamUninitialize() raised: " + str(exc)
+                if uninit_res != "OK":
+                    # Keep ownership and the search directory while the SDK may
+                    # still be active; a later cleanup may retry safely.
+                    if not ignore_errors:
+                        self.logger.warning("MiniSpec cleanup failed: %s", uninit_res)
+                    return uninit_res
+                _dcamusb_owner = None
+
+            self.dll_handler = None
+            self._loaded_dll_path = ""
+            self._capture_buf = None
+            self._capture_bytes = 0
+            self.is_open = False
+            directory, self._dll_directory_handle = self._dll_directory_handle, None
+            if directory is not None:
+                try:
+                    directory.close()
+                except Exception as exc:
+                    if res == "OK":
+                        res = "Could not close DLL search directory: " + str(exc)
+            for key, instance in list(MiniSpec_Spectrometer_Instances.items()):
+                if instance is self:
+                    del MiniSpec_Spectrometer_Instances[key]
+        return res
 
     def get_number_of_devices(self):
         """
@@ -440,9 +473,15 @@ class MiniSpec_Spectrometer(object):
             self.reset_spec_data()
             return "OK"
 
-        self.logger.info("--- Connecting MiniSpec spectrometer " + str(self.alias) + " ---")
+        if self.is_open:
+            if os.path.abspath(self.dll_path) != self._loaded_dll_path:
+                return "Disconnect MiniSpec before selecting a different DCamUSB.dll"
+            return "OK"
 
-        if self.dll_handler is None:
+        connected = False
+        try:
+            self.logger.info("--- Connecting MiniSpec spectrometer " + str(self.alias) + " ---")
+
             res = self.load_spec_dll()
             if res != "OK":
                 self.error = res
@@ -452,101 +491,100 @@ class MiniSpec_Spectrometer(object):
                 self.error = res
                 return res
 
-        ok = self.dll_handler.DcamOpen()
-        res = self.get_error(ok)
-        if res != "OK":
-            self.error = res
-            return res
-        self.is_open = True
+            ok = self.dll_handler.DcamOpen()
+            res = self.get_error(ok)
+            if res != "OK":
+                self.error = res
+                return res
+            self.is_open = True
 
-        # Standard mini-spec config: full-line binning, internal trigger,
-        # 1 line per measurement, exposure in ms.
-        try:
-            self.dll_handler.DcamSetStandardTimeUnit(DCAM_TIME_UNIT_TYPE1)
-        except Exception:
-            pass
-        try:
-            self.dll_handler.DcamSetBinning(DCAM_BINNING_FULL)
-        except Exception:
-            pass
-        try:
-            self.dll_handler.DcamSetTriggerMode(DCAM_TRIGMODE_INT)
-        except Exception:
-            pass
-        try:
-            self.dll_handler.DcamSetMeasureDataCount(1)
-        except Exception:
-            pass
+            # Standard mini-spec config: full-line binning, internal trigger,
+            # 1 line per measurement, exposure in ms.
+            try:
+                self.dll_handler.DcamSetStandardTimeUnit(DCAM_TIME_UNIT_TYPE1)
+            except Exception:
+                pass
+            try:
+                self.dll_handler.DcamSetBinning(DCAM_BINNING_FULL)
+            except Exception:
+                pass
+            try:
+                self.dll_handler.DcamSetTriggerMode(DCAM_TRIGMODE_INT)
+            except Exception:
+                pass
+            try:
+                self.dll_handler.DcamSetMeasureDataCount(1)
+            except Exception:
+                pass
 
-        # Discover actual image dimensions and bit depth from the device
-        width = c_int(0)
-        height = c_int(0)
-        bits = c_int(0)
-        cap_bytes = c_int(0)
-        if self.dll_handler.DcamGetImageSize(byref(width), byref(height)):
-            self._image_width = int(width.value)
-            self._image_height = int(height.value)
-        if self.dll_handler.DcamGetBitPerPixel(byref(bits)):
-            self.nbits = int(bits.value) or self.nbits
-        if self.dll_handler.DcamGetCaptureBytes(byref(cap_bytes)):
-            self._capture_bytes = int(cap_bytes.value)
+            # Discover actual image dimensions and bit depth from the device
+            width = c_int(0)
+            height = c_int(0)
+            bits = c_int(0)
+            cap_bytes = c_int(0)
+            if self.dll_handler.DcamGetImageSize(byref(width), byref(height)):
+                self._image_width = int(width.value)
+                self._image_height = int(height.value)
+            if self.dll_handler.DcamGetBitPerPixel(byref(bits)):
+                self.nbits = int(bits.value) or self.nbits
+            if self.dll_handler.DcamGetCaptureBytes(byref(cap_bytes)):
+                self._capture_bytes = int(cap_bytes.value)
 
-        if self._image_width > 0:
-            self.npix_active = self._image_width
-        if self._capture_bytes <= 0:
-            # Fall back to width × height × 2 bytes (16-bit)
-            self._capture_bytes = max(1, self._image_width) * max(1, self._image_height) * 2
+            if self._image_width > 0:
+                self.npix_active = self._image_width
+            if self._capture_bytes <= 0:
+                # Fall back to width × height × 2 bytes (16-bit)
+                self._capture_bytes = max(1, self._image_width) * max(1, self._image_height) * 2
 
-        # Allocate a reusable capture buffer of uint16.
-        n_words = max(1, self._capture_bytes // 2)
-        self._capture_buf = (c_uint16 * n_words)()
+            # Allocate a reusable capture buffer of uint16.
+            n_words = max(1, self._capture_bytes // 2)
+            self._capture_buf = (c_uint16 * n_words)()
 
-        # Re-size data arrays to match real pixel count
-        self.eff_saturation_limit = 2 ** self.nbits - 1
-        self.reset_spec_data()
+            # Re-size data arrays to match real pixel count
+            self.eff_saturation_limit = 2 ** self.nbits - 1
+            self.reset_spec_data()
 
-        # Pull the serial number off the device for display
-        try:
-            sn_buf = create_string_buffer(64)
-            if self.dll_handler.DcamGetDeviceInformation(DCAM_DEVINF_SERIALNO, sn_buf, 64):
-                detected_sn = sn_buf.value.decode("ascii", errors="ignore").strip()
-                if detected_sn:
-                    self.sn = detected_sn
-        except Exception:
-            pass
+            # Pull the serial number off the device for display
+            try:
+                sn_buf = create_string_buffer(64)
+                if self.dll_handler.DcamGetDeviceInformation(DCAM_DEVINF_SERIALNO, sn_buf, 64):
+                    detected_sn = sn_buf.value.decode("ascii", errors="ignore").strip()
+                    if detected_sn:
+                        self.sn = detected_sn
+            except Exception:
+                pass
 
-        # Set a safe initial integration time
-        initial_it = max(self.min_it_ms, 10.0)
-        res = self.set_it(initial_it)
-        if res != "OK":
-            self.error = res
-            return res
+            # Set a safe initial integration time
+            initial_it = max(self.min_it_ms, 10.0)
+            res = self.set_it(initial_it)
+            if res != "OK":
+                self.error = res
+                return res
 
-        MiniSpec_Spectrometer_Instances[self.sn or self.alias] = self
-        self.logger.info(
-            "MiniSpec connected: sn=" + str(self.sn) +
-            ", pixels=" + str(self.npix_active) +
-            ", bits=" + str(self.nbits)
-        )
-        self.error = "OK"
-        return "OK"
+            MiniSpec_Spectrometer_Instances[self.sn or self.alias] = self
+            self.logger.info(
+                "MiniSpec connected: sn=" + str(self.sn) +
+                ", pixels=" + str(self.npix_active) +
+                ", bits=" + str(self.nbits)
+            )
+            self.error = "OK"
+            connected = True
+            return "OK"
+
+        except Exception as exc:
+            self.error = "MiniSpec connection failed: " + str(exc)
+            return self.error
+        finally:
+            if not connected:
+                error_code = self.last_errcode
+                self.close_spec_dll(ignore_errors=True)
+                self.last_errcode = error_code
 
     def disconnect(self, *args, **kwargs):
         if self.simulation_mode:
             self.is_open = False
             return "OK"
-        if not self.is_open or self.dll_handler is None:
-            return "OK"
-        try:
-            self.dll_handler.DcamStop()
-        except Exception:
-            pass
-        ok = self.dll_handler.DcamClose()
-        res = self.get_error(ok)
-        self.is_open = False
-        key = self.sn or self.alias
-        if key in MiniSpec_Spectrometer_Instances:
-            del MiniSpec_Spectrometer_Instances[key]
+        res = self.close_spec_dll()
         self.logger.info("MiniSpec disconnected (" + res + ").")
         return res
 
