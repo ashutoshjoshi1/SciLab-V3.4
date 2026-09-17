@@ -1,0 +1,68 @@
+{
+  "spectrometer_type": "MiniSpec",
+  "dll_path": "",
+  "com_ports": {
+    "OBIS": "COM9",
+    "CUBE": "COM2",
+    "RELAY": "COM11",
+    "HEADSENSOR": "COM6",
+    "STAGE": ""
+  },
+  "laser_power": {
+    "377": 0.1,
+    "405": 0.1,
+    "445": 0.1,
+    "488": 0.1,
+    "517": 30.0,
+    "532": 0.03,
+    "640": 0.03,
+    "685": 0.03,
+    "Hg_Ar": 1.0
+  },
+  "laser_configs": {
+    "377": {
+      "type": "CUBE",
+      "power": 0.1
+    },
+    "405": {
+      "type": "OBIS",
+      "power": 0.1
+    },
+    "445": {
+      "type": "OBIS",
+      "power": 0.1
+    },
+    "488": {
+      "type": "OBIS",
+      "power": 0.1
+    },
+    "532": {
+      "type": "OBIS",
+      "power": 0.03
+    },
+    "640": {
+      "type": "OBIS",
+      "power": 0.03
+    },
+    "685": {
+      "type": "OBIS",
+      "power": 0.03
+    },
+    "Hg_Ar": {
+      "type": "RELAY",
+      "power": 1.0
+    }
+  },
+  "available_lasers": [
+    "377",
+    "405",
+    "445",
+    "488",
+    "517",
+    "532",
+    "640",
+    "685",
+    "Hg_Ar"
+  ],
+  "stage_config_path": ""
+}

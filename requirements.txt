@@ -1,0 +1,11 @@
+# Core Python dependencies for the GUI, measurement, and analysis workflow.
+# Note: tkinter is not installed via pip on most systems. If it is missing,
+# install the OS/Python package that provides Tk support.
+
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+scipy>=1.10
+pyserial>=3.5
+pymodbus>=3.5
+Pillow>=10.0
