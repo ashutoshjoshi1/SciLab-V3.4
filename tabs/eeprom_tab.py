@@ -14,6 +14,7 @@ import logging
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from .theme import Colors, Fonts, Spacing
 from .ui_utils import ScrollableFrame, bind_debounced_configure
 
 LOGGER = logging.getLogger(__name__)
@@ -21,8 +22,6 @@ LOGGER = logging.getLogger(__name__)
 
 def build(app):
     """Build the EEPROM tab."""
-    from .theme import Colors, Fonts, Spacing
-
     main_frame = ttk.Frame(app.eeprom_tab)
     main_frame.pack(fill="both", expand=True, padx=4, pady=4)
 

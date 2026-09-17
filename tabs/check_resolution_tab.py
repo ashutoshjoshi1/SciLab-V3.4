@@ -136,10 +136,7 @@ def build(app):
 
     laser_tags = ["377", "405", "445", "488", "517", "532", "640", "685", "Hg_Ar"]
     for tag in laser_tags:
-        var = app.laser_vars.get(tag)
-        if var is None:
-            var = tk.BooleanVar(value=False)
-            app.laser_vars[tag] = var
+        var = app.laser_var(tag)
         text = "Hg_Ar" if tag == "Hg_Ar" else f"{tag} nm"
         chk = ttk.Checkbutton(
             laser_frame, text=text, variable=var,
