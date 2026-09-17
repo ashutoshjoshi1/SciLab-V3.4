@@ -1,7 +1,25 @@
+"""Runtime contract for spectrometer backends.
+
+Every backend (vendor driver or the simulator) is duck-typed against this
+contract. ``assert_spectrometer_backend`` is called by the loader before an
+instance is handed to the rest of the app, so drift in a new backend fails
+early with a readable message instead of an ``AttributeError`` mid-run.
+
+Conventions shared by all backends:
+
+* ``connect``/``set_it``/``measure``/``wait_for_measurement``/``abort`` return
+  the string ``"OK"`` on success or an error description otherwise.
+* ``measure(ncy)`` is non-blocking and ``wait_for_measurement(timeout)`` blocks
+  until the cycles are handled; afterwards ``rcm`` holds the mean counts and
+  ``rcs`` the per-pixel standard deviation (empty for a single cycle on some
+  drivers).
+* ``request_stop()`` is what the UI Stop button calls: it aborts the device
+  and wakes any thread blocked in ``wait_for_measurement`` promptly.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
 
 @runtime_checkable
@@ -9,6 +27,9 @@ class SpectrometerBackend(Protocol):
     sn: str
     npix_active: int
     rcm: Sequence[float]
+    rcs: Sequence[float]
+    it_ms: Optional[float]
+    eff_saturation_limit: float
     abort_on_saturation: bool
 
     def connect(self) -> str: ...
@@ -19,7 +40,11 @@ class SpectrometerBackend(Protocol):
 
     def measure(self, ncy: int = 1) -> Any: ...
 
-    def wait_for_measurement(self) -> Any: ...
+    def wait_for_measurement(self, timeout: Optional[float] = None) -> Any: ...
+
+    def abort(self, ignore_errors: bool = False) -> Any: ...
+
+    def request_stop(self) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -35,8 +60,25 @@ REQUIRED_BACKEND_METHODS = (
     "set_it",
     "measure",
     "wait_for_measurement",
+    "abort",
+    "request_stop",
 )
-REQUIRED_BACKEND_ATTRIBUTES = ("sn", "npix_active", "rcm")
+REQUIRED_BACKEND_ATTRIBUTES = (
+    "sn",
+    "npix_active",
+    "rcm",
+    "rcs",
+    "it_ms",
+    "eff_saturation_limit",
+    "abort_on_saturation",
+)
+# Read by callers with getattr(..., default); not every driver defines them.
+OPTIONAL_BACKEND_ATTRIBUTES = (
+    "npix_blind_left",
+    "npix_blind_right",
+    "measuring",
+    "simulation_mode",
+)
 
 
 def validate_spectrometer_backend(instance: object) -> list[str]:
@@ -79,4 +121,3 @@ def describe_spectrometer(instance: SpectrometerBackend) -> SpectrometerInfo:
         serial_number=str(getattr(instance, "sn", "Unknown")),
         pixel_count=int(getattr(instance, "npix_active", 0)),
     )
-
