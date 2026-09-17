@@ -127,6 +127,20 @@ def test_runtime_initializes_again_after_successful_discovery(sdk_env):
     assert minispec._dcamusb_owner is None
 
 
+def test_runtime_session_survives_connect_worker_and_cleans_up_on_its_owner_thread(sdk_env):
+    path, sdk = sdk_env.add()
+    spec = minispec.MiniSpec_Spectrometer()
+    spec.dll_path = str(path)
+    with ThreadPoolExecutor(max_workers=1) as gui_worker:
+        assert gui_worker.submit(spec.connect).result() == "OK"
+
+    # The GUI's connect worker has exited; the SDK's window owner must stay alive.
+    assert minispec._lifecycle_thread.thread.is_alive()
+    assert sdk.thread == minispec._lifecycle_thread.thread.ident
+    assert spec.disconnect() == "OK"
+    assert sdk.thread is None
+
+
 @pytest.mark.parametrize("failure", ["DcamOpen", "DcamSetExposureTime"])
 def test_connection_failure_frees_owned_session_and_allows_retry(sdk_env, failure):
     path, sdk = sdk_env.add()

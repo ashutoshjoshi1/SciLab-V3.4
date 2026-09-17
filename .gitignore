@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.codegraph/
 
 # App runtime output (kept locally, not versioned)
 results/

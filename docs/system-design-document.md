@@ -444,7 +444,7 @@ two new backends. The operator workflow and the file layout are unchanged.
 - `tabs/ui_pump.py` — `UiPump` (one queue drained by a single main-thread `after` loop; every worker→UI hand-off uses `pump.post`) and `ThrottledRedraw` (latest-frame-wins rendering, one redraw per tick, skipped while the tab is hidden). Replaces four copy-pasted throttles and all cross-thread Tk calls.
 - `services/acquisition_guard.py` — single-owner token for the spectrometer handle. Live View, Measurements, Check Resolution, Check Spectrometer, Apply-IT and the EEPROM tools all claim it; the operator gets one consistent "X is running" message.
 - `spectrometers/simulated_spectrometer.py` — `SimulatedSpectrometer` + `SimulatedLaserController` implementing the full backend contract with a realistic optical model. Selected as spectrometer type "Simulated"; Auto never falls back to it.
-- `spectrometers/hama5_spectrometer.py` — Hamamatsu mini-spectrometer USB backend (C10785, TM/TG/RC series) on pyusb. See below.
+- `spectrometers/hama5_spectrometer.py` — Hamamatsu mini-spectrometer USB backend for supported TM/TG/RC models on pyusb; C10785 uses MiniSpec/DCamUSB. See below.
 - `spectrometers/_winapi.py` — `ctypes.windll` shim so every driver imports on macOS/Linux and fails on first use instead.
 - `domain/spectrometer.py` — the backend contract now covers what callers really use (`rcs`, `it_ms`, `eff_saturation_limit`, `abort`, `request_stop`, `wait_for_measurement(timeout)`).
 - `tests/` — pure-function tests with synthetic Gaussians, golden regression against four real CSVs, orchestrator end-to-end on the simulator, Hama5 protocol tests against a fake USB device, UI-pump/guard tests, and a Tk smoke test that builds every tab and streams simulated frames.
@@ -484,27 +484,42 @@ progress in the status bar and:
 - reports a readable failure: which backends were probed and why they failed,
   which were skipped, and which USB vendors are present.
 
-### Hamamatsu C10785 (Hama5) — what the research found
+### Hamamatsu C10785: MiniSpec/DCamUSB compatibility
 
-No public Hamamatsu page, datasheet or distributor listing exists for a "C10785";
-the NI LabVIEW wrapper for Hamamatsu's specu1b USB SDK lists 24 mini-spectrometer
-models and the C10785 is not among them. The v3.3 MiniSpec driver already
-classified it with the TM/TG series ("different USB interface and SDK"). The
-Hama5 backend therefore implements that family's USB protocol, taken from the
-open-source `usbspecdrivers` kernel driver and pyusb library (verified by its
-authors on C10082/C10083/C9407): vendor requests for EEPROM (serial, sensor
-name, six wavelength-calibration coefficients), integration time, gain and
-temperature, and a bulk endpoint delivering framed 16-bit spectra. Any Hamamatsu
-USB device (VID 0x0661) that is not a DCamUSB unit is accepted and labelled with
-the product ID and the EEPROM identity, so an OEM part number works without a
-code change. **Hardware validation is still required**: connect the unit, confirm
-the serial/sensor in the status bar, and compare a known line against the
-EEPROM wavelength calibration.
+Inspection of the bundled `spectrometers dll files/DCamUSB.dll` found an explicit
+C10785 model-name comparison in its device initialization path. This is evidence
+for the **MiniSpec** backend, replacing the earlier unsupported assumption that
+C10785 used Hama5's TM/TG/RC protocol. The reported `0661:3400` product ID is
+excluded from Hama5. Binary inspection does not validate connection or acquisition
+on a physical Windows C10785; that bench check remains required.
+
+The bundled DLL enumerates a specific Windows device interface GUID,
+`{2ae95266-dd2b-4dc4-ae37-972b9c2f02f3}`. A device can appear healthy in Device
+Manager while the installed driver exposes an interface incompatible with the
+selected SDK DLL. Native error 4 covers both no matching interface
+and failure to open every matching interface; treating it simply as "driver not
+installed" loses the distinction needed to diagnose this case.
+
+Keep the vendor driver that works with the existing Hamamatsu application. In
+Setup select **MiniSpec** and the matching `DCamUSB.dll` from that application/SDK,
+using Python of the same bitness. Close the vendor application before connecting.
+Do not replace the C10785 driver with a generic WinUSB binding to try Hama5.
+If the connection still fails, run `python tools/diagnose_hamamatsu.py --dll
+"C:\path\to\DCamUSB.dll"` on the Windows bench PC and retain the JSON report.
+This reads DLL architecture and Windows device/driver interface properties without
+initializing the DLL, uploading firmware, or changing drivers.
+
+Hama5 implements the protocol documented by the open-source `usbspecdrivers`
+project, whose authors verified C10082/C10083/C9407 hardware. Its known product
+table covers C9407MA (`0661:2906`), C10082CA/C10083CA (`0661:2909`), and C11007MA
+(`0661:1300`). An unknown Hamamatsu product ID is not evidence of compatibility.
+SciLab's Hama5 implementation still requires physical bench validation for a
+confirmed supported device.
 
 ### Bench checklist (Windows, real hardware)
 
 1. Baseline: run the default settings once on a known source (e.g. 405 nm) and keep the `metrics_*.json`.
-2. Hama5: Zadig → WinUSB; Setup → Hama5 → Connect; check serial, sensor and pixel count; Live View with a lamp; compare peak wavelength.
+2. C10785: retain the working vendor driver; Setup → MiniSpec, select the matching `DCamUSB.dll` → Connect; confirm serial and pixel count, then compare a known lamp line in Live View. For a separately confirmed Hama5 device, validate its compatible USB binding, EEPROM identity, and wavelength calibration on that hardware.
 3. Advanced flags, one at a time, each followed by a full run and a diff of `metrics_*.json` against the baseline (peak pixels identical, FWHM within noise):
    - *Turn off only the lit source*: inspect the dark frames of every source for residual light.
    - *Pre-arm the CUBE*: inspect the dark frame preceding 377 nm for stray 377 nm light.

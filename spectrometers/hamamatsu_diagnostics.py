@@ -28,7 +28,7 @@ $result = @($devices | ForEach-Object {
         service = $service.Data
         driver_inf = $inf.Data
         problem_code = $problem.Data
-        interface_guids = @($parameters.DeviceInterfaceGUIDs) + @($parameters.DeviceInterfaceGUID) | Where-Object { $_ }
+        interface_guids = @((@($parameters.DeviceInterfaceGUIDs) + @($parameters.DeviceInterfaceGUID)) | Where-Object { $_ })
     }
 })
 ConvertTo-Json -InputObject $result -Depth 4 -Compress

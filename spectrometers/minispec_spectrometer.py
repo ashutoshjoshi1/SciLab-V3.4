@@ -1,7 +1,7 @@
 """
 Backend for Hamamatsu DCam-USB devices, including C10785 and Micro Series Plus
-(C11287-01, C11288-01, C11160, C11165-01/02, C11513), driven by DCamUSB.dll (
-SingleDevice variant, V300 controller).
+(C11287-01, C11288-01, C11160, C11165-01/02, C11513), driven by DCamUSB.dll
+(SingleDevice variant, V300 controller).
 
 This wraps the C API exported by `DCamUSB.dll` via ctypes and exposes the same
 interface as the other backends (`Ava1`, `Hama2`, `Hama3`, `Hama4`) so the rest
@@ -18,7 +18,10 @@ import os
 import sys
 import threading
 import time
+from concurrent.futures import Future
 from copy import deepcopy
+from functools import wraps
+from queue import Empty, Queue
 from ctypes import (
     c_int,
     c_uint32,
@@ -96,6 +99,91 @@ dcamusb_errors = {
 MiniSpec_Spectrometer_Instances = {}
 _dcamusb_owner = None
 _dcamusb_initialized_lock = threading.Lock()
+
+
+class _DcamLifecycleThread:
+    """Keep the SDK's notification window alive across short-lived GUI workers."""
+
+    def __init__(self):
+        self.jobs = Queue()
+        self.ready = Future()
+        self.thread = threading.Thread(target=self._run, name="dcamusb-lifecycle", daemon=True)
+        self.thread.start()
+        self.ready.result()
+
+    def _run(self):
+        try:
+            pump = self._message_pump()
+        except BaseException as exc:
+            self.ready.set_exception(exc)
+            return
+        self.ready.set_result(None)
+        while True:
+            try:
+                future, function, args, kwargs = self.jobs.get(timeout=0.05)
+            except Empty:
+                pass
+            else:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(function(*args, **kwargs))
+                    except BaseException as exc:
+                        future.set_exception(exc)
+            if pump is not None:
+                pump()
+
+    @staticmethod
+    def _message_pump():
+        if sys.platform != "win32":
+            return None
+        from ctypes import wintypes
+
+        user32 = windll.user32
+        user32.PeekMessageW.argtypes = [POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
+        user32.PeekMessageW.restype = wintypes.BOOL
+        user32.TranslateMessage.argtypes = [POINTER(wintypes.MSG)]
+        user32.TranslateMessage.restype = wintypes.BOOL
+        user32.DispatchMessageW.argtypes = [POINTER(wintypes.MSG)]
+        # LRESULT is pointer-sized on 64-bit Windows.
+        from ctypes import c_ssize_t
+        user32.DispatchMessageW.restype = c_ssize_t
+        message = wintypes.MSG()
+
+        def pump():
+            # Bound each batch so device notifications cannot starve cleanup jobs.
+            for _ in range(100):
+                if not user32.PeekMessageW(byref(message), None, 0, 0, 1):
+                    break
+                user32.TranslateMessage(byref(message))
+                user32.DispatchMessageW(byref(message))
+
+        return pump
+
+    def call(self, function, *args, **kwargs):
+        if threading.current_thread() is self.thread:
+            return function(*args, **kwargs)
+        future = Future()
+        self.jobs.put((future, function, args, kwargs))
+        return future.result()
+
+
+_lifecycle_thread = None
+_lifecycle_thread_lock = threading.Lock()
+
+
+def _on_lifecycle_thread(function):
+    @wraps(function)
+    def invoke(self, *args, **kwargs):
+        global _lifecycle_thread
+        if self.simulation_mode:
+            return function(self, *args, **kwargs)
+        with _lifecycle_thread_lock:
+            if _lifecycle_thread is None:
+                _lifecycle_thread = _DcamLifecycleThread()
+            worker = _lifecycle_thread
+        return worker.call(function, self, *args, **kwargs)
+
+    return invoke
 
 
 # Some known PIDs; this is not a complete model-support table. In particular,
@@ -328,12 +416,13 @@ class MiniSpec_Spectrometer(object):
 
         return "OK"
 
+    @_on_lifecycle_thread
     def initialize_dll(self):
         """
         Initialize the SingleDevice SDK for this instance only.
 
-        Discovery and runtime must own separate sessions: initialization creates
-        a thread-owned window, so discovery releases its session before returning.
+        Initialization and cleanup run on a persistent thread that owns the SDK's
+        notification window. Discovery releases its session before returning.
         """
         global _dcamusb_owner
         if self.simulation_mode:
@@ -351,6 +440,7 @@ class MiniSpec_Spectrometer(object):
                 _dcamusb_owner = self
             return res
 
+    @_on_lifecycle_thread
     def close_spec_dll(self, ignore_errors=False):
         """Release only this instance's SDK session and DLL search directory."""
         global _dcamusb_owner
@@ -494,8 +584,8 @@ class MiniSpec_Spectrometer(object):
             ok = self.dll_handler.DcamOpen()
             res = self.get_error(ok)
             if res != "OK":
-                self.error = res
-                return res
+                self.error = _augment_minispec_error(res)
+                return self.error
             self.is_open = True
 
             # Standard mini-spec config: full-line binning, internal trigger,

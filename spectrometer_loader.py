@@ -376,9 +376,9 @@ def _discover_minispec(dll_path: Optional[str]) -> List[Dict[str, str]]:
                 {"serial": serial_number, "label": f"{serial_number} ({model}) [MiniSpec]", "type": "MiniSpec"}
             )
         return devices
-
     finally:
         _release_probe(spec)
+
 
 def _discover_hama5(_dll_path: Optional[str]) -> List[Dict[str, str]]:
     module = importlib.import_module("spectrometers.hama5_spectrometer")

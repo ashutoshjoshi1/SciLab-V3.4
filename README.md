@@ -15,7 +15,7 @@ measurements with auto-exposure, and LSF / dispersion / resolution analysis.
 | Live plot | Full redraw every frame, layout solver on each draw, unbounded frame rate | Blitted trace over a cached background, 25 fps cap, hysteresis on autoscale |
 | Thread safety | Tk called from worker threads (crashes on some builds); no ownership of the spectrometer handle | One main-thread UI pump; single-owner acquisition guard; Stop aborts the device immediately |
 | Bugs fixed | EEPROM tab non-functional (`NameError`); Hg-Ar analysis crashed on every run; Check Resolution blank if opened before Live View; countdown ran 0.2 s per second; lasers not switched off on exit; settings not saved on exit; power values lost on resize | all fixed, with regression tests |
-| Hardware | Ava1, Hama2, Hama3, Hama4, MiniSpec | + **Hama5** (Hamamatsu C10785 / TM-TG-RC mini-spectrometers over USB) and a **Simulated** backend |
+| Hardware | Ava1, Hama2, Hama3, Hama4, MiniSpec | + **Hama5** (supported Hamamatsu TM/TG/RC mini-spectrometers over USB) and a **Simulated** backend |
 | Tests | none shipped | 58 unit/golden/orchestrator tests + 5 GUI smoke tests |
 
 ## Windows setup (operators)
@@ -27,23 +27,45 @@ measurements with auto-exposure, and LSF / dispersion / resolution analysis.
 Default vendor DLLs live in `spectrometers dll files/`. Hama2 needs the Hamamatsu
 DCAM runtime; Hama4 uses `HiasApi.dll` with `hias.conf` next to it.
 
-### Hama5: Hamamatsu C10785 and the TM / TG / RC mini-spectrometers
+### Hamamatsu C10785: use MiniSpec
 
-These units are not driven by a vendor DLL in SciLab. The backend speaks the
-device's USB protocol directly through **pyusb** (`pip install -r requirements.txt`
-brings `pyusb` and a bundled libusb). On Windows the device must be bound to the
-generic WinUSB driver once:
+The bundled `DCamUSB.dll` explicitly supports the C10785 model. Select
+**MiniSpec** in Setup for this device, including the reported USB ID
+`0661:3400`. Hama5 excludes that product ID and uses a different USB protocol.
+This mapping is supported by inspection of the bundled DLL; physical Windows
+connection and acquisition still need bench validation.
 
-1. Plug the spectrometer in, run [Zadig](https://zadig.akeo.ie/), choose the
-   Hamamatsu device (USB vendor ID `0661`), select **WinUSB**, click *Replace Driver*.
-2. In SciLab's Setup tab choose spectrometer type **Hama5** and press Connect.
-   The status bar shows the serial number and sensor read from the unit's EEPROM.
+1. Keep the Hamamatsu driver that works with the vendor application installed.
+   A healthy Device Manager entry does not guarantee that a particular SDK DLL
+   can access the device interface registered by that driver.
+2. Select **MiniSpec** and set its DLL path to the matching `DCamUSB.dll` supplied
+   with the working Hamamatsu application/SDK. Python and the DLL must have the
+   same bitness. Close the vendor application before connecting in SciLab.
+3. Connect, confirm the serial number and pixel count, then check a known lamp
+   line in Live View.
 
-Reverting to Hamamatsu's own driver is a Device Manager "Roll back driver". The
-protocol implementation follows the open-source `usbspecdrivers` project
-(verified by its authors on C10082/C10083/C9407 hardware); the C10785 is not
-listed in any public Hamamatsu catalogue, so the first connection on the bench
-is the validation step, see *Bench checklist* in `docs/system-design-document.md`.
+If connection still fails, run the read-only diagnostic on the Windows bench PC:
+
+```powershell
+python tools/diagnose_hamamatsu.py --dll "C:\path\to\DCamUSB.dll" > hamamatsu-diagnostics.json
+```
+
+The report includes DLL architecture and Windows device/driver interface details;
+it does not initialize the DLL, upload firmware, or change drivers. MiniSpec's
+native error 4 can mean that no matching interface was found or that all attempts
+to open an interface failed; it does not by itself prove the driver is missing.
+
+### Hama5: supported TM / TG / RC mini-spectrometers
+
+Hama5 implements the USB protocol from the open-source
+[usbspecdrivers project](https://sourceforge.net/projects/usbspecdrivers/), whose
+authors verified C10082/C10083/C9407 hardware. Its known product table includes
+C9407MA (`0661:2906`), C10082CA/C10083CA (`0661:2909`), and C11007MA (`0661:1300`).
+SciLab's implementation still needs physical bench validation.
+
+This backend uses **pyusb** and libusb, installed by `requirements.txt`; Windows
+requires a compatible WinUSB binding. Use Hama5 only for a device confirmed to
+use this protocol. Do not replace the working C10785 vendor driver to try Hama5.
 
 ## Developer setup (macOS / Linux, no hardware)
 

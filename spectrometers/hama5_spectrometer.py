@@ -1,19 +1,20 @@
-"""Hamamatsu mini-spectrometer USB backend ("Hama5"): C10785 and the TM / TG / RC series.
+"""Hamamatsu mini-spectrometer USB backend ("Hama5") for supported TM / TG / RC models.
 
-These older Hamamatsu mini-spectrometers (C9407MA, C10082CA/C10083CA, C11007MA
-and OEM variants such as the C10785) are *not* driven by DCamUSB.dll (that is the
-MiniSpec backend) nor by DCAM-API (Hama2). They speak a small vendor-specific
-USB protocol which Hamamatsu's Windows SDK (specu1a/specu1b.dll) wraps, and
-which the open-source Linux drivers implement directly:
+The known product table covers C9407MA, C10082CA/C10083CA, and C11007MA.
+These devices use the USB protocol implemented by the open-source drivers:
 
     "Linux python libraries for spectrometers", C. Frank / W. Schoenfeld,
     https://sourceforge.net/projects/usbspecdrivers/  (GPL-2, kernel driver
     usbhspec.c + HamamatsuMiniSpectrometer.py). Verified against C10082/C10083
     and C9407 hardware by its authors.
 
-This backend re-implements that protocol on top of pyusb, so it works on any
-OS with libusb (Windows: bind the device to WinUSB with Zadig and
-``pip install pyusb libusb-package``).
+This backend re-implements that protocol on top of pyusb and libusb; Windows
+requires a compatible WinUSB binding. SciLab's implementation still requires
+physical bench validation.
+
+C10785 belongs on the MiniSpec/DCamUSB path: the bundled DCamUSB.dll explicitly
+checks that model name, and Hama5 excludes its reported product ID 0x3400.
+Keep the working vendor driver and use its matching DCamUSB.dll for C10785.
 
 Protocol summary (vendor requests on endpoint 0; all multi-byte values are
 described exactly as the reference implementation sends/reads them):
@@ -51,9 +52,9 @@ LOGGER = logging.getLogger(__name__)
 
 HAMAMATSU_VENDOR_ID = 0x0661
 
-# Product IDs known to speak this protocol (from the reference driver's device
-# table and udev rules). Unknown Hamamatsu PIDs are accepted too, labelled as such,
-# so an OEM part number like the C10785 can be tried without a code change.
+# Product IDs from the reference driver's device table and udev rules.
+# An unknown PID is not evidence of protocol compatibility; the DCamUSB product
+# IDs below, including the reported C10785 PID, must remain excluded.
 KNOWN_PRODUCTS: Dict[int, str] = {
     0x2906: "C9407MA (TG series)",
     0x2909: "C10082CA / C10083CA (TM series)",
