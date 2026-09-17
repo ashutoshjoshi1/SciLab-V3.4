@@ -89,6 +89,8 @@ def _clean_text(value: object) -> str:
 class HardwareState:
     dll_path: str = ""
     spectrometer_type: str = "Auto"
+    # Backend that connected most recently; Auto probes it first.
+    last_connected_type: str = ""
     com_ports: Dict[str, str] = field(default_factory=dict)
     laser_power: Dict[str, float] = field(default_factory=dict)
 

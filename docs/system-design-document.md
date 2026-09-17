@@ -465,6 +465,25 @@ two new backends. The operator workflow and the file layout are unchanged.
 - Magic numbers moved onto `CharacterizationConfig` with identical defaults. Plots at 150 dpi; blank figures are no longer written. `metrics_<sn>_<ts>.json` persists every number next to the plots.
 - Golden snapshot drift from these changes: ≤ 1.2e-4 relative on the slit polynomials, none on peak pixels or dispersion.
 
+### Setup → "Auto" spectrometer detection
+
+v3.3 probed all backends in a fixed order on the Tk thread, loading and
+initialising each DLL (seconds each), never releasing the probe's DLL session,
+enumerating the hardware a second time on connect, and reporting failures as
+one `" | "`-joined string. In v3.4 the probe runs on a worker with per-backend
+progress in the status bar and:
+
+- probes the backend that connected last time first (`last_connected_type`,
+  saved with Settings);
+- pre-scans the USB bus once (libusb, ~40 ms) and skips backends whose vendor
+  (Avantes 1992, Hamamatsu 0661) is not attached, so no DLL is loaded for
+  absent hardware. An empty scan is treated as "unknown" and probes everything;
+- releases every probe's DLL session (`close_spec_dll` / `_finalize_dll` /
+  `DcIc_Terminate`), and connects only the backend type of the device that was
+  actually discovered;
+- reports a readable failure: which backends were probed and why they failed,
+  which were skipped, and which USB vendors are present.
+
 ### Hamamatsu C10785 (Hama5) — what the research found
 
 No public Hamamatsu page, datasheet or distributor listing exists for a "C10785";

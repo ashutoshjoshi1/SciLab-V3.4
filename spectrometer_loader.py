@@ -81,7 +81,46 @@ def _clean_text(value) -> str:
     return text.strip()
 
 
-def _candidate_types(spec_type: Optional[str], dll_path: Optional[str]) -> List[str]:
+# Default Auto probe order. Hama5 only claims Hamamatsu USB devices that are not
+# DCamUSB units, so it is safe to try last.
+AUTO_PROBE_ORDER = ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5"]
+
+# USB vendor IDs each backend can possibly talk to. In Auto mode a backend is not
+# even loaded when no device of its vendor is attached: each skipped probe saves a
+# DLL load, a runtime initialisation and a USB enumeration (seconds each).
+AVANTES_VENDOR_ID = 0x1992
+HAMAMATSU_VENDOR_ID = 0x0661
+BACKEND_USB_VENDORS: Dict[str, frozenset] = {
+    "Ava1": frozenset({AVANTES_VENDOR_ID}),
+    "Hama2": frozenset({HAMAMATSU_VENDOR_ID}),
+    "Hama3": frozenset({HAMAMATSU_VENDOR_ID}),
+    "Hama4": frozenset({HAMAMATSU_VENDOR_ID}),
+    "MiniSpec": frozenset({HAMAMATSU_VENDOR_ID}),
+    "Hama5": frozenset({HAMAMATSU_VENDOR_ID}),
+}
+
+
+def present_usb_vendor_ids() -> Optional[set]:
+    """Vendor IDs of every attached USB device, or None when that cannot be determined.
+
+    Uses pyusb/libusb, which can list descriptors of devices bound to vendor
+    drivers even though it cannot open them. None (no libusb, or an error) means
+    "unknown": the caller then probes every backend as before.
+    """
+    try:
+        import usb.core
+
+        from spectrometers.hama5_spectrometer import _libusb_backend
+
+        backend = _libusb_backend()
+        devices = usb.core.find(find_all=True, backend=backend) if backend is not None else usb.core.find(find_all=True)
+        return {int(device.idVendor) for device in (devices or [])}
+    except Exception as exc:
+        LOGGER.debug("USB pre-scan unavailable (%s); probing every backend", exc)
+        return None
+
+
+def _candidate_types(spec_type: Optional[str], dll_path: Optional[str], preferred_type: Optional[str] = None) -> List[str]:
     normalized = normalize_spec_type(spec_type)
     if normalized != "Auto":
         return [normalized]
@@ -89,9 +128,44 @@ def _candidate_types(spec_type: Optional[str], dll_path: Optional[str]) -> List[
     inferred = infer_spec_type_from_dll_path(dll_path)
     if inferred:
         return [inferred]
-    # Hama5 probes only Hamamatsu USB devices that are not DCamUSB units, so it is
-    # safe to try last in Auto mode.
-    return ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5"]
+
+    order = list(AUTO_PROBE_ORDER)
+    # The type that connected last time is by far the most likely one now.
+    try:
+        preferred = normalize_spec_type(preferred_type) if preferred_type else None
+    except ValueError:
+        preferred = None
+    if preferred in order:
+        order.remove(preferred)
+        order.insert(0, preferred)
+    return order
+
+
+def _release_probe(spec) -> None:
+    """Free the DLL session a discovery probe opened (v3.3 leaked one per probe)."""
+    handler = getattr(spec, "dll_handler", None)
+    if handler is not None and hasattr(handler, "DcIc_Terminate") and not getattr(spec, "spec_id", None):
+        # Hama3 (DcIcUSB) only frees its session through DcIc_Terminate; the probe
+        # never connected a device, so there is no handle to disconnect first.
+        try:
+            handler.DcIc_Terminate()
+        except Exception:
+            LOGGER.debug("DcIc_Terminate after probe failed", exc_info=True)
+        return
+    for method_name in ("close_spec_dll", "_finalize_dll"):
+        method = getattr(spec, method_name, None)
+        if method is None:
+            continue
+        try:
+            method(ignore_errors=True)
+        except TypeError:
+            try:
+                method()
+            except Exception:
+                LOGGER.debug("Probe cleanup %s failed", method_name, exc_info=True)
+        except Exception:
+            LOGGER.debug("Probe cleanup %s failed", method_name, exc_info=True)
+        return
 
 
 def _candidate_dll_path(candidate: str, requested_type: Optional[str], dll_path: Optional[str]) -> str:
@@ -169,148 +243,129 @@ def _new_spec_instance(spec_type: str, dll_path: Optional[str], serial: Optional
     return spec
 
 
+def _require_dll(spec, backend: str, dll_name: str) -> None:
+    if not getattr(spec, "dll_path", ""):
+        raise RuntimeError(f"{backend} requires a valid {dll_name} path.")
+    if not Path(spec.dll_path).is_file():
+        raise RuntimeError(f"{backend} dll not found: {spec.dll_path}")
+
+
+def _check(result, action: str = "") -> None:
+    if result != "OK":
+        raise RuntimeError(f"{action}: {result}" if action else str(result))
+
+
 def _discover_ava1(dll_path: Optional[str]) -> List[Dict[str, str]]:
     spec = _new_spec_instance("Ava1", dll_path, serial=None, debug_mode=0)
-    if not getattr(spec, "dll_path", ""):
-        raise RuntimeError("Ava1 requires a valid avaspecx64.dll path.")
-    if not Path(spec.dll_path).is_file():
-        raise RuntimeError(f"Ava1 dll not found: {spec.dll_path}")
+    _require_dll(spec, "Ava1", "avaspecx64.dll")
+    try:
+        _check(spec.load_spec_dll(), "load DLL")
+        _check(spec.initialize_dll(), "initialise DLL")
+        res, count = spec.get_number_of_devices()
+        _check(res, "count devices")
+        res, info = spec.get_all_devices_info(count)
+        _check(res, "read device info")
 
-    res = spec.load_spec_dll()
-    if res != "OK":
-        raise RuntimeError(res)
-    res = spec.initialize_dll()
-    if res != "OK":
-        raise RuntimeError(res)
-    res, count = spec.get_number_of_devices()
-    if res != "OK":
-        raise RuntimeError(res)
-    res, info = spec.get_all_devices_info(count)
-    if res != "OK":
-        raise RuntimeError(res)
-
-    devices = []
-    for index in range(count):
-        ident = getattr(info, f"a{index}")
-        serial_number = _clean_text(getattr(ident, "SerialNumber", "")) or f"Ava1-{index + 1}"
-        devices.append({"serial": serial_number, "label": f"{serial_number} [Ava1]", "type": "Ava1"})
-    return devices
+        devices = []
+        for index in range(count):
+            ident = getattr(info, f"a{index}")
+            serial_number = _clean_text(getattr(ident, "SerialNumber", "")) or f"Ava1-{index + 1}"
+            devices.append({"serial": serial_number, "label": f"{serial_number} [Ava1]", "type": "Ava1"})
+        return devices
+    finally:
+        _release_probe(spec)
 
 
 def _discover_hama2(dll_path: Optional[str]) -> List[Dict[str, str]]:
     spec = _new_spec_instance("Hama2", dll_path, serial=None, debug_mode=0)
-    res = spec.load_and_init_hama2_dll()
-    if res != "OK":
-        raise RuntimeError(res)
-    res, count = spec.get_number_of_devices()
-    if res != "OK":
-        raise RuntimeError(res)
-    res, devices_info = spec.get_all_devices_info(count)
-    if res != "OK":
-        raise RuntimeError(res)
+    try:
+        _check(spec.load_and_init_hama2_dll(), "load DCAM-API")
+        res, count = spec.get_number_of_devices()
+        _check(res, "count devices")
+        res, devices_info = spec.get_all_devices_info(count)
+        _check(res, "read device info")
 
-    devices = []
-    for index, dev_info in devices_info.items():
-        serial_number = _clean_text(dev_info.get("id", "")) or f"Hama2-{index + 1}"
-        model = _clean_text(dev_info.get("model", "Hamamatsu"))
-        devices.append(
-            {"serial": serial_number, "label": f"{serial_number} ({model}) [Hama2]", "type": "Hama2"}
-        )
-    return devices
+        devices = []
+        for index, dev_info in devices_info.items():
+            serial_number = _clean_text(dev_info.get("id", "")) or f"Hama2-{index + 1}"
+            model = _clean_text(dev_info.get("model", "Hamamatsu"))
+            devices.append(
+                {"serial": serial_number, "label": f"{serial_number} ({model}) [Hama2]", "type": "Hama2"}
+            )
+        return devices
+    finally:
+        _release_probe(spec)
 
 
 def _discover_hama3(dll_path: Optional[str]) -> List[Dict[str, str]]:
     spec = _new_spec_instance("Hama3", dll_path, serial=None, debug_mode=0)
-    if not getattr(spec, "dll_path", ""):
-        raise RuntimeError("Hama3 requires a valid DcIcUSB.dll path.")
-    if not Path(spec.dll_path).is_file():
-        raise RuntimeError(f"Hama3 dll not found: {spec.dll_path}")
+    _require_dll(spec, "Hama3", "DcIcUSB.dll")
+    try:
+        _check(spec.load_spec_dll(), "load DLL")
+        _check(spec.initialize_dll(), "initialise DLL")
+        res, count = spec.get_number_of_devices()
+        _check(res, "count devices")
 
-    res = spec.load_spec_dll()
-    if res != "OK":
-        raise RuntimeError(res)
-    res = spec.initialize_dll()
-    if res != "OK":
-        raise RuntimeError(res)
-    res, count = spec.get_number_of_devices()
-    if res != "OK":
-        raise RuntimeError(res)
+        from ctypes import c_uint
 
-    from ctypes import c_uint
-
-    devices = []
-    for index in range(count):
-        device_handle = spec.dll_handler.DcIc_Connect(c_uint(index))
-        if int(device_handle) <= 0:
-            continue
-        try:
-            res, dev_info = spec.get_dev_info(device_handle)
-            if res != "OK":
+        devices = []
+        for index in range(count):
+            device_handle = spec.dll_handler.DcIc_Connect(c_uint(index))
+            if int(device_handle) <= 0:
                 continue
-            serial_number = _clean_text(dev_info.get("sn", "")) or f"Hama3-{index + 1}"
-            model = _clean_text(dev_info.get("dev_type", "Hamamatsu"))
-            devices.append(
-                {"serial": serial_number, "label": f"{serial_number} ({model}) [Hama3]", "type": "Hama3"}
-            )
-        finally:
             try:
-                spec.dll_handler.DcIc_Disconnect(device_handle)
-            except Exception:
-                pass
-    return devices
+                res, dev_info = spec.get_dev_info(device_handle)
+                if res != "OK":
+                    continue
+                serial_number = _clean_text(dev_info.get("sn", "")) or f"Hama3-{index + 1}"
+                model = _clean_text(dev_info.get("dev_type", "Hamamatsu"))
+                devices.append(
+                    {"serial": serial_number, "label": f"{serial_number} ({model}) [Hama3]", "type": "Hama3"}
+                )
+            finally:
+                try:
+                    spec.dll_handler.DcIc_Disconnect(device_handle)
+                except Exception:
+                    pass
+        return devices
+    finally:
+        _release_probe(spec)
 
 
 def _discover_hama4(dll_path: Optional[str]) -> List[Dict[str, str]]:
     spec = _new_spec_instance("Hama4", dll_path, serial=None, debug_mode=0)
-    if not getattr(spec, "dll_path", ""):
-        raise RuntimeError("Hama4 requires a valid HiasApi.dll path.")
-    if not Path(spec.dll_path).is_file():
-        raise RuntimeError(f"Hama4 dll not found: {spec.dll_path}")
+    _require_dll(spec, "Hama4", "HiasApi.dll")
+    try:
+        _check(spec.load_spec_dll(), "load DLL")
+        _check(spec.initialize_dll(), "initialise DLL")
+        res, count = spec.get_number_of_devices()
+        _check(res, "count devices")
+        res, devices_info = spec.get_all_devices_info(count)
+        _check(res, "read device info")
 
-    res = spec.load_spec_dll()
-    if res != "OK":
-        raise RuntimeError(res)
-    res = spec.initialize_dll()
-    if res != "OK":
-        raise RuntimeError(res)
-    res, count = spec.get_number_of_devices()
-    if res != "OK":
-        raise RuntimeError(res)
-    res, devices_info = spec.get_all_devices_info(count)
-    if res != "OK":
-        raise RuntimeError(res)
-
-    devices = []
-    for index, dev_info in devices_info.items():
-        serial_number = _clean_text(dev_info.get("id", "")) or f"Hama4-{index + 1}"
-        name = _clean_text(dev_info.get("name", "Hamamatsu"))
-        devices.append(
-            {"serial": serial_number, "label": f"{serial_number} ({name}) [Hama4]", "type": "Hama4"}
-        )
-    return devices
+        devices = []
+        for index, dev_info in devices_info.items():
+            serial_number = _clean_text(dev_info.get("id", "")) or f"Hama4-{index + 1}"
+            name = _clean_text(dev_info.get("name", "Hamamatsu"))
+            devices.append(
+                {"serial": serial_number, "label": f"{serial_number} ({name}) [Hama4]", "type": "Hama4"}
+            )
+        return devices
+    finally:
+        _release_probe(spec)
 
 
 def _discover_minispec(dll_path: Optional[str]) -> List[Dict[str, str]]:
     spec = _new_spec_instance("MiniSpec", dll_path, serial=None, debug_mode=0)
-    if not getattr(spec, "dll_path", ""):
-        raise RuntimeError("MiniSpec requires a valid DCamUSB.dll path.")
-    if not Path(spec.dll_path).is_file():
-        raise RuntimeError(f"MiniSpec dll not found: {spec.dll_path}")
-
-    res = spec.load_spec_dll()
-    if res != "OK":
-        raise RuntimeError(res)
-    res = spec.initialize_dll()
-    if res != "OK":
-        raise RuntimeError(res)
+    _require_dll(spec, "MiniSpec", "DCamUSB.dll")
+    _check(spec.load_spec_dll(), "load DLL")
+    _check(spec.initialize_dll(), "initialise DLL")
     res, count = spec.get_number_of_devices()
-    if res != "OK":
-        raise RuntimeError(res)
+    _check(res, "count devices")
     if count == 0:
         return []
     res, devices_info = spec.get_all_devices_info(count)
-    if res != "OK":
-        raise RuntimeError(res)
+    _check(res, "read device info")
 
     devices = []
     for index, dev_info in devices_info.items():
@@ -350,21 +405,69 @@ def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 
-def discover_spectrometers(spec_type: Optional[str], dll_path: Optional[str] = None) -> List[Dict[str, str]]:
-    errors = []
-    for candidate in _candidate_types(spec_type, dll_path):
+def _format_discovery_failure(spec_type: str, errors: List[str], skipped: List[str], vendors: Optional[set]) -> str:
+    lines = [f"No {spec_type} spectrometer detected." if spec_type != "Auto" else "No spectrometer detected."]
+    if errors:
+        lines.append("Backends that were probed:")
+        lines.extend(f"  • {entry}" for entry in errors)
+    if skipped:
+        lines.append(f"Skipped (no matching USB device attached): {', '.join(skipped)}")
+    if vendors is not None:
+        seen = ", ".join(f"{vendor:04X}" for vendor in sorted(vendors)) or "none"
+        lines.append(f"USB vendor IDs present: {seen}  (Avantes = 1992, Hamamatsu = 0661)")
+    return "\n".join(lines)
+
+
+def discover_spectrometers(
+    spec_type: Optional[str],
+    dll_path: Optional[str] = None,
+    *,
+    preferred_type: Optional[str] = None,
+    progress=None,
+    skip_absent_usb: bool = True,
+) -> List[Dict[str, str]]:
+    """Enumerate spectrometers of ``spec_type`` ("Auto" probes every backend).
+
+    Auto mode is optimised three ways: the type that connected last time
+    (``preferred_type``) is probed first; backends whose USB vendor is not
+    attached are skipped without loading their DLL; and every probe releases
+    its DLL session afterwards. ``progress(text)`` is called before each probe.
+    """
+    normalized = normalize_spec_type(spec_type)
+    candidates = _candidate_types(spec_type, dll_path, preferred_type)
+    vendors = present_usb_vendor_ids() if (normalized == "Auto" and skip_absent_usb and len(candidates) > 1) else None
+    if vendors is not None and not vendors:
+        # A bench PC always has some USB device (hub, mouse); an empty list means the
+        # scan itself failed, so fall back to probing every backend.
+        LOGGER.debug("USB pre-scan returned no devices at all; probing every backend")
+        vendors = None
+
+    errors: List[str] = []
+    skipped: List[str] = []
+    for candidate in candidates:
+        wanted = BACKEND_USB_VENDORS.get(candidate)
+        if vendors is not None and wanted and not (wanted & vendors):
+            skipped.append(candidate)
+            continue
+        if progress is not None:
+            try:
+                progress(f"Probing {candidate}…")
+            except Exception:
+                pass
         candidate_dll = _candidate_dll_path(candidate, spec_type, dll_path)
         try:
             devices = _discover_for_type(candidate, candidate_dll)
         except Exception as exc:
             errors.append(f"{candidate}: {exc}")
-            LOGGER.exception("Unable to discover %s spectrometers", candidate)
+            LOGGER.warning("Unable to discover %s spectrometers: %s", candidate, exc)
             continue
         if devices:
+            if skipped:
+                LOGGER.info("Auto probe skipped %s (no matching USB vendor attached)", ", ".join(skipped))
             return devices
 
-    if errors:
-        raise RuntimeError(" | ".join(errors))
+    if errors or skipped:
+        raise RuntimeError(_format_discovery_failure(normalized, errors, skipped, vendors))
     return []
 
 
@@ -381,7 +484,11 @@ def connect_spectrometer(
     enumeration the caller already performed; otherwise the hardware is
     enumerated again here, which for some DLLs means a second full init cycle.
     """
-    candidates = _candidate_types(spec_type, dll_path)
+    known_types = [device.get("type") for device in (devices or []) if device.get("type")]
+    # When the caller already discovered devices, only their backend types are candidates.
+    candidates = _candidate_types(spec_type, dll_path, preferred_type=known_types[0] if known_types else None)
+    if known_types:
+        candidates = [candidate for candidate in candidates if candidate in known_types] or candidates
     last_error = None
 
     for candidate in candidates:

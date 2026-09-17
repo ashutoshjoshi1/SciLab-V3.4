@@ -1046,8 +1046,11 @@ def build(app):
             spec.abort_on_saturation = False
             app.spec_backend = resolved_type
             app.install_laser_controller_for_backend(resolved_type)
-            app.hw.spectrometer_type = resolved_type
-            app.spec_type_var.set(resolved_type)
+            if resolved_type != "Simulated":
+                app.hw.last_connected_type = resolved_type  # Auto probes this backend first next time
+            if requested_type != "Auto":
+                app.hw.spectrometer_type = resolved_type
+                app.spec_type_var.set(resolved_type)
             app.sn = getattr(spec, "sn", selected_device.get("serial", "Unknown"))
             app.data.serial_number = app.sn
             app.npix = getattr(spec, "npix_active", app.npix)
@@ -1083,9 +1086,14 @@ def build(app):
                     return
             _connect_selected(devices, selected_device)
 
+        preferred = getattr(app.hw, "last_connected_type", "") or ""
+
+        def _probe_progress(text):
+            app.pump.post(app.status.set, text)
+
         run_in_worker(
             app,
-            lambda: discover_spectrometers(requested_type, dll),
+            lambda: discover_spectrometers(requested_type, dll, preferred_type=preferred, progress=_probe_progress),
             on_done=_discovered,
             on_error=_fail,
             busy=(app.connect_btn,),
@@ -1146,6 +1154,7 @@ def build(app):
 
         payload = {
             "spectrometer_type": app.hw.spectrometer_type,
+            "last_connected_type": getattr(app.hw, "last_connected_type", ""),
             "dll_path": app.hw.dll_path,
             "com_ports": app.hw.com_ports,
             "laser_power": app.hw.laser_power,
@@ -1216,6 +1225,7 @@ def build(app):
             saved_type = obj.get("spectrometer_type", getattr(app.hw, "spectrometer_type", "Auto"))
             app.spec_type_var.set(saved_type)
             app.hw.spectrometer_type = saved_type
+            app.hw.last_connected_type = str(obj.get("last_connected_type", "") or "")
             # Load DLL path
             app.hw.dll_path = obj.get("dll_path", "")
             app.dll_entry.delete(0, "end")
