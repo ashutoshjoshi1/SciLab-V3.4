@@ -6,7 +6,7 @@ import platform
 import threading
 import os, sys
 from copy import deepcopy
-from spec_xfus import spec_clock, calc_msl, split_cycles
+from spec_xfus import spec_clock, calc_msl, split_cycles, measurement_timeout_s
 from datetime import datetime
 from collections import OrderedDict
 
@@ -818,14 +818,27 @@ class Hama3_Spectrometer():
 
         return res
 
-    def wait_for_measurement(self):
+    def wait_for_measurement(self, timeout=None):
         """
-        res=wait_for_measurement()
-        Wait until all data read is already handled.
+        res=wait_for_measurement(timeout=None)
+        Wait until all data read is already handled, or until <timeout> seconds elapse
+        (default: twice the expected duration plus a margin, see spec_xfus.measurement_timeout_s).
+        On timeout the measurement is aborted and an error is returned, so a stalled watchdog
+        thread can never hang the caller forever.
         returns:
             <res>: If any problem happened while measuring, the last produced error will be stored in self.error
         """
-        self.internal_meas_done_event.wait()
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested, self.it_ms)
+        if not self.internal_meas_done_event.wait(timeout):
+            self.error = ("Timeout after %.1f s waiting for measurement of spec %s (ncy=%s, IT=%s ms)"
+                          % (timeout, self.alias, self.ncy_requested, self.it_ms))
+            self.logger.error(self.error)
+            try:
+                self.abort(ignore_errors=True)
+            except Exception:
+                self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
+            self.internal_meas_done_event.set()
         return self.error
 
     def initialize_dll(self):
@@ -1493,8 +1506,9 @@ class Hama3_Spectrometer():
         """
         Final actions to be done when a measurement is complete.
         """
-        self.meas_end_time=self.arrival_times[-1] #Unix Time in which the spectrometer indicated to the pc
-        # that the last cycle (pack of cycles) was finished, and it was ready to be read.
+        #Unix Time in which the spectrometer indicated to the pc that the last cycle (pack of cycles) was
+        # finished, and it was ready to be read. (Guarded: an aborted run may have handled no cycles at all.)
+        self.meas_end_time=self.arrival_times[-1] if len(self.arrival_times)>0 else spec_clock.now()
         #Calculate mean, standard deviation and rms to a fitted straight line (for active pixels):
         x=np.arange(self.ncy_handled)
         res,self.rcm,self.rcs,self.rcl=calc_msl(self.alias,x,self.sxy,self.sy,self.syy)

@@ -7,7 +7,7 @@ import platform
 import numpy as np
 from time import sleep
 from copy import deepcopy
-from spec_xfus import spec_clock, calc_msl, split_cycles
+from spec_xfus import spec_clock, calc_msl, split_cycles, measurement_timeout_s
 
 if sys.version_info[0] < 3:
     # Python 2.x
@@ -641,8 +641,8 @@ class Hama4_Spectrometer(object):
             self.arrival_times.append(spec_clock.now())
             for i in range(ncy_pack):
                 self.ncy_read += 1
-                issat = self.handle_cycle_data(self.ncy_read, rc[i, :], [], [])
-                if issat and self.abort_on_saturation:
+                issat, data_ok = self.handle_cycle_data(self.ncy_read, rc[i, :], [], [])
+                if (issat and self.abort_on_saturation) or not data_ok:
                     self.logger.info("Measurement aborted due to saturation in cycle " +
                                      str(self.ncy_read) + "/" + str(self.ncy_requested))
                     self.measurement_done()
@@ -678,8 +678,8 @@ class Hama4_Spectrometer(object):
             if self.debug_mode > 2:
                 self.logger.debug("Data arrived for cycle " + str(self.ncy_read))
 
-            issat = self.handle_cycle_data(self.ncy_read, y_data.astype(np.float64), [], [])
-            if issat and self.abort_on_saturation:
+            issat, data_ok = self.handle_cycle_data(self.ncy_read, y_data.astype(np.float64), [], [])
+            if (issat and self.abort_on_saturation) or not data_ok:
                 self.logger.info("Measurement aborted due to saturation in cycle " +
                                  str(self.ncy_read) + "/" + str(self.ncy_requested))
                 self.measurement_done()
@@ -691,9 +691,25 @@ class Hama4_Spectrometer(object):
 
         return "OK"
 
-    def wait_for_measurement(self):
-        """Block until the current measurement is fully handled."""
-        self.internal_meas_done_event.wait()
+    def wait_for_measurement(self, timeout=None):
+        """Block until the current measurement is fully handled.
+
+        ``timeout`` defaults to twice the expected duration plus a margin
+        (see spec_xfus.measurement_timeout_s). On timeout the measurement is
+        aborted and an error string is returned, so a stalled watchdog thread
+        can never hang the caller forever.
+        """
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested, self.it_ms)
+        if not self.internal_meas_done_event.wait(timeout):
+            self.error = ("Timeout after %.1f s waiting for measurement of spec %s (ncy=%s, IT=%s ms)"
+                          % (timeout, self.alias, self.ncy_requested, self.it_ms))
+            self.logger.error(self.error)
+            try:
+                self.abort(ignore_errors=True)
+            except Exception:
+                self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
+            self.internal_meas_done_event.set()
         return self.error
 
     # ===================================================================
@@ -1342,10 +1358,15 @@ class Hama4_Spectrometer(object):
             elif not self.docatch:
                 continue
             else:
-                issat = self.handle_cycle_data(ncy_read, rc, rc_blind_left, rc_blind_right)
-                if issat and self.abort_on_saturation:
-                    self.logger.info("data_handling_watchdog, saturation detected in spec " + self.alias +
-                                     ", ncy=" + str(ncy_read) + "/" + str(self.ncy_requested))
+                issat, data_ok = self.handle_cycle_data(ncy_read, rc, rc_blind_left, rc_blind_right)
+                if (issat and self.abort_on_saturation) or not data_ok:
+                    if issat:
+                        self.logger.info("data_handling_watchdog, saturation detected in spec " + self.alias +
+                                         ", ncy=" + str(ncy_read) + "/" + str(self.ncy_requested))
+                    if not data_ok:
+                        self.logger.warning("data_handling_watchdog, data not consistent in spec " + self.alias +
+                                            ", ncy=" + str(ncy_read) + "/" + str(self.ncy_requested) +
+                                            ". Aborting due to inconsistent data (as if it were saturated)")
                     self.docatch = False
                     while not self.read_data_queue.empty():
                         sleep(0.1)
@@ -1377,14 +1398,17 @@ class Hama4_Spectrometer(object):
         rcmax = rc.max()
         rcmin = rc.min()
 
+        # Negative values are only warned about: HiasApi frames may be
+        # background-corrected, so a negative count is not proof of a bad frame.
         if rcmin < 0:
             self.logger.warning("handle_cycle_data, negative counts detected!")
-        if np.isnan(rcmax) or np.isnan(rcmin):
+        data_ok = not (np.isnan(rcmax) or np.isnan(rcmin))
+        if not data_ok:
             self.logger.warning("handle_cycle_data, NaN counts detected!")
 
         issat = rcmax >= self.eff_saturation_limit
         if issat and self.abort_on_saturation:
-            return issat
+            return issat, data_ok
 
         # Accumulate
         self.sy  = self.sy + rc
@@ -1394,7 +1418,7 @@ class Hama4_Spectrometer(object):
         if issat:
             self.ncy_saturated += 1
 
-        return issat
+        return issat, data_ok
 
     def measurement_done(self):
         """Final actions when a measurement is complete."""

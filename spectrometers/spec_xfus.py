@@ -180,3 +180,18 @@ class SpecClock:
 spec_clock=SpecClock()
 
 
+def measurement_timeout_s(ncy, it_ms, margin_s=10.0, factor=2.0):
+    """Upper bound, in seconds, on how long a measurement of ``ncy`` cycles at
+    ``it_ms`` should take before the caller treats it as stalled.
+
+    ``factor`` covers USB/DLL overhead and slow packs; ``margin_s`` covers the
+    fixed startup latency. Never less than ``margin_s``.
+    """
+    try:
+        cycles = max(1, int(ncy or 1))
+        it = float(it_ms or 0.0)
+    except (TypeError, ValueError):
+        cycles, it = 1, 0.0
+    return max(float(margin_s), factor * cycles * it / 1000.0 + float(margin_s))
+
+

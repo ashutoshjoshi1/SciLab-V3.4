@@ -3,7 +3,7 @@
 #directly (see the __main__ section at the end of the file).
 #Written by Daniel Santana
 
-from spec_xfus import spec_clock, calc_msl
+from spec_xfus import spec_clock, calc_msl, measurement_timeout_s
 import logging
 import ctypes
 from ctypes import windll,c_char,Structure,c_uint,c_byte,c_ushort,sizeof,byref,c_ubyte,c_float,c_uint8,c_uint16,c_uint32,c_double,c_bool,c_int
@@ -1863,8 +1863,9 @@ class Avantes_Spectrometer():
         """
         Final actions to be done when a measurement is complete.
         """
-        self.meas_end_time=self.arrival_times[-1] #Time in which the spectrometer indicated to the pc that
-        # the last cycle was finished, and it was ready to be read.
+        #Time in which the spectrometer indicated to the pc that the last cycle was finished, and it was
+        # ready to be read. (Guarded: an aborted run may have handled no cycles at all.)
+        self.meas_end_time=self.arrival_times[-1] if len(self.arrival_times)>0 else spec_clock.now()
         #Calculate mean, standard deviation and rms to a fitted straight line (for active pixels):
         x=np.arange(self.ncy_handled)
         _,self.rcm,self.rcs,self.rcl=calc_msl(self.alias,x,self.sxy,self.sy,self.syy)

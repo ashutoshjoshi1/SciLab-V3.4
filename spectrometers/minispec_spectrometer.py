@@ -33,7 +33,7 @@ from ctypes import (
 
 import numpy as np
 
-from spec_xfus import spec_clock
+from spec_xfus import spec_clock, measurement_timeout_s
 
 
 logger = logging.getLogger(__name__)
