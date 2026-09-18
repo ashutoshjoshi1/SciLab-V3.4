@@ -113,6 +113,17 @@ assembly through pythonnet.
    (or point the Setup tab's DLL path at it) and run `pip install pythonnet`.
 3. Setup → type **Hama6** → Connect.
 
+The head on the bench is a **C16767MA-20** (UV, 190 to 440 nm, 288 pixels).
+The board reports the head's serial and sensor, not its model. The wavelength
+axis comes from the six coefficients the board reports; if it reports none,
+put Hamamatsu's final-inspection-sheet polynomial into
+`hama6_wavelength_coefficients.json` next to the DLL, keyed by the head serial
+(an entry may also name the model, which then appears in the device name):
+
+```json
+{"26C00021": {"model": "C16767MA-20", "coefficients": [A0, B1, B2, B3, B4, B5]}}
+```
+
 SciLab drives the assembly's own workflow (`MICRO_USB2_initialize`, module
 connection list, `open`, module properties, `setExposureTime` in seconds,
 one continuous `captureStart` / `getImageData` capture) through .NET
@@ -120,6 +131,9 @@ reflection, so its `ref` parameters and `Int64` handles work from Python. The
 exposure API works in microseconds (the driver reads the unit from the device's
 exposure limits), status code 0 means success, and the driver checks each step
 by its effect and prints all codes in the connect log line and in any error.
+The board keeps its capture mode across sessions; when its own mode delivers
+no frame (mode 0 did not on 2026-09-18) the driver switches to mode 2, the
+continuous mode, and puts the board's mode back at disconnect.
 Frames arrive once per exposure *cycle* stored in the board (up to 1.1 s); the
 cycle is key-protected in the DLL, so ask Hamamatsu for the `strCheck` value or
 set a short cycle in u-ApsSpecEvaluation before using SciLab. A failed
@@ -132,11 +146,16 @@ within ...", run the read-out experiment script and send its output:
 python tools/diagnose_c13016.py > c13016-diagnostics.txt
 ```
 
-It takes about a minute and records how `getImageData` answers before any
-start, during one continuous capture (frame period from the timestamps), after
-an exposure change, with each buffer size, after `captureStop`, and after a
-restart; add `--modes` to try the candidate capture modes as well. The board's
-mode is restored at the end.
+It takes one to two minutes. It lists the assembly's API and internals (enums,
+P/Invoke imports and string literals, to decode the status codes and the
+`strCheck` key), tries the device's own identity strings as `strCheck` on the
+read-only getters, records how `getImageData` answers before any start and
+during a capture in the board's own mode, sweeps the candidate capture modes
+when that mode yields nothing (`--skip-modes` to skip), and then, in the
+working mode, records an exposure change, each buffer size, `captureStop` and
+a restart (frame period from the timestamps). A code-0 answer with an
+all-zero buffer is reported as an "echo", not a frame. The board's mode is
+restored at the end.
 
 ## Files
 

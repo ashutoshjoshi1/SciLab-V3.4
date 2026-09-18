@@ -581,6 +581,25 @@ therefore bound to the cycle stored by the vendor software until Hamamatsu
 provides the `strCheck` key or the function specification for
 `setExposureCycle`. `tools/diagnose_c13016.py` follows the same rules and
 measures the frame period on the bench.
+A sixth session (2026-09-18, the diagnostic script, board in mode 0) received
+no frame at all in 18 s at 10 and 50 ms: one echo of the empty buffer (code 0,
+288 zeros, timestamp 0) right after each `captureStart`, then 6 until the stop.
+The single-shot frames of the fifth connect were therefore most likely the
+same echo of a buffer that still held a real frame; mode 2 is the only mode
+that has delivered frames. The driver now probes the board's own mode first
+and, when it yields nothing, switches to mode 2 (`FALLBACK_CAPTURE_MODES`),
+probes again and restores the original mode at disconnect; an all-zero buffer
+is never accepted as a frame. The diagnostic lists the assembly's enums,
+P/Invoke imports and string literals (to decode codes 6 and 12 and the
+`strCheck` key), tries the identity strings as `strCheck` on the read-only
+getters, and sweeps the capture modes whenever the board's own mode yields
+nothing. The head on the bench is a C16767MA-20 (UV, 190 to 440 nm, 288
+pixels); the board reports only its serial (26C00021) and sensor (S11639)
+through `getSpectroInformationForLabVIEW`, which the driver folds into the
+device name. When `getCalibrationCoefficient` yields no plausible polynomial
+the driver reads `hama6_wavelength_coefficients.json` next to the DLL
+(inspection-sheet coefficients keyed by head serial, optionally with the
+model) before falling back to the pixel axis.
 
 ### Bench checklist (Windows, real hardware)
 

@@ -105,6 +105,8 @@ class FakeMicroUsb2Clr:
         self.stop_ineffective = False                       # captureStop returns 0 but the capture goes on
         self.produces_frames = True
         self.never_ready = False
+        self.coefficients_available = True                  # False: getCalibrationCoefficient leaves the buffer at zeros
+        self.silent_modes = set()                           # modes in which the board never exposes (bench: mode 0 on 2026-09-18)
         self.next_frame_at = None
         self.exposing_with = None
         self.last_frame = None
@@ -140,6 +142,8 @@ class FakeMicroUsb2Clr:
                            [ID, FakeParam("sec", REF(T("Double"))), FakeParam("strCheck", T("String"))], self._get_cycle),
             FakeMethodInfo("MICRO_USB2_getTriggerOutput", [ID, FakeParam("output", REF(T("Int64")))], self._trigger_output),
             FakeMethodInfo("MICRO_USB2_getTriggerPolarity", [ID, FakeParam("polarity", REF(T("Int64")))], self._trigger_polarity),
+            FakeMethodInfo("MICRO_USB2_getSpectroInformationForLabVIEW",
+                           [ID, FakeParam("serial", REF(T("String"))), FakeParam("sensor", REF(T("String")))], self._spectro_information),
             FakeMethodInfo("MICRO_USB2_getImageData",
                            [ID, FakeParam("imageData", REF(ARR("UInt16"))), FakeParam("time", REF(ARR("UInt64")))], self._image_data),
             FakeMethodInfo("GetType", [], lambda a: None, "Type"),
@@ -208,7 +212,13 @@ class FakeMicroUsb2Clr:
         args[1] = self.exposure_s * self.unit_scale
         return OK
 
+    def _spectro_information(self, args):
+        args[1], args[2] = "26C00021".ljust(16, "\x00"), "S11639".ljust(16, "\x00")   # the head, as on the bench
+        return OK
+
     def _coefficient(self, args):
+        if not self.coefficients_available:
+            return OK                               # code 0 but nothing written: no polynomial in this board
         if int(args[1]) == 0 and len(args[2]) >= 6:
             for i, value in enumerate([310.0, 2.65, -1.1e-3, 0.0, 0.0, 0.0]):
                 args[2][i] = value
@@ -246,6 +256,7 @@ class FakeMicroUsb2Clr:
         self.capturing = True
         self.exposing_with = self.exposure_s
         self.next_frame_at = time.monotonic() + self.cycle_s
+        self.serves_left = max(self.serves_left, 1)         # the DLL echoes its buffer once (zeros if empty) after a start
         return OK
 
     def _capture_stop(self, args):
@@ -264,7 +275,8 @@ class FakeMicroUsb2Clr:
 
     def _advance(self):
         now = time.monotonic()
-        while self.produces_frames and self.capturing and self.next_frame_at is not None and now >= self.next_frame_at:
+        exposing = self.produces_frames and self.mode not in self.silent_modes
+        while exposing and self.capturing and self.next_frame_at is not None and now >= self.next_frame_at:
             self.last_frame = self._make_frame(self.exposing_with)   # exposed with the setting at frame start
             self.exposing_with = self.exposure_s
             self.stamp += 1
@@ -280,9 +292,11 @@ class FakeMicroUsb2Clr:
         if self.never_ready:
             return NO_FRAME
         self._advance()
-        if self.last_frame is None or self.serves_left <= 0:
+        if self.serves_left <= 0:
             return NO_FRAME                         # buffer left untouched (zeros)
         self.serves_left -= 1
+        if self.last_frame is None:
+            return OK                               # 2026-09-18: code 0 with 288 zeros and time 0 right after captureStart
         buffer = args[1]
         assert len(buffer) == self.pixel, "getImageData must get a pixel-sized buffer"
         for i, value in enumerate(self.last_frame):
@@ -349,7 +363,7 @@ def test_connect_follows_initialize_list_open_workflow(spec, device):
     assert device.calls[:2] == ["initialize", "open:7"]
     assert device.argument_types[0] == "int" and "float" in device.argument_types
     assert spec.module_id == 7 and spec.module_ids == [7]
-    assert spec.sn == "326VA021" and spec.name == "Hamamatsu C13016 micro-spectrometer"   # NUL padding stripped
+    assert spec.sn == "326VA021" and spec.name.startswith("Hamamatsu C13016 micro-spectrometer circuit")   # NUL padding stripped
     assert spec.module_info["firmware"] == "1.08"
     assert spec.capture_modes_supported == 32 and spec.capture_mode == 0
     assert spec.diagnostics["capture_state"]["trigger"] == {"output": 1, "polarity": 3}
@@ -418,6 +432,65 @@ def test_stale_frame_alone_does_not_pass_the_probe():
     assert "No new frame within 0.1 s" in result and "getImageData codes {0: " in result
     assert "cycle limits {'lower': 0.00104" in result
     assert not device.capturing and device.opened is None    # capture stopped, module closed
+    assert device.mode == 0                                  # the fallback to mode 2 was undone
+
+
+def test_frameless_board_mode_is_switched_to_continuous_and_restored():
+    device = FakeMicroUsb2Clr(mode=0)
+    device.silent_modes = {0}                                # bench 2026-09-18: mode 0 answered 6 for 18 s
+    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
+    backend.frame_timeout_s = 0.2
+    assert backend.connect() == "OK", backend.error
+    assert device.mode == 2 and backend.capture_mode == 2 and backend.original_capture_mode == 0
+    assert backend._continuous is True                       # learned afresh in the new mode
+    assert backend.measure(ncy=2) == "OK" and backend.wait_for_measurement() == "OK"
+    assert backend.ncy_handled == 2
+    backend.disconnect()
+    assert device.mode == 0 and not device.capturing and device.opened is None
+
+
+def test_empty_buffer_echo_after_start_is_not_a_frame():
+    device = FakeMicroUsb2Clr(mode=0)
+    device.silent_modes = {0, 2}
+    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
+    backend.frame_timeout_s = 0.1
+    result = backend.connect()
+    assert "no capture mode delivered a frame (mode 0: No new frame" in result and "; mode 2: No new frame" in result
+    assert "getImageData codes {0: 1, " in result           # the echo (code 0, all zeros) was seen once and rejected
+    assert device.mode == 0 and device.opened is None
+
+
+def test_head_serial_and_sensor_name_the_device(spec, device):
+    assert spec.module_info["head_serial"] == "26C00021" and spec.module_info["sensor"] == "S11639"
+    assert spec.name == "Hamamatsu C13016 micro-spectrometer circuit with head 26C00021 (S11639)"
+    assert spec.wavelengths_nm[0] == pytest.approx(310.0 + 2.65 - 1.1e-3)     # board polynomial at p = 1
+
+
+def test_coefficient_file_supplies_the_wavelength_axis(tmp_path):
+    device = FakeMicroUsb2Clr()
+    device.coefficients_available = False
+    (tmp_path / h6.COEFFICIENTS_FILE_NAME).write_text(
+        '{"26C00021": {"model": "C16767MA-20", "coefficients": [190.5, 0.87, -1.2e-5, 0, 0, 0]},'
+        ' "default": [300, 1, 0, 0, 0, 0]}', encoding="utf-8")
+    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
+    backend.dll_path = str(tmp_path / "MICRO_USB2_CLR.dll")
+    assert backend.connect() == "OK", backend.error
+    assert backend.calibration_coefficients[:2] == [190.5, 0.87]              # the head's entry wins over "default"
+    assert backend.wavelengths_nm.size == 288
+    assert backend.wavelengths_nm[0] == pytest.approx(190.5 + 0.87 - 1.2e-5)
+    assert backend.name == "Hamamatsu C13016 micro-spectrometer circuit with C16767MA-20 head 26C00021 (S11639)"
+    assert backend.diagnostics["calibration_file"]["key"] == "26C00021"
+    backend.disconnect()
+
+
+def test_without_coefficients_anywhere_the_pixel_axis_is_used(tmp_path):
+    device = FakeMicroUsb2Clr()
+    device.coefficients_available = False
+    backend = h6.Hama6_Spectrometer(api=h6.MicroUsb2Api(device))
+    backend.dll_path = str(tmp_path / "MICRO_USB2_CLR.dll")                  # no coefficient file next to it
+    assert backend.connect() == "OK", backend.error
+    assert backend.calibration_coefficients == [] and backend.wavelengths_nm.size == 0
+    backend.disconnect()
 
 
 def test_disconnect_stops_closes_and_uninitializes(spec, device):
