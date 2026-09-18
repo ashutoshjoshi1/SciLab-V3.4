@@ -132,6 +132,10 @@ may also name the model, which then appears in the device name):
 {"26C00021": {"model": "C16767MA-20", "coefficients": [A0, B1, B2, B3, B4, B5]}}
 ```
 
+Integrating the same board into another application (C#, Python, C++,
+LabVIEW): see `docs/hama6-c13016-integration-guide.md`, which collects every
+finding below with code examples.
+
 How SciLab drives the board (verified against the hardware on 2026-09-18,
 C13016 serial 326VA021, firmware 1.08, with Hamamatsu's sample sequence):
 

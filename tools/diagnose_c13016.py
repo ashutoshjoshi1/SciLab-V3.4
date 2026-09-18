@@ -414,6 +414,10 @@ def main():
     parser.add_argument("--trigger", action="store_true", help="also try capture mode 2 (external trigger) for 3 s")
     parser.add_argument("--free-run", action="store_true", help="also try the undocumented capture mode 1 (may block the DLL; runs last)")
     args = parser.parse_args()
+    try:  # the assembly's string literals include characters a cp1252 console or redirected file cannot encode
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
     dll = args.dll
     if dll is None:
