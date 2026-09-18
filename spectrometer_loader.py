@@ -14,6 +14,8 @@ LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DLLS_DIR = PROJECT_ROOT / "spectrometers dll files"
+# Where Hamamatsu's C13016 evaluation-software installer puts MICRO_USB2_CLR.dll (used when it is not in DLLS_DIR).
+HAMA6_VENDOR_INSTALL_DLL = Path(r"C:\Program Files\HamamatsuMinispectrometer for C13016\EvaluationSoftware\MICRO_USB2_CLR.dll")
 # "Hama5" = Hamamatsu mini-spectrometers on the specu1b USB protocol (TM/TG/RC
 # series) via pyusb; no vendor DLL. "Simulated" is explicit opt-in only: Auto never
 # falls back to fake data.
@@ -59,7 +61,11 @@ def suggest_default_dll_path(spec_type: Optional[str]) -> str:
         "Hama6": DLLS_DIR / "MICRO_USB2_CLR.dll",  # not bundled: copy from Hamamatsu's u-ApsSpecEvaluation folder
     }
     path = suggestions.get(normalized)
-    return str(path.resolve()) if path and path.exists() else ""
+    if path and path.exists():
+        return str(path.resolve())
+    if normalized == "Hama6" and HAMA6_VENDOR_INSTALL_DLL.is_file():
+        return str(HAMA6_VENDOR_INSTALL_DLL)      # Hamamatsu's installer left it there; no copy needed
+    return ""
 
 
 def supports_eeprom_type(spec_type: Optional[str]) -> bool:

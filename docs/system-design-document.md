@@ -520,86 +520,99 @@ confirmed supported device.
 
 Hamamatsu's "Mini-spectrometers Technical Information" (KACC9003E, table 2-9)
 assigns the C13016 evaluation circuit and the C13985 module to
-`MICRO_USB2_CLR.dll` + `u-ApsSpecEvaluation.exe`; an NI forum moderator
-confirms the DLL is a .NET assembly rather than a C export library. The board
-(C12880MA/C16767MA datasheet KACC1226E): USB 2.0, 16-bit A/D, 288 pixels,
-5 MHz clock, integration 11 µs to 1,000,000 µs, six wavelength conversion
-factors (λ = a0 + a1·p + … + a5·p⁵).
+`MICRO_USB2_CLR.dll` + `u-ApsSpecEvaluation.exe`, a .NET assembly rather than
+a C export library. The board (C12880MA/C16767MA datasheet KACC1226E): USB 2.0,
+16-bit A/D, 288 pixels, 5 MHz clock, integration 11 µs to 1,000,000 µs, six
+wavelength conversion factors (λ = A0 + B1·p + … + B5·p⁵, p = 1..288).
+Hamamatsu's "Minispectrometer H-micro edition" download (ver 1.1.0.0) ships
+the assembly, the WinUSB driver (`VID_0661&PID_2936`, "C13016 USB2(HPK)"), the
+DLL function specification K29-B61584B (status codes, capture modes, capture
+status semantics) and console samples in VB.NET and C++/CLI; the samples are
+the reference sequence the driver follows.
 
-`spectrometers/hama6_spectrometer.py` loads the assembly with pythonnet. Its
-public API was reflected on the bench on 2026-09-17: class `MICRO_USB2_CLR`, a
-one-to-one mirror of the C-style `MICRO_USB2` library (`MICRO_USB2_initialize`,
-`getModuleConnectionList(Int16[] list, ref UInt16 number)`, `open(Int64 id)`,
-`getModulePropertyForLabVIEW` for pixel count / bit depth / capture mode,
-`setExposureTime(Int64 id, Double sec)`, `getCalibrationCoefficient`,
-`captureStart` / `getImageData(Int64 id, ref UInt16[] imageData, ref UInt64[]
-time)` / `captureStop`; every method returns an `Int64` status code). The
-driver follows that workflow explicitly. Two pythonnet 3 traps drove the call
-layer: its overload resolution rejects `ref` parameters and typed scalars
-("No method matches given arguments"), and a Python `int` stored into an
-`object[]` becomes a `Python.Runtime.PyInt` that `MethodInfo.Invoke` cannot
-convert. Calls therefore go through reflection with each scalar boxed inside
-the CLR (one-element typed array copied into the `object[]`). Hamamatsu's
-function specification (status-code meanings, capture modes, capture status)
-is only shipped inside the software download, so the driver never gates on a
-status code: it checks module properties after `open`, the exposure readback
-after `setExposureTime`, and accepts a frame only when its timestamp or pixel
-data changed. All codes are kept in `diagnostics` and appear in every error
-message; a failed Connect also writes `spectrometers/micro_usb2_api_dump.txt`.
-Acquisition, averaging, timeouts and Stop follow the same shape as Hama5.
-First bench connection (C13016 serial 326VA021, firmware 1.08, 2026-09-17):
-every call returned 0, so 0 is the success code; the exposure API works in
-microseconds although its parameter is named `sec` (limits 11 to 1,000,000,
-step 1), and the driver derives the unit from `getExposurePropertyForLabVIEW`
-on each connect; identity strings are NUL-padded; the module id was 0 and the
-the module property `capturemode` read 32 (probably a supported-modes mask).
-Live View at 10 ms then failed: `captureStart` 0, `getImageData` 6 on every
-poll, before and after `captureStop`, `getCaptureStatus` 1 throughout; a second
-connect showed the first probe frame had been a stale buffer. `getCaptureMode`
-reads 0 while the property advertises 32, and key-protected methods answer 12
-to an empty `strCheck`. The driver therefore proves a capture with two
-consecutive frames, falls back to `captureStop` followed by reading, and when
-the current mode yields nothing sets each advertised capture mode (mask bits,
-then 1, 2, 3, 4, 8, 16, 64), retries, and restores the original mode if all
-fail. A third connect found the board in mode 2 and every candidate mode
-answering 6 as well. The fourth, with a 2.5 s probe window, received a frame
-(`getImageData` 0) and then crashed: a second `captureStart` while the capture
-still ran threw a `SynchronizationLockException` inside the DLL. Together with
-the exposure-cycle limits (1,043 µs to 1.1 s, key-protected, so neither
-readable nor settable by us) this means the board delivers one frame per
-stored exposure cycle, of the order of a second, and must not be restarted
-per frame. A fifth connect, in capture mode 0, received exactly one frame per
-`captureStart` (the same frame is served twice with code 0, then 6 resumes):
-mode 0 is single shot and mode 2 continuous, and `getCaptureStatus` reads 1
-in every state. The driver now issues `captureStart` before each frame until
-a start throws, which marks the capture as continuous and leaves it running;
-new frames are detected by timestamp or changed data, the frame already
-exposing when the integration time changes is discarded in continuous mode,
-and the board's capture mode is never changed. Measurement timeouts include
-one cycle per requested frame. Frame rate is
-therefore bound to the cycle stored by the vendor software until Hamamatsu
-provides the `strCheck` key or the function specification for
-`setExposureCycle`. `tools/diagnose_c13016.py` follows the same rules and
-measures the frame period on the bench.
-A sixth session (2026-09-18, the diagnostic script, board in mode 0) received
-no frame at all in 18 s at 10 and 50 ms: one echo of the empty buffer (code 0,
-288 zeros, timestamp 0) right after each `captureStart`, then 6 until the stop.
-The single-shot frames of the fifth connect were therefore most likely the
-same echo of a buffer that still held a real frame; mode 2 is the only mode
-that has delivered frames. The driver now probes the board's own mode first
-and, when it yields nothing, switches to mode 2 (`FALLBACK_CAPTURE_MODES`),
-probes again and restores the original mode at disconnect; an all-zero buffer
-is never accepted as a frame. The diagnostic lists the assembly's enums,
-P/Invoke imports and string literals (to decode codes 6 and 12 and the
-`strCheck` key), tries the identity strings as `strCheck` on the read-only
-getters, and sweeps the capture modes whenever the board's own mode yields
-nothing. The head on the bench is a C16767MA-20 (UV, 190 to 440 nm, 288
-pixels); the board reports only its serial (26C00021) and sensor (S11639)
-through `getSpectroInformationForLabVIEW`, which the driver folds into the
-device name. When `getCalibrationCoefficient` yields no plausible polynomial
-the driver reads `hama6_wavelength_coefficients.json` next to the DLL
-(inspection-sheet coefficients keyed by head serial, optionally with the
-model) before falling back to the pixel axis.
+`spectrometers/hama6_spectrometer.py` loads the assembly with pythonnet. Class
+`MICRO_USB2_CLR` mirrors the C-style `MICRO_USB2` library one-to-one and every
+method returns an `Int64` `Cusb2Err` status (0 success). Two pythonnet 3 traps
+drove the call layer: its overload resolution rejects `ref` parameters and
+typed scalars ("No method matches given arguments"), and a Python `int` stored
+into an `object[]` becomes a `Python.Runtime.PyInt` that `MethodInfo.Invoke`
+cannot convert. Calls therefore go through reflection with each scalar boxed
+inside the CLR (one-element typed array copied into the `object[]`). Every DLL
+call runs on one worker thread per backend with a 15 s watchdog
+(`DLL_CALL_TIMEOUT_S`) that turns a blocked call into an error and marks the
+backend blocked until SciLab is restarted, because the DLL can deadlock (below).
+All codes are kept in `diagnostics` and appear in every error message; a failed
+Connect also writes `spectrometers/micro_usb2_api_dump.txt`. Acquisition,
+averaging, timeouts and Stop follow the same shape as Hama5.
+
+Verified workflow (2026-09-18, development PC, C13016 serial 326VA021,
+firmware 1.08, head 26C00021 / sensor S11639, Hamamatsu's SampleAPL sequence):
+
+* `initialize`; `getModuleConnectionList(Int16[] list, ref UInt16 number)`
+  with `number` as an output (the samples pass 0; 8 slots, the specification's
+  maximum per PC); `open(id)`; `captureStop` to clear a capture a killed
+  process may have left running; identity (`getModuleInformationForLabVIEW`,
+  NUL-padded strings; `getSpectroInformationForLabVIEW` for the head serial
+  and sensor), module property (288 pixels, 16 bit, `capturemode` mask 32),
+  exposure property (11 .. 1,000,000 µs, step 1; cycle 1,043 .. 1,100,000 µs),
+  capture mode, trigger output/polarity (1 / 3), and the key-protected reads
+  of the exposure cycle and the wavelength range (200 .. 800 nm) with the
+  literal `CHECK_KEY` the assembly compares `strCheck` against.
+* `setCaptureMode(0)` unless the board already reports mode 0, the documented
+  "specified number of measurement" mode (one frame per `captureStart`; the
+  mode persists in the board). Mode 2 is the external-trigger mode: without a
+  trigger `getCaptureStatus` stays 1 and `getImageData` echoes an all-zero
+  buffer with code 0. Mode 1 ("free run") exists only in the assembly's
+  `Usb2CaptureMode` enum: it delivered one frame and the following
+  `setCaptureMode(0)` never returned (reproduced 2026-09-18 in an isolated
+  process, killed after 60 s); the board itself was in mode 0 for the next
+  process. The driver never selects mode 1.
+* `setExposureTime(id, us)` in microseconds although the parameter is named
+  `sec` (31 underTime below 11 µs, 30 overTime above the limit). The DLL sets
+  the exposure cycle itself on every `setExposureTime`: exposure + 2,000 µs
+  (11 → 2,011; 10,000 → 12,000; 1,000,000 → 1,002,000). The driver reads the
+  cycle back for the log and never writes it.
+* Per frame: `captureStart` (about 13 ms inside the DLL); `getCaptureStatus`
+  polled until 0 ("captured frames exist"; 1 while none; 4 = data loss, on
+  which the driver stops and restarts the capture, `FRAME_RETRIES` times);
+  `getImageData(ref UInt16[288], ref UInt64[1])` → code 0 with the counts and
+  a timestamp (25 invalidData is discarded and the capture restarted); the
+  buffer is consumed, the next call answers 6 notImage and the status returns
+  to 1; `captureStop`. The frame is ready about one cycle after the start
+  (11 .. 22 ms at 10 ms); the round trip is about 26 ms at short exposures
+  and exposure + 30 ms at long ones. A ready frame waited 2 s unread without
+  loss. Timestamps repeat between frames (18, 24, 24, ...), so they cannot
+  identify a new frame; consumption does. Connect proves the loop with two
+  frames. Measurement timeouts add one round trip per requested frame.
+* `close`; `uninitialize`. Recovery: a `captureStart` that throws a
+  `SynchronizationLockException` (bench, board still capturing for a killed
+  process) did not start; the driver stops, retries once, closes and re-opens
+  the module, retries once more and then asks for a re-plug.
+
+Why the bench sessions of 2026-09-17/18 never got frames, found once the
+hardware and Hamamatsu's developer kit were on the development PC: the driver
+set the exposure cycle to exposure + 1,032 µs through the key-protected
+`setExposureCycle` (the specification deleted that function in 2015), which
+starved the board of frames in every mode; the very same board, with the
+DLL's own exposure + 2,000 µs cycle, delivers a frame 11 ms after each start.
+The driver also polled `getImageData` instead of `getCaptureStatus` and left
+the board's mode untouched, so it kept probing modes 1 and 2, whose failure
+modes (DLL deadlock; no external trigger) look like a dead board. Bench
+findings that still hold and are modelled by the test fake: microsecond
+exposures behind `sec`; NUL-padded identity strings; `capturemode` 32 in the
+module property; key-protected getters answering 12 to a wrong `strCheck`;
+`getCalibrationCoefficient` index 0 giving the polynomial (320 .. 888 nm on
+this board, the range of a C12880MA, although the head is a UV C16767MA-20,
+so the operator's `hama6_wavelength_coefficients.json` next to the DLL wins;
+index 1, sensitivity, is NaN); the throwing `captureStart`.
+
+`tools/diagnose_c13016.py` runs the same sequence and prints a report:
+assembly internals (enums, P/Invoke imports, string literals, user-string
+heap), identity and settings, the keyed state, mode-0 selection, an exposure
+sweep showing the DLL-derived cycle, 20 frames with round-trip and
+time-to-ready statistics, the answers after a frame is consumed, and
+optionally mode 2 (`--trigger`) and the mode-1 hang (`--free-run`, exits if
+`setCaptureMode` blocks).
 
 ### Bench checklist (Windows, real hardware)
 
@@ -612,7 +625,7 @@ model) before falling back to the pixel axis.
 4. Stop button during a 50-cycle capture: the run must end within one frame.
 5. Ava1/Hama2/Hama3/Hama4: one full run each to exercise the shared `wait_for_measurement` timeout and the in-place accumulators.
 
-6. C13016 (Hama6): install Hamamatsu's evaluation software, copy `MICRO_USB2_CLR.dll` next to the other DLLs, `pip install pythonnet`; Setup → Hama6 → Connect. Read the "codes" in the connect log line to learn the status-code polarity (initialize/open/setExposureTime/getImageData), then verify 288 pixels, the wavelength coefficients against the calibration sheet, a known line, and that Live View frames advance at short and long integration times (the driver detects new frames by timestamp).
+6. C13016 (Hama6): install Hamamatsu's evaluation software (USB driver), `pip install pythonnet`, leave `MICRO_USB2_CLR.dll` in `spectrometers dll files/` or in the installer's folder; Setup → Hama6 → Connect (about 0.3 s). Verify 288 pixels and 16 bit in the connect log line, the wavelength axis against the head's inspection sheet (`hama6_wavelength_coefficients.json`), a known line, that Live View runs at about 35 frames per second at 10 ms and follows a change to 100 ms, and that Stop returns within one frame.
 
 ### Known limitations left in v3.4
 

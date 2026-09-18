@@ -102,60 +102,88 @@ framed serial replies instead of fixed waits. They are saved with Settings.
 
 The C13016 drives the fingertip micro-spectrometer heads (C12880MA, C16767MA;
 288 pixels, 16-bit A/D, integration 11 µs to 1 s). Hamamatsu's PC software for
-it is `u-ApsSpecEvaluation.exe` with **`MICRO_USB2_CLR.dll`**, a .NET assembly
-(source: Hamamatsu technical note KACC9003E, table 2-9). SciLab loads that
-assembly through pythonnet.
+it is `u-ApsSpecEvaluation.exe` with **`MICRO_USB2_CLR.dll`**, a .NET assembly;
+SciLab loads that assembly through pythonnet. Hamamatsu's "Minispectrometer
+H-micro edition" download (`Minispectrometer_H-micro edition_ver1.1.0.0`) also
+holds the WinUSB driver (`winusb2.0MICRO.inf`, `VID_0661&PID_2936`, shown as
+"C13016 USB2(HPK)" in Device Manager), the DLL function specification
+`K29-B61584B C13016_DotNet_DLLFunctionSpecifications.pdf` and console samples
+in VB.NET and C++/CLI under `DeveloperTools/`; the driver follows those samples.
 
 1. Install Hamamatsu's evaluation software for the C13016 (it installs the USB
-   driver; keep that driver, do not use Zadig here) and confirm
-   `u-ApsSpecEvaluation.exe` sees the board.
-2. Copy `MICRO_USB2_CLR.dll` from that installation into `spectrometers dll files/`
-   (or point the Setup tab's DLL path at it) and run `pip install pythonnet`.
+   driver; keep that driver, do not use Zadig here), confirm
+   `u-ApsSpecEvaluation.exe` sees the board, then close it.
+2. `pip install pythonnet`. The DLL is looked for in `spectrometers dll files/`
+   and, failing that, in the installer's folder
+   `C:\Program Files\HamamatsuMinispectrometer for C13016\EvaluationSoftware\`;
+   copy it next to the other DLLs or point the Setup tab's DLL path at it.
 3. Setup → type **Hama6** → Connect.
 
 The head on the bench is a **C16767MA-20** (UV, 190 to 440 nm, 288 pixels).
-The board reports the head's serial and sensor, not its model. The wavelength
-axis comes from the six coefficients the board reports; if it reports none,
-put Hamamatsu's final-inspection-sheet polynomial into
-`hama6_wavelength_coefficients.json` next to the DLL, keyed by the head serial
-(an entry may also name the model, which then appears in the device name):
+The board reports the head's serial and sensor, not its model, and it keeps
+the wavelength polynomial of the head it was calibrated with: the stored
+polynomial spans about 320 to 888 nm, the range of a C12880MA, not of a 190 to
+440 nm head. Check the head's label and inspection sheet and put that sheet's
+polynomial into `hama6_wavelength_coefficients.json` next to the DLL, keyed by
+the head serial; a matching entry overrides the board's polynomial (an entry
+may also name the model, which then appears in the device name):
 
 ```json
 {"26C00021": {"model": "C16767MA-20", "coefficients": [A0, B1, B2, B3, B4, B5]}}
 ```
 
-SciLab drives the assembly's own workflow (`MICRO_USB2_initialize`, module
-connection list, `open`, module properties, `setExposureTime` in seconds,
-one continuous `captureStart` / `getImageData` capture) through .NET
-reflection, so its `ref` parameters and `Int64` handles work from Python. The
-exposure API works in microseconds (the driver reads the unit from the device's
-exposure limits), status code 0 means success, and the driver checks each step
-by its effect and prints all codes in the connect log line and in any error.
-The board keeps its capture mode across sessions; when its own mode delivers
-no frame (mode 0 did not on 2026-09-18) the driver switches to mode 2, the
-continuous mode, and puts the board's mode back at disconnect.
-Frames arrive once per exposure *cycle* stored in the board (up to 1.1 s); the
-cycle is key-protected in the DLL, so ask Hamamatsu for the `strCheck` value or
-set a short cycle in u-ApsSpecEvaluation before using SciLab. A failed
-Connect also writes the assembly's public API to
+How SciLab drives the board (verified against the hardware on 2026-09-18,
+C13016 serial 326VA021, firmware 1.08, with Hamamatsu's sample sequence):
+
+* `initialize`, `getModuleConnectionList`, `open`, then `captureStop` to
+  clear a capture a killed process may have left running, then identity,
+  limits and the wavelength polynomial. Calls go through .NET reflection with
+  every scalar boxed inside the CLR, so `ref` parameters and `Int64` handles
+  work from Python.
+* `setCaptureMode(0)` unless the board is already in mode 0, the documented
+  "specified number of measurement" mode: one frame per `captureStart`. The
+  mode persists in the board. Mode 2 waits for an external trigger (no frame
+  without one). Mode 1 exists only in the assembly's enum: it delivers one
+  frame and the next `setCaptureMode` blocks inside the DLL until the process
+  is killed, so SciLab never selects it (the board recovers by itself in a new
+  process).
+* `setExposureTime` in **microseconds** (limits 11 to 1,000,000; codes 31
+  underTime / 30 overTime outside). The DLL derives the exposure *cycle* (frame
+  period) itself as exposure + 2,000 µs. Earlier SciLab versions set the cycle
+  to exposure + 1,032 µs through the key-protected `setExposureCycle`; that
+  starved the board of frames in every mode and is gone.
+* Per frame: `captureStart`, poll `getCaptureStatus` until it answers 0 (1
+  while no frame waits, 4 on data loss, after which the capture is restarted),
+  `getImageData` (288 counts and a timestamp; the buffer is consumed and the
+  next call answers 6 notImage), `captureStop`. A frame is ready about one
+  cycle after the start; the round trip costs about 26 ms, mostly inside
+  `captureStart`, so 10 ms exposures run at about 35 frames per second and
+  100 ms exposures at about 7.5. A ready frame waits unread without loss.
+  Timestamps repeat between frames and are not used to tell frames apart.
+* Every DLL call runs on a worker thread with a 15 s watchdog, so a blocked
+  call ends in an error message ("restart SciLab and re-plug the C13016")
+  instead of a frozen window. A `captureStart` that throws did not start: the
+  driver stops, retries once, re-opens the module, retries once more and then
+  asks you to unplug and re-plug the board. Status codes are named in the log
+  after the specification's "Return Code" table.
+
+A failed Connect writes the assembly's public API to
 `spectrometers/micro_usb2_api_dump.txt`; send that file with the error text
 when reporting a problem. If Connect works but Live View reports "No frame
-within ...", run the read-out experiment script and send its output:
+within ...", run the diagnostic and send its output:
 
 ```powershell
 python tools/diagnose_c13016.py > c13016-diagnostics.txt
 ```
 
-It takes one to two minutes. It lists the assembly's API and internals (enums,
-P/Invoke imports and string literals, to decode the status codes and the
-`strCheck` key), tries the device's own identity strings as `strCheck` on the
-read-only getters, records how `getImageData` answers before any start and
-during a capture in the board's own mode, sweeps the candidate capture modes
-when that mode yields nothing (`--skip-modes` to skip), and then, in the
-working mode, records an exposure change, each buffer size, `captureStop` and
-a restart (frame period from the timestamps). A code-0 answer with an
-all-zero buffer is reported as an "echo", not a frame. The board's mode is
-restored at the end.
+It takes under a minute (`--skip-assembly` skips the assembly dump). It lists
+the assembly's API and internals, identity and settings, selects capture mode
+0, sweeps the exposure to show the cycle the DLL derives, takes 20 frames with
+the vendor loop and reports the time to ready and the pixel statistics, checks
+what the DLL answers once a frame is consumed, and with `--trigger` tries
+capture mode 2 for 3 s. `--free-run` reproduces the mode-1 hang (the script
+exits if `setCaptureMode` does not return; the board is fine for the next
+process).
 
 ## Files
 
@@ -165,7 +193,7 @@ restored at the end.
 | `tabs/` | Setup, Live View, Measurements, Check Resolution, Analysis, EEPROM |
 | `services/` | measurement orchestrator, analysis service, acquisition guard, check-spectrometer service |
 | `analysis/` | calculations, plotting, data models |
-| `spectrometers/` | vendor backends (`ava1`, `hama2`, `hama3`, `hama4`, `hama5`, `minispec`) and the simulator |
+| `spectrometers/` | vendor backends (`ava1`, `hama2`, `hama3`, `hama4`, `hama5`, `hama6`, `minispec`) and the simulator |
 | `hardware/`, `stage/` | laser / filter-wheel serial controllers, Modbus stage |
 | `results/` | created at runtime: `<serial>_<timestamp>/Measurements_*.csv` + `plots/` (not versioned) |
 | `spectro_gui_settings.json` | operator settings (ports, powers, advanced flags) |

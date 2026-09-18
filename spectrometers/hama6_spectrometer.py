@@ -2,83 +2,62 @@
 
 The C13016 is Hamamatsu's USB evaluation circuit for the fingertip micro-
 spectrometer heads (C12880MA, C16767MA); the C13985 is the same head with the
-circuit built in. The head on the bench is a **C16767MA-20** (UV, 190 to
-440 nm, 288 pixels); the board reports the head's serial (26C00021) and
-sensor (S11639) through ``getSpectroInformationForLabVIEW`` but not its model.
-Wavelengths come from the six coefficients the board reports or, when those
-are missing or implausible, from ``hama6_wavelength_coefficients.json`` next
-to the DLL (Hamamatsu's final inspection sheet, keyed by head serial; an
-entry may also name the head model). Hamamatsu's PC software for them is ``u-ApsSpecEvaluation.exe``
-with ``MICRO_USB2_CLR.dll`` (technical note KACC9003E, table 2-9), a .NET
-assembly that mirrors the C-style ``MICRO_USB2`` library one-to-one. It is
-loaded here through *pythonnet* (``import clr``).
+circuit built in. Hamamatsu's PC software is ``u-ApsSpecEvaluation.exe`` with
+``MICRO_USB2_CLR.dll``, a .NET assembly (class ``MICRO_USB2_CLR``, every method
+returning an ``Int64`` ``Cusb2Err`` status) loaded here through *pythonnet*.
+The "Minispectrometer H-micro edition" download ships the assembly, the WinUSB
+driver (``VID_0661&PID_2936``, "C13016 USB2(HPK)"), the function specification
+K29-B61584B and console samples in VB.NET and C++/CLI; this driver follows the
+samples' sequence and was verified against the hardware on 2026-09-18
+(C13016 serial 326VA021, firmware 1.08, head 26C00021 / S11639):
 
-Public API of the assembly as reflected on the bench (2026-09-17), class
-``MICRO_USB2_CLR``; every method returns an ``Int64`` status code::
+1. ``initialize``; ``getModuleConnectionList(Int16[] list, ref UInt16 number)``
+   (``number`` is an output: the sample passes 0); ``open(id)``.
+2. ``setCaptureMode(id, 0)``: mode 0 is the documented "specified number of
+   measurement" mode, one frame per ``captureStart``. Mode 2 waits for an
+   external trigger (no frame without one, ``getImageData`` echoes an all-zero
+   buffer with code 0). Mode 1 exists only in the assembly's enum: it delivers
+   one frame and the next ``setCaptureMode`` then blocks inside the DLL until
+   the process is killed (the board itself recovers), so it is never selected.
+3. ``setExposureTime(id, us)``: **microseconds** (parameter named ``sec``),
+   11 .. 1,000,000 per ``getExposurePropertyForLabVIEW``; 31 underTime / 30
+   overTime outside. The DLL sets the exposure *cycle* (frame period) itself to
+   exposure + 2,000 us. Setting the cycle through the key-protected
+   ``setExposureCycle`` (as earlier versions did, exposure + 1,032 us) starved
+   the board of frames in every mode: it is not touched any more.
+4. Per frame: ``captureStart``; poll ``getCaptureStatus`` until it answers 0
+   ("captured frames exist"; 1 while none, 4 on data loss); ``getImageData``
+   (code 0 with the 288 counts and a timestamp; the buffer is consumed and the
+   next call answers 6 notImage); ``captureStop``. A frame is ready about one
+   cycle after the start and a start/read/stop round trip costs about 26 ms,
+   dominated by ``captureStart`` (about 13 ms). A ready frame waits unread
+   without loss. Timestamps repeat between frames, so they never identify a
+   new frame: consumption does.
+5. ``close``; ``uninitialize``.
 
-    MICRO_USB2_initialize() / MICRO_USB2_uninitialize()
-    MICRO_USB2_getModuleConnectionList(Int16[] list, ref UInt16 number)
-    MICRO_USB2_open(Int64 id) / MICRO_USB2_close(Int64 id)
-    MICRO_USB2_getModuleInformationForLabVIEW(Int64 id, ref String vender, ref String product,
-                                              ref String serial, ref String firmware, ref String driver, ref String library)
-    MICRO_USB2_getModulePropertyForLabVIEW(Int64 id, ref Int64 pixel, ref Int64 resolution, ref Int64 capturemode)
-    MICRO_USB2_getExposurePropertyForLabVIEW(Int64 id, ref Double lowertime, ref Double uppertime, ref Double timestep,
-                                             ref Double lowercycle, ref Double uppercycle, ref Double cyclestep)
-    MICRO_USB2_setExposureTime(Int64 id, Double sec) / MICRO_USB2_getExposureTime(Int64 id, ref Double sec)
-    MICRO_USB2_getCalibrationCoefficient(Int64 id, Int64 index, Double[] coefficient)
-    MICRO_USB2_captureStart(Int64 id) / MICRO_USB2_captureStop(Int64 id) / MICRO_USB2_getCaptureStatus(Int64 id)
-    MICRO_USB2_getImageData(Int64 id, ref UInt16[] imageData, ref UInt64[] time)
+Every DLL call runs on one worker thread with a watchdog
+(``DLL_CALL_TIMEOUT_S``): a call that does not return is reported as an error
+instead of freezing the application, since the DLL can deadlock (mode 1
+above; a second ``captureStart`` while a capture ran on the bench). Calls go
+through .NET reflection (``MethodInfo.Invoke``) with every scalar boxed inside
+the CLR: pythonnet 3 turns a Python ``int`` stored into an ``object[]`` into a
+``Python.Runtime.PyInt`` wrapper that Invoke cannot convert to ``Int64``, and
+its own overload resolution rejects ``ref`` parameters outright.
 
-Established on the bench with a C13016 (serial 326VA021, firmware 1.08):
-
-* every method returned ``0`` while working, so ``0`` is treated as success;
-* the exposure API works in **microseconds** although the parameter is named
-  ``sec`` -- ``getExposurePropertyForLabVIEW`` reported 11 .. 1,000,000, step 1,
-  and cycle limits 1,043 .. 1,100,000; the unit is re-derived on every connect;
-* identity strings are NUL-padded fixed-width buffers;
-* the module id from ``getModuleConnectionList`` was ``0``; the module property
-  ``capturemode`` read 32 (a capability mask), ``getCaptureMode`` 0 or 2 (it
-  persists in the board); key-protected methods (``strCheck``) answer 12 to an
-  empty key, so the exposure *cycle* (frame period) can be neither read nor set;
-* ``getImageData`` answers 6 while no new frame exists and 0 with a frame (the
-  same frame is served once more before 6 resumes); the first frame after
-  ``captureStart`` took about a second to appear, i.e. the stored exposure
-  cycle governs the latency;
-* in capture mode 0 exactly one frame followed a ``captureStart`` (single shot)
-  and a second start was accepted; in mode 2 a second ``captureStart`` while
-  the capture still ran threw a ``SynchronizationLockException`` inside the
-  DLL (continuous capture);
-* ``getCaptureStatus`` read 1 before any start, after starts and after stops:
-  it carries no usable information;
-* 2026-09-18 (``tools/diagnose_c13016.py``, board in mode 0): no frame at all
-  in 18 s of polling at 10 and 50 ms; right after each ``captureStart`` one
-  poll answered 0 with 288 zeros and timestamp 0 (the DLL echoing its empty
-  buffer), then 6 until the stop. The "single shot" frames of the day before
-  were therefore most likely the same echo of a buffer that still held a real
-  frame: mode 0 does not expose on its own, and mode 2 is the only mode that
-  has delivered frames. ``getImageSize`` is key-protected too (12).
-
-The driver therefore calls ``captureStart`` before every frame until a start
-throws; from then on the capture is known to be continuous and is left
-running. New frames are recognised by a fresh timestamp or changed pixel
-data (an all-zero buffer is never a frame), the frame already exposing when
-the integration time changes is discarded, and the probe at connect demands
-two consecutive new frames so a stale buffer cannot pass. The probe runs in
-the board's own capture mode first; when that yields nothing the driver
-switches to mode 2 (``FALLBACK_CAPTURE_MODES``), probes again and restores
-the board's original mode at disconnect.
-
-Calls go through .NET reflection (``MethodInfo.Invoke``) with every scalar boxed
-inside the CLR: pythonnet 3 turns a Python ``int`` stored into an ``object[]``
-into a ``Python.Runtime.PyInt`` wrapper that Invoke cannot convert to ``Int64``,
-and its own overload resolution rejects ``ref`` parameters outright.
+Wavelengths come from ``getCalibrationCoefficient`` (index 0: A0, B1..B5 with
+p = 1..288) or, when an operator file ``hama6_wavelength_coefficients.json``
+next to the DLL has an entry for the head serial, from that file (the board
+on the bench keeps a 320 .. 888 nm polynomial while its head is a UV
+C16767MA-20; the file wins).
 """
 from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import time
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -92,26 +71,61 @@ LOGGER = logging.getLogger(__name__)
 DLL_NAME = "MICRO_USB2_CLR.dll"
 CLASS_NAME = "MICRO_USB2_CLR"
 API_DUMP_FILE = Path(__file__).resolve().parent / "micro_usb2_api_dump.txt"  # written when Connect fails
+# Where Hamamatsu's installer puts the assembly; the loader falls back to it when the DLL is not next to the others.
+VENDOR_INSTALL_DLL = Path(r"C:\Program Files\HamamatsuMinispectrometer for C13016\EvaluationSoftware") / DLL_NAME
 
 DEFAULT_PIXEL_COUNT = 288
 DEFAULT_BITS = 16
-MIN_IT_MS = 0.011        # 11 us (C12880MA datasheet)
-MAX_IT_MS = 1000.0       # 1 s
-OK_CODE = 0              # status code every method returned while working on the bench
-EXPOSURE_UNIT_FACTORS_TO_MS = {"us": 1e-3, "s": 1e3}
-COEFFICIENT_COUNT = 6    # wavelength = a0 + a1*p + ... + a5*p^5, p = 1..npix
-# Operator-supplied wavelength polynomial for boards that report none, next to the DLL:
+MIN_IT_MS = 0.011        # 11 us (C12880MA datasheet; getExposurePropertyForLabVIEW lower limit)
+MAX_IT_MS = 1000.0       # 1 s (upper limit)
+DEFAULT_IT_MS = 10.0
+US_PER_MS = 1000.0       # the exposure API works in microseconds (function specification K29-B61584B)
+OK_CODE = 0
+COEFFICIENT_COUNT = 6    # wavelength = A0 + B1*p + ... + B5*p^5, p = 1..npix
+# Operator-supplied wavelength polynomial, next to the DLL:
 # {"<head serial>": [A0, B1, B2, B3, B4, B5]} or {"<head serial>": {"model": "C16767MA-20", "coefficients": [...]}},
 # keyed by the head serial (getSpectroInformationForLabVIEW), the module serial or "default".
 COEFFICIENTS_FILE_NAME = "hama6_wavelength_coefficients.json"
-MAX_MODULES = 32         # capacity of the connection-list buffer
-TIMESTAMP_SLOTS = 8      # UInt64[] buffer handed to getImageData
-POLL_MIN_S = 0.002
-POLL_MAX_S = 0.05
-FRAME_TIMEOUT_MIN_S = 2.5          # a frame may take a whole exposure cycle (up to 1.1 s) to appear
-DEFAULT_FRAME_PERIOD_S = 1.5       # assumed cycle when the board does not report cycle limits
-CONTINUOUS_CAPTURE_MODE = 2        # the only capture mode that has delivered frames on the bench
-FALLBACK_CAPTURE_MODES = (CONTINUOUS_CAPTURE_MODE,)   # tried in order when the board's own mode yields no frame
+MAX_MODULES = 8          # "maximum 8 units can be connected to 1 PC" (K29-B61584B); the samples allocate 8 slots
+TIMESTAMP_SLOTS = 1      # UInt64[] handed to getImageData; the DLL writes slot 0 (the samples allocate one)
+POLL_MIN_S = 0.001
+POLL_MAX_S = 0.02
+FRAME_TIMEOUT_MIN_S = 2.0
+FRAME_OVERHEAD_S = 0.03            # start/status/read/stop round trip beyond the exposure cycle (about 26 ms measured)
+DLL_CALL_TIMEOUT_S = 15.0          # a DLL call that has not returned by then is reported instead of freezing Connect
+FRAME_RETRIES = 3                  # captures restarted after a data-loss status or an unusable frame
+
+# Usb2Struct.Usb2CaptureMode. The function specification documents 0 and 2 only; 1 hangs the DLL (see module docstring).
+CAPTURE_MODE_SINGLE_SHOT = 0
+CAPTURE_MODE_FREE_RUN = 1
+CAPTURE_MODE_TRIGGER = 2
+CAPTURE_MODE_NAMES = {0: "single shot", 1: "free run (undocumented)", 2: "external trigger", 3: "edge"}
+
+# Every key-protected method of the assembly compares its `strCheck` argument with this literal (from the IL of
+# MICRO_USB2_getExposureCycle and friends). The driver only *reads* with it (exposure cycle, wavelength range).
+CHECK_KEY = "ichino"
+
+# Usb2Struct.Cusb2Err: the Int64 status every method returns (K29-B61584B, "Return Code").
+ERROR_NAMES = {
+    0: "success", 1: "unsuccess", 2: "notList", 3: "notAccess", 4: "notFrame", 5: "notAcPower", 6: "notImage",
+    7: "notBuffer", 8: "notData", 9: "notDownload", 10: "invalidDeviceIndex", 11: "invalidMode", 12: "invalidParameter",
+    13: "invalidTriggermode", 14: "invalidTriggerpolarity", 15: "invalidTriggeroutput", 16: "invalidBinning",
+    17: "invalidPosition", 18: "invalidSize", 19: "invalidGain", 20: "invalidOffset", 21: "invalidCoolingstatus",
+    22: "invalidFrame", 23: "invalidEventID", 24: "invalidEventhandle", 25: "invalidData", 26: "invalidIndex",
+    27: "invalidNumber", 28: "invalidAddress", 29: "invalidLength", 30: "overTime", 31: "underTime",
+    32: "overTemperature", 33: "underTemperature", 34: "overArea", 35: "nowCapturing", 36: "nowFirmUpdate",
+    37: "initialized", 38: "opened", 39: "existDevice", 40: "FirmCorrupted", 41: "ReadImageStatus",
+    42: "InvalidEepromParameter",
+}
+ERR_UNSUCCESS = 1          # getCaptureStatus: no captured frame yet
+ERR_NOT_FRAME = 4          # getCaptureStatus: data loss; stop and restart the capture
+ERR_NOT_IMAGE = 6          # getImageData: the buffer holds no (new) frame
+ERR_INVALID_MODE = 11
+ERR_INVALID_PARAMETER = 12
+ERR_INVALID_DATA = 25      # getImageData: frame retrieved but flagged invalid by the header
+ERR_OVER_TIME = 30
+ERR_UNDER_TIME = 31
+ERR_NOW_CAPTURING = 35
 
 # Method names exactly as exported by MICRO_USB2_CLR.
 M_INIT = "MICRO_USB2_initialize"
@@ -130,17 +144,33 @@ M_CAPTURE_STOP = "MICRO_USB2_captureStop"
 M_CAPTURE_STATUS = "MICRO_USB2_getCaptureStatus"
 M_GET_CAPTURE_MODE = "MICRO_USB2_getCaptureMode"
 M_SET_CAPTURE_MODE = "MICRO_USB2_setCaptureMode"
-M_GET_CYCLE = "MICRO_USB2_getExposureCycle"
-M_SET_CYCLE = "MICRO_USB2_setExposureCycle"
+M_GET_CYCLE = "MICRO_USB2_getExposureCycle"                          # (Int64 id, ref Double sec, String strCheck)
 M_IMAGE = "MICRO_USB2_getImageData"
 M_TRIGGER_OUTPUT = "MICRO_USB2_getTriggerOutput"
 M_TRIGGER_POLARITY = "MICRO_USB2_getTriggerPolarity"
-M_SPECTRO_INFO = "MICRO_USB2_getSpectroInformationForLabVIEW"   # (Int64 id, ref String serial, ref String sensor): the head
-REQUIRED_METHODS = (M_INIT, M_LIST, M_OPEN, M_CLOSE, M_SET_EXPOSURE, M_CAPTURE_START, M_IMAGE)
+M_SPECTRO_INFO = "MICRO_USB2_getSpectroInformationForLabVIEW"        # (Int64 id, ref String serial, ref String sensor): the head
+M_WAVELENGTH_PROPERTY = "MICRO_USB2_getWaveLengthPropertyForLabVIEW"  # (Int64 id, ref Int64 lower, ref Int64 upper, String strCheck)
+REQUIRED_METHODS = (M_INIT, M_LIST, M_OPEN, M_CLOSE, M_SET_EXPOSURE, M_CAPTURE_START, M_CAPTURE_STATUS, M_IMAGE, M_CAPTURE_STOP)
+
+
+def code_text(code) -> str:
+    """'6 (notImage)' for a Cusb2Err status code."""
+    try:
+        return f"{int(code)} ({ERROR_NAMES.get(int(code), 'unknown')})"
+    except (TypeError, ValueError):
+        return str(code)
+
+
+def mode_text(mode) -> str:
+    """'0 (single shot)' for a Usb2CaptureMode value."""
+    try:
+        return f"{int(mode)} ({CAPTURE_MODE_NAMES.get(int(mode), 'unknown')})"
+    except (TypeError, ValueError):
+        return str(mode)
 
 
 def wavelengths_from_coefficients(coefficients: Sequence[float], npix: int) -> np.ndarray:
-    """a0 + a1*p + ... + a5*p^5 with p = 1..npix (Hamamatsu's pixel numbering)."""
+    """A0 + B1*p + ... + B5*p^5 with p = 1..npix (Hamamatsu's pixel numbering)."""
     pixels = np.arange(1, int(npix) + 1, dtype=float)
     result = np.zeros_like(pixels)
     for power, coefficient in enumerate(coefficients):
@@ -149,7 +179,7 @@ def wavelengths_from_coefficients(coefficients: Sequence[float], npix: int) -> n
 
 
 def plausible_coefficients(coefficients: Sequence[float]) -> bool:
-    """Loose sanity check for a C12880MA/C16767MA wavelength polynomial (a0 in nm, a1 in nm/pixel)."""
+    """Loose sanity check for a C12880MA/C16767MA wavelength polynomial (A0 in nm, B1 in nm/pixel)."""
     if len(coefficients) < 2:
         return False
     a0, a1 = float(coefficients[0]), float(coefficients[1])
@@ -451,11 +481,11 @@ def load_clr_assembly(dll_path: str):
         ) from exc
     path = Path(dll_path)
     if not path.is_file():
-        raise RuntimeError(f"{DLL_NAME} not found at '{dll_path}'. Copy it from Hamamatsu's u-ApsSpecEvaluation folder.")
+        raise RuntimeError(f"{DLL_NAME} not found at '{dll_path}'. Copy it from Hamamatsu's u-ApsSpecEvaluation folder "
+                           f"({VENDOR_INSTALL_DLL.parent}).")
     clr.AddReference(str(path.with_suffix("")))
     import System  # noqa: E402  (available once the CLR is loaded)
     from System.Reflection import Assembly  # noqa: E402
-
     assembly = Assembly.LoadFrom(str(path))
     public_types = [t for t in assembly.GetTypes() if t.IsPublic and t.IsClass]
     if not public_types:
@@ -480,20 +510,61 @@ class _Library:
         self.lock = threading.Lock()
         self.users = 0
 
-    def acquire(self, api: MicroUsb2Api, record: Callable[[str, Any], None]) -> None:
+    def acquire(self, invoke: Callable[[str], Any]) -> None:
         with self.lock:
             if self.users == 0:
-                record(M_INIT, api.call(M_INIT).result)
+                invoke(M_INIT)
             self.users += 1
 
-    def release(self, api: MicroUsb2Api, record: Callable[[str, Any], None]) -> None:
+    def release(self, invoke: Callable[[str], Any]) -> None:
         with self.lock:
             self.users = max(0, self.users - 1)
-            if self.users == 0 and api.has(M_UNINIT):
+            if self.users == 0:
                 try:
-                    record(M_UNINIT, api.call(M_UNINIT).result)
+                    invoke(M_UNINIT)
                 except Exception as exc:
                     LOGGER.debug("%s failed: %s", M_UNINIT, exc)
+
+
+class _CallThread:
+    """One thread per backend runs every DLL call, so a call that never returns is reported instead of freezing the app.
+
+    The DLL can deadlock: ``setCaptureMode`` after a mode-1 capture never
+    returned (2026-09-18, this PC), nor did a second ``captureStart`` while a
+    capture ran (bench).
+    """
+
+    def __init__(self, name: str) -> None:
+        self._queue: "queue.Queue" = queue.Queue()
+        self.blocked_on: Optional[str] = None
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            fn, args, future = item
+            try:
+                future.set_result(fn(*args))
+            except BaseException as exc:  # forwarded to the caller
+                future.set_exception(exc)
+
+    def run(self, fn: Callable, label: str, timeout: float, *args):
+        if self.blocked_on:
+            raise RuntimeError(f"{DLL_NAME} is blocked inside {self.blocked_on}; restart SciLab and re-plug the C13016")
+        future: Future = Future()
+        self._queue.put((fn, args, future))
+        try:
+            return future.result(timeout)
+        except FutureTimeoutError:
+            self.blocked_on = label
+            raise RuntimeError(f"{label} did not return within {timeout:g} s: {DLL_NAME} is blocked; "
+                               "restart SciLab and re-plug the C13016") from None
+
+    def close(self) -> None:
+        self._queue.put(None)
 
 
 LIBRARY = _Library()
@@ -536,20 +607,21 @@ class Hama6_Spectrometer:
         self.min_it_ms = MIN_IT_MS
         self.max_it_ms = MAX_IT_MS
         self.it_step_ms: Optional[float] = None
-        self.exposure_unit = "us"                          # re-derived from getExposurePropertyForLabVIEW
-        self.cycle_limits_s: Dict[str, float] = {}         # exposure-cycle (frame period) limits, seconds
-        self.frame_period_s: Optional[float] = None        # measured between consecutive frames
+        self.exposure_limits_us: Dict[str, float] = {}     # lower/upper/step and cycle lower/upper/step, microseconds
+        self.exposure_cycle_us: Optional[float] = None     # frame period the DLL derived from the exposure (read back)
+        self.exposure_cycle_s: Optional[float] = None
+        self.frame_period_s: Optional[float] = None        # measured start-to-start period between consecutive frames
         self.calibration_coefficients: List[float] = []
         self.wavelengths_nm = np.array([], dtype=float)
         self.device_index = 0
         self.module_id: Optional[int] = None
         self.module_ids: List[int] = []
         self.module_info: Dict[str, str] = {}
-        self.capture_mode: Optional[int] = None            # active mode from getCaptureMode
-        self.original_capture_mode: Optional[int] = None   # the board's own mode when the driver had to change it
-        self.capture_modes_supported: Optional[int] = None # `capturemode` field of the module property
-        self.exposure_cycle: Any = None                    # raw getExposureCycle value (key-protected: unreliable)
-        self.frame_timeout_s: Optional[float] = None       # None: derived from integration time and cycle
+        self.capture_mode: Optional[int] = None            # active mode (single shot once connected)
+        self.board_capture_mode: Optional[int] = None      # the mode the board was found in at connect
+        self.capture_mode_mask: Optional[int] = None       # `capturemode` field of the module property (32 on the bench)
+        self.wavelength_range_nm: Optional[Tuple[int, int]] = None   # getWaveLengthPropertyForLabVIEW (key-protected read)
+        self.frame_timeout_s: Optional[float] = None       # None: derived from the integration time
         self.diagnostics: Dict[str, Any] = {}              # method -> last status code / probed value
 
         self._api = api
@@ -557,12 +629,8 @@ class Hama6_Spectrometer:
         self._connected = False
         self._library_held = False
         self._opened = False
+        self._calls: Optional[_CallThread] = None          # one worker thread runs every DLL call (watchdog)
         self._capturing = False
-        self._continuous: Optional[bool] = None            # learned: True = start throws while running, False = one frame per start
-        self._status_idle: Any = None                      # getCaptureStatus before the first captureStart
-        self._frames_to_discard = 0                        # frames already exposing when the IT changed
-        self._last_stamp: Optional[int] = None
-        self._last_counts: Optional[np.ndarray] = None
         self._last_frame_at: Optional[float] = None
         self._io_lock = threading.RLock()
         self._done = threading.Event()
@@ -597,11 +665,19 @@ class Hama6_Spectrometer:
         self.diagnostics[method] = value
 
     def _rc(self, method: str, *args) -> CallResult:
-        """Call a method under the I/O lock and remember its status code."""
+        """Call a method on the DLL worker thread (watchdog) under the I/O lock and remember its status code."""
         with self._io_lock:
-            call = self._api.call(method, *args)
+            if self._calls is None:
+                self._calls = _CallThread(f"hama6-dll-{self.alias}")
+            call = self._calls.run(self._api.call, method.replace("MICRO_USB2_", ""), DLL_CALL_TIMEOUT_S, method, *args)
         self._record(method, call.result)
         return call
+
+    def _invoke_library(self, method: str):
+        """initialize / uninitialize through the same worker thread (None when the assembly lacks the method)."""
+        if not self._api.has(method):
+            return None
+        return self._rc(method).result
 
     def _check_methods(self, required: Sequence[str]) -> None:
         missing = [m for m in required if not self._api.has(m)]
@@ -611,27 +687,29 @@ class Hama6_Spectrometer:
     # -- discovery -------------------------------------------------------------------
 
     def _connection_list(self) -> List[int]:
-        """Module ids reported by getModuleConnectionList (capacity passed in `number`)."""
-        call = self._rc(M_LIST, Buf(MAX_MODULES), MAX_MODULES)
+        """Module ids reported by getModuleConnectionList (`number` is an output; the samples pass 0)."""
+        call = self._rc(M_LIST, Buf(MAX_MODULES), 0)
+        if call.result != OK_CODE:
+            raise RuntimeError(f"getModuleConnectionList answered {code_text(call.result)}")
         modules = call.slots[0]
         try:
             number = int(call.slots[1] or 0)
         except (TypeError, ValueError):
             number = 0
         number = max(0, min(number, MAX_MODULES, len(modules) if modules is not None else 0))
-        ids = [int(modules[i]) for i in range(number)]
+        ids = [int(modules[i]) for i in range(number) if int(modules[i]) >= 0]   # -1 marks an undetected slot
         self._record("module_ids", ids)
         return ids
 
     def get_number_of_devices(self):
         try:
-            api = self._ensure_api()
+            self._ensure_api()
             self._check_methods((M_INIT, M_LIST))
-            LIBRARY.acquire(api, self._record)
+            LIBRARY.acquire(self._invoke_library)
             try:
                 return "OK", len(self._connection_list())
             finally:
-                LIBRARY.release(api, self._record)
+                LIBRARY.release(self._invoke_library)
         except Exception as exc:
             return str(exc), 0
 
@@ -646,7 +724,7 @@ class Hama6_Spectrometer:
         if self.module_info.get("serial"):
             self.sn = self.module_info["serial"]
         if self._api.has(M_SPECTRO_INFO):
-            try:  # the attached head: its serial and sensor (the bench head 26C00021 / S11639 is a C16767MA-20)
+            try:  # the attached head: its serial ("unit") and sensor
                 head = self._rc(M_SPECTRO_INFO, self.module_id, OUT, OUT)
                 self.module_info["head_serial"] = _text(head.slots[1])
                 self.module_info["sensor"] = _text(head.slots[2])
@@ -668,39 +746,14 @@ class Hama6_Spectrometer:
             return 0, 0, None
         call = self._rc(M_PROPERTY, self.module_id, OUT, OUT, OUT)
         try:
-            pixel, resolution, mode = (int(v or 0) for v in call.slots[1:4])
+            pixel, resolution, mask = (int(v or 0) for v in call.slots[1:4])
         except (TypeError, ValueError):
-            pixel, resolution, mode = 0, 0, None
-        self._record("module_property", {"pixel": pixel, "resolution": resolution, "capturemode": mode})
-        return pixel, resolution, mode
-
-    def _read_capture_state(self) -> None:
-        """Active capture mode, exposure cycle and trigger settings, for the log and error messages."""
-        if self._api.has(M_GET_CAPTURE_MODE):
-            try:
-                mode = self._rc(M_GET_CAPTURE_MODE, self.module_id, OUT).slots[1]
-                self.capture_mode = int(mode) if mode is not None else None
-            except Exception as exc:
-                self.logger.debug("%s failed: %s", M_GET_CAPTURE_MODE, exc)
-        if self._api.has(M_GET_CYCLE):
-            try:  # (Int64 id, ref Double sec, String strCheck): the key is unknown; the call answers 12 with ""
-                self.exposure_cycle = self._rc(M_GET_CYCLE, self.module_id, OUT, "").slots[1]
-            except Exception as exc:
-                self.logger.debug("%s failed: %s", M_GET_CYCLE, exc)
-        trigger = {}
-        for key, method in (("output", M_TRIGGER_OUTPUT), ("polarity", M_TRIGGER_POLARITY)):
-            if self._api.has(method):
-                try:
-                    trigger[key] = self._rc(method, self.module_id, OUT).slots[1]
-                except Exception as exc:
-                    self.logger.debug("%s failed: %s", method, exc)
-        if self._api.has(M_CAPTURE_STATUS):
-            self._status_idle = self._rc(M_CAPTURE_STATUS, self.module_id).result
-        self._record("capture_state", {"mode": self.capture_mode, "supported": self.capture_modes_supported,
-                                       "exposure_cycle": self.exposure_cycle, "trigger": trigger,
-                                       "status_before_start": self._status_idle})
+            pixel, resolution, mask = 0, 0, None
+        self._record("module_property", {"pixel": pixel, "resolution": resolution, "capturemode": mask})
+        return pixel, resolution, mask
 
     def _read_exposure_property(self) -> None:
+        """Exposure and cycle limits in microseconds (K29-B61584B: "Unit is usec")."""
         if not self._api.has(M_EXPOSURE_PROPERTY):
             return
         call = self._rc(M_EXPOSURE_PROPERTY, self.module_id, OUT, OUT, OUT, OUT, OUT, OUT)
@@ -708,57 +761,104 @@ class Hama6_Spectrometer:
             lower, upper, step, cycle_lower, cycle_upper, cycle_step = (float(v or 0.0) for v in call.slots[1:7])
         except (TypeError, ValueError):
             return
-        record = {"lower": lower, "upper": upper, "step": step,
-                  "cycle": {"lower": cycle_lower, "upper": cycle_upper, "step": cycle_step}}
-        if not (0.0 < lower < upper):
-            self._record("exposure_property", {**record, "unit": "ignored"})
+        self.exposure_limits_us = {"lower": lower, "upper": upper, "step": step,
+                                   "cycle_lower": cycle_lower, "cycle_upper": cycle_upper, "cycle_step": cycle_step}
+        self._record("exposure_property", dict(self.exposure_limits_us))
+        if call.result != OK_CODE or not (0.0 < lower < upper):
             return
-        # A 1 s ceiling expressed in seconds is a small number; in microseconds it is 1e6.
-        self.exposure_unit = "s" if upper <= 100.0 else "us"
-        factor = EXPOSURE_UNIT_FACTORS_TO_MS[self.exposure_unit]
-        self._record("exposure_property", {**record, "unit": self.exposure_unit})
-        self.min_it_ms = lower * factor
-        self.max_it_ms = upper * factor
+        self.min_it_ms = lower / US_PER_MS
+        self.max_it_ms = upper / US_PER_MS
         if step > 0.0:
-            self.it_step_ms = step * factor
-        if 0.0 < cycle_lower <= cycle_upper:
-            self.cycle_limits_s = {"lower": cycle_lower * factor / 1000.0, "upper": cycle_upper * factor / 1000.0}
+            self.it_step_ms = step / US_PER_MS
 
-    def _to_device_exposure(self, it_ms: float) -> float:
-        return it_ms / EXPOSURE_UNIT_FACTORS_TO_MS[self.exposure_unit]
+    def _read_capture_mode(self) -> Optional[int]:
+        if not self._api.has(M_GET_CAPTURE_MODE):
+            return None
+        call = self._rc(M_GET_CAPTURE_MODE, self.module_id, OUT)
+        if call.result != OK_CODE or call.slots[1] is None:
+            return None
+        self.capture_mode = int(call.slots[1])
+        return self.capture_mode
 
-    def _from_device_exposure(self, value) -> float:
-        return float(value or 0.0) * EXPOSURE_UNIT_FACTORS_TO_MS[self.exposure_unit]
+    def _read_exposure_cycle(self) -> Optional[float]:
+        """The frame period the DLL keeps for the current exposure (key-protected read; informational)."""
+        if not self._api.has(M_GET_CYCLE):
+            return None
+        try:
+            call = self._rc(M_GET_CYCLE, self.module_id, OUT, CHECK_KEY)
+        except Exception as exc:
+            self.logger.debug("%s failed: %s", M_GET_CYCLE, exc)
+            return None
+        if call.result != OK_CODE or not call.slots[1]:
+            return None
+        self.exposure_cycle_us = float(call.slots[1])
+        self.exposure_cycle_s = self.exposure_cycle_us / (US_PER_MS * 1000.0)
+        return self.exposure_cycle_us
+
+    def _read_capture_state(self) -> None:
+        """Capture mode, exposure cycle, wavelength range and trigger settings, for the log and error messages."""
+        self._read_capture_mode()
+        self._read_exposure_cycle()
+        if self._api.has(M_WAVELENGTH_PROPERTY):
+            try:
+                span = self._rc(M_WAVELENGTH_PROPERTY, self.module_id, OUT, OUT, CHECK_KEY)
+                if span.result == OK_CODE and span.slots[1] is not None and span.slots[2] is not None:
+                    self.wavelength_range_nm = (int(span.slots[1]), int(span.slots[2]))
+            except Exception as exc:
+                self.logger.debug("%s failed: %s", M_WAVELENGTH_PROPERTY, exc)
+        trigger = {}
+        for key, method in (("output", M_TRIGGER_OUTPUT), ("polarity", M_TRIGGER_POLARITY)):
+            if self._api.has(method):
+                try:
+                    trigger[key] = self._rc(method, self.module_id, OUT).slots[1]
+                except Exception as exc:
+                    self.logger.debug("%s failed: %s", method, exc)
+        self._record("capture_state", {"mode": self.capture_mode, "mask": self.capture_mode_mask,
+                                       "exposure_cycle_us": self.exposure_cycle_us, "trigger": trigger,
+                                       "wavelength_range_nm": self.wavelength_range_nm})
+
+    def _select_single_shot_mode(self) -> None:
+        """Put the board in mode 0 (one frame per captureStart), as Hamamatsu's samples do before the first start.
+
+        The mode persists in the board. Changing it is safe while nothing is
+        being captured (this driver stops any leftover capture right after
+        open); after a mode-1 capture the same call deadlocks the DLL, which
+        the watchdog turns into an error naming the call.
+        """
+        self.board_capture_mode = self.capture_mode
+        if self.capture_mode == CAPTURE_MODE_SINGLE_SHOT:
+            return
+        if not self._api.has(M_SET_CAPTURE_MODE):
+            raise RuntimeError(f"the board is in capture mode {mode_text(self.capture_mode)} and the assembly cannot change it")
+        self.logger.info("Board found in capture mode %s; selecting %s", mode_text(self.capture_mode),
+                         mode_text(CAPTURE_MODE_SINGLE_SHOT))
+        code = self._rc(M_SET_CAPTURE_MODE, self.module_id, CAPTURE_MODE_SINGLE_SHOT).result
+        if code != OK_CODE:
+            raise RuntimeError(f"setCaptureMode({CAPTURE_MODE_SINGLE_SHOT}) answered {code_text(code)}")
+        mode = self._read_capture_mode()
+        if mode is not None and mode != CAPTURE_MODE_SINGLE_SHOT:
+            raise RuntimeError(f"the board kept capture mode {mode_text(mode)} after setCaptureMode({CAPTURE_MODE_SINGLE_SHOT})")
+        self.capture_mode = CAPTURE_MODE_SINGLE_SHOT
 
     def _read_calibration(self) -> None:
-        coefficients: List[float] = []
+        """Wavelength polynomial: the operator's file wins over the board, which keeps the polynomial of the head it was calibrated with."""
+        board: List[float] = []
         raw: Dict[str, Any] = {}
         if self._api.has(M_COEFFICIENT):
-            try:
+            try:  # index 0: wavelength coefficients A0, B1..B5 (index 1, sensitivity, is unused: NaN on the bench)
                 call = self._rc(M_COEFFICIENT, self.module_id, 0, Buf(COEFFICIENT_COUNT))
                 block = [float(v) for v in _to_float_array(call.slots[2])[:COEFFICIENT_COUNT]]
-                raw["index0"] = block
-                if plausible_coefficients(block):
-                    coefficients = block
-                else:  # maybe `index` selects the coefficient and the array holds one value
-                    singles = []
-                    for index in range(COEFFICIENT_COUNT):
-                        call = self._rc(M_COEFFICIENT, self.module_id, index, Buf(1))
-                        values = _to_float_array(call.slots[2])
-                        singles.append(float(values[0]) if values.size else float("nan"))
-                    raw["per_index"] = singles
-                    if plausible_coefficients(singles):
-                        coefficients = singles
+                raw["board"] = block
+                if call.result == OK_CODE and plausible_coefficients(block):
+                    board = block
             except Exception as exc:
                 self.logger.warning("Could not read wavelength coefficients: %s", exc)
-        if not coefficients:
-            from_file = self._coefficients_from_file()
-            if from_file:
-                if raw:
-                    self.logger.info("Wavelength coefficients from the module look implausible (%s); using %s",
-                                     raw, self._coefficients_file())
-                coefficients = from_file
-                raw["file"] = from_file
+        from_file = self._coefficients_from_file()
+        if from_file:
+            raw["file"] = from_file
+            if board and board != from_file:
+                self.logger.info("Board polynomial %s replaced by %s from %s", board, from_file, self._coefficients_file())
+        coefficients = from_file or board
         self._record("calibration", raw)
         self.calibration_coefficients = coefficients
         self.wavelengths_nm = (wavelengths_from_coefficients(coefficients, self.npix_active)
@@ -776,7 +876,7 @@ class Hama6_Spectrometer:
             return None
 
     def _coefficients_from_file(self) -> List[float]:
-        """Wavelength polynomial from the operator's file (Hamamatsu's final inspection sheet) when the board has none."""
+        """Wavelength polynomial from the operator's file (Hamamatsu's final inspection sheet)."""
         path = self._coefficients_file()
         if path is None or not path.is_file():
             return []
@@ -811,12 +911,12 @@ class Hama6_Spectrometer:
 
     def connect(self) -> str:
         try:
-            api = self._ensure_api()
+            self._ensure_api()
             self._check_methods(REQUIRED_METHODS)
             # The loader passes the discovered label ("C13016-<n>") as the serial.
             if self.sn.startswith("C13016-") and self.sn[7:].isdigit():
                 self.device_index = max(0, int(self.sn[7:]) - 1)
-            LIBRARY.acquire(api, self._record)
+            LIBRARY.acquire(self._invoke_library)
             self._library_held = True
             self.module_ids = self._connection_list()
             if not self.module_ids:
@@ -828,9 +928,10 @@ class Hama6_Spectrometer:
             open_code = self._rc(M_OPEN, self.module_id).result
             self._opened = True
             if open_code != OK_CODE:
-                raise RuntimeError(f"open(id={self.module_id}) returned {open_code}; is u-ApsSpecEvaluation still running?")
+                raise RuntimeError(f"open(id={self.module_id}) returned {code_text(open_code)}; is u-ApsSpecEvaluation still running?")
+            self._stop_capture(force=True)          # a capture left running by a previous session
             self._read_module_information()
-            pixel, resolution, mode = self._read_module_property()
+            pixel, resolution, mask = self._read_module_property()
             if pixel <= 0 and not self.module_info.get("serial"):
                 raise RuntimeError(f"open(id={self.module_id}) succeeded but the module reports no properties")
             if pixel > 0:
@@ -838,24 +939,28 @@ class Hama6_Spectrometer:
             if 8 <= resolution <= 32:
                 self.nbits = resolution
                 self.eff_saturation_limit = float(2 ** resolution - 1)
-            self.capture_modes_supported = mode
-            self._read_capture_state()
+            self.capture_mode_mask = mask
             self._read_exposure_property()
+            self._read_capture_state()
+            self._select_single_shot_mode()
             self._read_calibration()
             if not self.sn or self.sn.startswith("C13016-"):
                 self.sn = self.sn or f"C13016-{self.device_index + 1}"
-            res = self.set_it(self.it_ms if self.it_ms is not None else 10.0)
+            res = self.set_it(self.it_ms if self.it_ms is not None else DEFAULT_IT_MS)
             if res != "OK":
                 raise RuntimeError(res)
-            self._probe_frames_in_a_working_mode()
+            self._probe_frames()
             self._connected = True
             self.error = "OK"
-            self.logger.info("Connected Hama6 %s (id %s): %d pixels, %d bit, IT %.3f-%.1f ms (device unit %s), "
-                             "capture mode %s%s, frames every %s s, coefficients %s; codes %s",
-                             self.sn, self.module_id, self.npix_active, self.nbits, self.min_it_ms, self.max_it_ms,
-                             self.exposure_unit, self.capture_mode,
-                             f" (board was in mode {self.original_capture_mode})" if self.original_capture_mode is not None else "",
-                             f"{self.frame_period_s:.2f}" if self.frame_period_s else "?",
+            self.logger.info("Connected %s, module %s (id %s): %d pixels, %d bit, IT %.3f-%.1f ms, capture mode %s%s, "
+                             "exposure cycle %s us, frames every %s s, wavelength range %s nm, coefficients %s; codes %s",
+                             self.name, self.sn, self.module_id, self.npix_active, self.nbits, self.min_it_ms, self.max_it_ms,
+                             mode_text(self.capture_mode),
+                             f" (board was in {mode_text(self.board_capture_mode)})"
+                             if self.board_capture_mode not in (None, self.capture_mode) else "",
+                             self.exposure_cycle_us,
+                             f"{self.frame_period_s:.3f}" if self.frame_period_s else "?",
+                             self.wavelength_range_nm or "?",
                              self.calibration_coefficients or "not provided", self._codes_text())
             return "OK"
         except Exception as exc:
@@ -865,7 +970,7 @@ class Hama6_Spectrometer:
             return self.error
 
     def _probe_frames(self) -> None:
-        """Two consecutive new frames prove the capture runs (a single one may be a stale buffer)."""
+        """Two frames prove the capture loop works (the first could be a buffer left over from another session)."""
         self._last_frame_at = None
         first = self._acquire_frame()
         second = self._acquire_frame() if first is not None else None
@@ -880,69 +985,6 @@ class Hama6_Spectrometer:
         self.rcm = counts.copy()
         self.rcs = np.zeros_like(counts)
         self._record("frame_period_s", round(self.frame_period_s, 3) if self.frame_period_s else None)
-
-    def _probe_frames_in_a_working_mode(self) -> None:
-        """Probe the board's own capture mode first; when it yields no frame, try the continuous mode.
-
-        Bench, 2026-09-18: in mode 0 the board answered 6 to every poll for
-        18 s at 10 and 50 ms (only an echo of the empty buffer, code 0 with 288
-        zeros and timestamp 0, right after each captureStart); mode 2 is the
-        only mode that has delivered frames. The original mode is restored at
-        disconnect.
-        """
-        try:
-            self._probe_frames()
-            return
-        except RuntimeError as exc:
-            if self._abort.is_set() or not self._api.has(M_SET_CAPTURE_MODE):
-                raise
-            failures = [f"mode {self.capture_mode}: {exc}"]
-        for mode in FALLBACK_CAPTURE_MODES:
-            if mode == self.capture_mode:
-                continue
-            self.logger.info("No frame in the board's capture mode %s; trying capture mode %s", self.capture_mode, mode)
-            self._switch_capture_mode(mode)
-            try:
-                self._probe_frames()
-                self.logger.info("Capture mode %s delivers frames (the board's mode %s is restored at disconnect)",
-                                 self.capture_mode, self.original_capture_mode)
-                return
-            except RuntimeError as exc:
-                if self._abort.is_set():
-                    raise
-                failures.append(f"mode {self.capture_mode}: {exc}")
-        self._restore_capture_mode()
-        raise RuntimeError("no capture mode delivered a frame (" + "; ".join(failures) + ")")
-
-    def _switch_capture_mode(self, mode: int) -> None:
-        """captureStop, setCaptureMode, read the mode back and forget everything learned about the capture."""
-        self._stop_capture()
-        if self.original_capture_mode is None:
-            self.original_capture_mode = self.capture_mode
-        code = self._rc(M_SET_CAPTURE_MODE, self.module_id, int(mode)).result
-        if code != OK_CODE:
-            self.logger.warning("%s(%s) returned %s", M_SET_CAPTURE_MODE, mode, code)
-        readback = None
-        if self._api.has(M_GET_CAPTURE_MODE):
-            readback = self._rc(M_GET_CAPTURE_MODE, self.module_id, OUT).slots[1]
-        self.capture_mode = int(readback) if readback is not None else int(mode)
-        self._continuous = None
-        self._frames_to_discard = 0
-        self._last_stamp = None
-        self._last_counts = None
-        self._last_frame_at = None
-        self.frame_period_s = None
-
-    def _restore_capture_mode(self) -> None:
-        """Put the board back into the mode it had before the driver changed it (a no-op otherwise)."""
-        original, self.original_capture_mode = self.original_capture_mode, None
-        if original is None or original == self.capture_mode or self.module_id is None or not self._api.has(M_SET_CAPTURE_MODE):
-            return
-        self._stop_capture()
-        code = self._rc(M_SET_CAPTURE_MODE, self.module_id, int(original)).result
-        if code != OK_CODE:
-            self.logger.warning("%s(%s) returned %s while restoring the board's mode", M_SET_CAPTURE_MODE, original, code)
-        self.capture_mode = original
 
     def _codes_text(self) -> str:
         return ", ".join(f"{k.replace('MICRO_USB2_', '')}={v}" for k, v in self.diagnostics.items()) or "none"
@@ -964,12 +1006,15 @@ class Hama6_Spectrometer:
     def _teardown(self) -> None:
         if self._api is None:
             return
-        for step in (self._stop_capture, self._restore_capture_mode, self._close_module, self._release_library):
+        for step in (self._stop_capture, self._close_module, self._release_library):
             try:
                 step()
             except Exception as exc:
                 self.logger.debug("teardown step failed: %s", exc)
         self._connected = False
+        if self._calls is not None and not self._calls.blocked_on:
+            self._calls.close()
+            self._calls = None
 
     def _close_module(self) -> None:
         if self._opened and self.module_id is not None and self._api.has(M_CLOSE):
@@ -978,7 +1023,7 @@ class Hama6_Spectrometer:
 
     def _release_library(self) -> None:
         if self._library_held:
-            LIBRARY.release(self._api, self._record)
+            LIBRARY.release(self._invoke_library)
         self._library_held = False
 
     def disconnect(self, *args, **kwargs) -> str:
@@ -1001,90 +1046,98 @@ class Hama6_Spectrometer:
         if abs(clamped - requested) > 1e-9:
             self.logger.info("Integration time %.3f ms clamped to the device range -> %.3f ms", requested, clamped)
         try:
-            device_value = self._to_device_exposure(clamped)
-            code = self._rc(M_SET_EXPOSURE, self.module_id, device_value).result
-            if code != OK_CODE and self._capturing:
-                self.logger.info("setExposureTime returned %s while capturing; stopping the capture and retrying", code)
+            if self._capturing:          # settings change between captures; the next frame request starts afresh
                 self._stop_capture()
-                code = self._rc(M_SET_EXPOSURE, self.module_id, device_value).result
+            exposure_us = clamped * US_PER_MS
+            code = self._rc(M_SET_EXPOSURE, self.module_id, exposure_us).result
             if code != OK_CODE:
-                raise RuntimeError(f"setExposureTime({device_value:g} {self.exposure_unit}) returned {code}")
+                raise RuntimeError(f"setExposureTime({exposure_us:g} us) returned {code_text(code)}")
             actual = clamped
             if self._api.has(M_GET_EXPOSURE):
-                readback_ms = self._from_device_exposure(self._rc(M_GET_EXPOSURE, self.module_id, OUT).slots[1])
+                readback_ms = float(self._rc(M_GET_EXPOSURE, self.module_id, OUT).slots[1] or 0.0) / US_PER_MS
                 if readback_ms > 0.0:
                     tolerance = max(0.002, 0.01 * clamped, 2.0 * (self.it_step_ms or 0.0))
                     if abs(readback_ms - clamped) > tolerance:
                         raise RuntimeError(
                             f"device kept {readback_ms:.4f} ms after requesting {clamped:.4f} ms "
-                            f"(setExposureTime returned {code})")
+                            f"(setExposureTime returned {code_text(code)})")
                     actual = readback_ms
+            self._read_exposure_cycle()   # the DLL derives the frame period from the exposure (exposure + 2,000 us)
         except Exception as exc:
             self.error = f"Could not set integration time: {exc}"
             self.logger.error(self.error)
             return self.error
-        if self._capturing and self._continuous is not False and (self.it_ms is None or abs(actual - self.it_ms) > 1e-9):
-            self._frames_to_discard = 1      # a continuously exposing frame still uses the previous setting
         self.it_ms = actual
+        self.frame_period_s = None       # re-measured at the new exposure
         self.error = "OK"
         return "OK"
 
     # -- contract: acquisition -------------------------------------------------------
 
     def _frame_period_s(self) -> float:
-        candidates = [v for v in (self.frame_period_s, self.cycle_limits_s.get("upper")) if v and 0.0 < v <= 30.0]
-        return max(candidates) if candidates else DEFAULT_FRAME_PERIOD_S
+        """Measured start-to-start period, else the exposure cycle plus the call overhead."""
+        if self.frame_period_s and 0.0 < self.frame_period_s <= 30.0:
+            return self.frame_period_s
+        if self.exposure_cycle_s and self.exposure_cycle_s > 0.0:
+            cycle = self.exposure_cycle_s
+        else:
+            cycle = (self.it_ms or DEFAULT_IT_MS) / 1000.0
+        return cycle + FRAME_OVERHEAD_S
 
     def _frame_timeout(self) -> float:
         if self.frame_timeout_s is not None:
             return self.frame_timeout_s
-        it_s = (self.it_ms or 10.0) / 1000.0
-        return max(FRAME_TIMEOUT_MIN_S, 3.0 * it_s + 2.0 * self._frame_period_s())
+        it_s = (self.it_ms or DEFAULT_IT_MS) / 1000.0
+        return max(FRAME_TIMEOUT_MIN_S, 3.0 * it_s + 1.0)
 
     def _start_capture(self) -> None:
-        """captureStart before waiting for a frame, until the capture proves continuous.
+        """captureStart for one frame (single shot), with recovery for a start that throws inside the DLL.
 
-        Mode 0 delivered exactly one frame per captureStart (single shot) and
-        accepted the next start; in mode 2 a second start threw inside the DLL
-        because the capture still ran (continuous). Starting before every frame
-        serves both: the first exception marks the capture as continuous and no
-        further start is attempted while it runs.
+        On the bench a start threw a SynchronizationLockException while the
+        board was still capturing for a killed process; a throwing start did
+        not start, so the driver stops, retries once, re-opens the module,
+        retries once more and then asks for a re-plug.
         """
-        if self._capturing and self._continuous:
+        for attempt, remedy in enumerate(("captureStop", "close and open", None)):
+            try:
+                code = self._rc(M_CAPTURE_START, self.module_id).result
+            except Exception as exc:
+                self._record(M_CAPTURE_START, f"raised {_first_line(exc)}")
+                if remedy is None:
+                    raise RuntimeError(
+                        f"captureStart keeps failing with '{_first_line(exc)}': the C13016 is probably still capturing for a "
+                        "previous session. Close other programs using it, unplug and re-plug the board, then Connect again.")
+                self.logger.warning("captureStart raised '%s' (attempt %d); trying %s", _first_line(exc), attempt + 1, remedy)
+                if remedy == "captureStop":
+                    self._stop_capture(force=True)
+                else:
+                    self._reopen_module()
+                continue
+            if code == ERR_NOW_CAPTURING:
+                self.logger.info("captureStart answered %s: a capture was still running", code_text(code))
+            elif code != OK_CODE:
+                raise RuntimeError(f"captureStart returned {code_text(code)}")
+            self._capturing = True
             return
-        try:
-            code = self._rc(M_CAPTURE_START, self.module_id).result
-            if code != OK_CODE:
-                self.logger.warning("%s returned %s", M_CAPTURE_START, code)
-            if self._capturing and self._continuous is None:
-                self._continuous = False
-                self.logger.info("Capture mode %s behaves as single shot: one frame per captureStart", self.capture_mode)
-        except Exception as exc:
-            self._record(M_CAPTURE_START, f"raised {_first_line(exc)}")
-            if not self._continuous:
-                self.logger.info("captureStart raised '%s': the capture is continuous and is left running", _first_line(exc))
-            self._continuous = True
-        self._capturing = True
 
-    def _stop_capture(self) -> None:
-        if not self._capturing:
+    def _reopen_module(self) -> None:
+        """close, open and captureStop: a fresh device object in the DLL for a board in an unknown state."""
+        self._rc(M_CLOSE, self.module_id)
+        self._opened = False
+        code = self._rc(M_OPEN, self.module_id).result
+        self._opened = True
+        if code != OK_CODE:
+            self.logger.warning("open(id=%s) answered %s while recovering", self.module_id, code_text(code))
+        self._stop_capture(force=True)
+
+    def _stop_capture(self, force: bool = False) -> None:
+        """captureStop; with force=True also when the driver believes nothing runs (leftovers of another session)."""
+        if not self._capturing and not force:
             return
         self._capturing = False
         if self.module_id is None or not self._api.has(M_CAPTURE_STOP):
             return
         self._rc(M_CAPTURE_STOP, self.module_id)
-        self._wait_capture_idle()
-
-    def _wait_capture_idle(self) -> None:
-        """captureStop is asynchronous: wait until getCaptureStatus is back to its pre-start value."""
-        if self._status_idle is None or not self._api.has(M_CAPTURE_STATUS):
-            return
-        deadline = time.monotonic() + min(self._frame_timeout(), self._frame_period_s() + 0.5)
-        while time.monotonic() < deadline:
-            if self._rc(M_CAPTURE_STATUS, self.module_id).result == self._status_idle:
-                return
-            time.sleep(0.02)
-        self.logger.info("getCaptureStatus still %s after captureStop", self.diagnostics.get(M_CAPTURE_STATUS))
 
     def _frame_from(self, call: CallResult) -> Tuple[np.ndarray, int]:
         counts = _to_float_array(call.slots[1])
@@ -1097,60 +1150,69 @@ class Hama6_Spectrometer:
             stamp = 0
         return counts, stamp
 
-    def _is_new_frame(self, counts: np.ndarray, stamp: int) -> bool:
-        """A frame counts as new when it has data and either a fresh timestamp or changed pixels."""
-        if counts.size == 0 or not np.any(counts):
-            return False
-        if self._last_counts is None:
-            return True
-        if stamp != 0 or self._last_stamp:
-            return stamp != self._last_stamp
-        return not np.array_equal(counts, self._last_counts)
-
-    def _note_frame(self, counts: np.ndarray, stamp: int) -> None:
-        now = time.monotonic()
+    def _note_frame(self, started_at: float) -> None:
         if self._last_frame_at is not None:
-            interval = now - self._last_frame_at
+            interval = started_at - self._last_frame_at
             self.frame_period_s = interval if self.frame_period_s is None else 0.7 * self.frame_period_s + 0.3 * interval
-        self._last_frame_at = now
-        self._last_stamp = stamp
-        self._last_counts = counts
+        self._last_frame_at = started_at
 
     def _acquire_frame(self) -> Optional[np.ndarray]:
-        """Start (if needed) and wait for the next new frame (None when aborted)."""
-        self._start_capture()
+        """One frame the way Hamamatsu's SampleAPL takes it: start, wait for the status, read, stop (None when aborted)."""
         timeout = self._frame_timeout()
-        it_s = (self.it_ms or 10.0) / 1000.0
+        it_s = (self.it_ms or DEFAULT_IT_MS) / 1000.0
         poll = min(POLL_MAX_S, max(POLL_MIN_S, it_s / 4.0))
-        deadline = time.monotonic() + timeout
-        codes: Dict[Any, int] = {}
+        status_codes: Dict[Any, int] = {}
+        image_codes: Dict[Any, int] = {}
         last_error: Optional[str] = None
-        while True:
-            if self._abort.is_set():
-                return None
-            try:
-                call = self._rc(M_IMAGE, self.module_id, Buf(self.npix_active), Buf(TIMESTAMP_SLOTS))
-                codes[call.result] = codes.get(call.result, 0) + 1
-                counts, stamp = self._frame_from(call)
-            except Exception as exc:  # the assembly throws while no frame is available
-                last_error = _first_line(exc)
-                counts, stamp = np.array([], dtype=float), 0
-            if self._is_new_frame(counts, stamp):
-                self._note_frame(counts, stamp)
-                if self._frames_to_discard > 0:
-                    self._frames_to_discard -= 1
-                    deadline = time.monotonic() + timeout
-                    continue
-                return counts
-            if time.monotonic() > deadline:
-                status = self._rc(M_CAPTURE_STATUS, self.module_id).result if self._api.has(M_CAPTURE_STATUS) else "n/a"
-                raise RuntimeError(
-                    f"No new frame within {timeout:.1f} s at IT {self.it_ms} ms (getImageData codes {codes}, "
-                    f"captureStart={self.diagnostics.get(M_CAPTURE_START)}, captureStatus={status}, capture mode "
-                    f"{self.capture_mode} of supported {self.capture_modes_supported}, cycle limits {self.cycle_limits_s}"
-                    f"{', last error: ' + last_error if last_error else ''}). "
-                    f"Run tools/diagnose_c13016.py on this PC and send its output.")
-            time.sleep(poll)
+        restarts: List[str] = []
+        for attempt in range(FRAME_RETRIES):
+            started_at = time.monotonic()
+            self._start_capture()
+            deadline = started_at + timeout
+            restart_reason: Optional[str] = None
+            while True:
+                if self._abort.is_set():
+                    self._stop_capture()
+                    return None
+                status = self._rc(M_CAPTURE_STATUS, self.module_id).result
+                status_codes[status] = status_codes.get(status, 0) + 1
+                if status == OK_CODE:                         # "captured frames exist"
+                    try:
+                        call = self._rc(M_IMAGE, self.module_id, Buf(self.npix_active), Buf(TIMESTAMP_SLOTS))
+                    except Exception as exc:
+                        last_error = _first_line(exc)
+                        restart_reason = f"getImageData raised {last_error}"
+                        break
+                    image_codes[call.result] = image_codes.get(call.result, 0) + 1
+                    counts, stamp = self._frame_from(call)
+                    if call.result == OK_CODE and counts.size and np.any(counts):
+                        self._stop_capture()
+                        self._note_frame(started_at)
+                        self._record("last_frame", {"stamp": stamp, "pixels": int(counts.size)})
+                        return counts
+                    restart_reason = (f"getImageData answered {code_text(call.result)} with "
+                                      f"{'an all-zero' if counts.size else 'no'} buffer for a frame reported ready")
+                    break
+                if status == ERR_NOT_FRAME:                   # data loss: "stop capturing and restart the measurements"
+                    restart_reason = f"getCaptureStatus answered {code_text(status)}"
+                    break
+                if time.monotonic() > deadline:
+                    self._stop_capture()
+                    status_text = ", ".join(f"{code_text(k)}: {v}" for k, v in status_codes.items())
+                    image_text = ", ".join(f"{code_text(k)}: {v}" for k, v in image_codes.items()) or "none"
+                    raise RuntimeError(
+                        f"No frame within {timeout:.1f} s at IT {self.it_ms} ms (getCaptureStatus codes {{{status_text}}}, "
+                        f"getImageData codes {{{image_text}}}, captureStart={self.diagnostics.get(M_CAPTURE_START)}, "
+                        f"capture mode {mode_text(self.capture_mode)}, exposure cycle {self.exposure_cycle_us} us"
+                        f"{', restarts: ' + '; '.join(restarts) if restarts else ''}"
+                        f"{', last error: ' + last_error if last_error else ''}). "
+                        f"Run tools/diagnose_c13016.py on this PC and send its output.")
+                time.sleep(poll)
+            self._stop_capture()
+            restarts.append(restart_reason or "unknown")
+            self.logger.warning("Capture restarted (%d/%d): %s", attempt + 1, FRAME_RETRIES, restart_reason)
+        raise RuntimeError(f"No usable frame after {FRAME_RETRIES} captures at IT {self.it_ms} ms ({'; '.join(restarts)}). "
+                           f"Run tools/diagnose_c13016.py on this PC and send its output.")
 
     def measure(self, ncy: int = 1) -> str:
         if not self._connected:
@@ -1232,7 +1294,7 @@ class Hama6_Spectrometer:
 
     def wait_for_measurement(self, timeout: Optional[float] = None) -> str:
         if timeout is None:
-            # Frames arrive once per exposure cycle, which may be far longer than the integration time.
+            # One start/read/stop round trip per frame on top of the exposure itself.
             timeout = measurement_timeout_s(self.ncy_requested, self.it_ms) + self.ncy_requested * self._frame_period_s()
         if not self._done.wait(timeout):
             self.error = f"Timeout after {timeout:.1f} s waiting for measurement (ncy={self.ncy_requested}, IT={self.it_ms} ms)"
