@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from domain.measurement import MeasurementData
+from scilab_version import APP_NAME, DISPLAY_VERSION, PRODUCT_NAME
 from hardware.controllers import FilterWheelController, LaserController
 from services.acquisition_guard import AcquisitionGuard
 from tabs.ui_pump import ThrottledRedraw, UiPump
@@ -53,18 +55,39 @@ def get_resource_path(relative_path: str) -> str:
 
 @functools.lru_cache(maxsize=1)
 def _writable_base() -> Path:
-    """Directory the app may write to: next to the code, else under the user's home."""
-    preferred_base = Path(__file__).resolve().parent
-    try:
-        preferred_base.mkdir(parents=True, exist_ok=True)
-        test_path = preferred_base / ".write_test"
-        test_path.write_text("ok", encoding="utf-8")
-        test_path.unlink(missing_ok=True)
-        return preferred_base
-    except Exception:
-        fallback_base = Path.home() / ".head-scilab"
-        fallback_base.mkdir(parents=True, exist_ok=True)
-        return fallback_base
+    """Directory the app may write to for settings and results.
+
+    An installed build lives under Program Files, which is read-only for a
+    normal user, so it writes to ``%LOCALAPPDATA%\\SciLab`` -- the conventional
+    place for per-user application data on Windows, and somewhere Explorer can
+    actually reach. Running from a source checkout keeps writing next to the
+    code, so a developer's ``spectro_gui_settings.json`` and ``results/`` stay
+    where they have always been.
+    """
+    candidates = []
+    if getattr(sys, "frozen", False):
+        app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if app_data:
+            candidates.append(Path(app_data) / "SciLab")
+        candidates.append(Path(sys.executable).resolve().parent)
+    else:
+        candidates.append(Path(__file__).resolve().parent)
+    candidates.append(Path.home() / ".head-scilab")
+
+    for base in candidates:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            test_path = base / ".write_test"
+            test_path.write_text("ok", encoding="utf-8")
+            test_path.unlink(missing_ok=True)
+            return base
+        except Exception:
+            continue
+
+    # Last resort: the temp directory always exists and is always writable.
+    fallback = Path(tempfile.gettempdir()) / "SciLab"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 def get_writable_path(relative_path: str) -> str:
@@ -159,13 +182,17 @@ class SpectroApp(tk.Tk):
         if self.RESULTS_ROOT is None:
             self.RESULTS_ROOT = Path(get_writable_path("results"))
 
-        self.title("SciGlob Spectrometer Characterization System")
+        self.title(f"{PRODUCT_NAME} {DISPLAY_VERSION}")
         self._configure_initial_geometry()
 
-        try:
-            self.iconbitmap(get_resource_path("sciglob_symbol.ico"))
-        except Exception:
-            pass
+        # Multi-resolution icon first (16-256 px, generated from the SciGlob
+        # mark); the old 32 px-only file is the fallback.
+        for icon_name in ("packaging/scilab.ico", "sciglob_symbol.ico"):
+            try:
+                self.iconbitmap(get_resource_path(icon_name))
+                break
+            except Exception:
+                continue
 
         # Apply centralized UI theme
         from tabs.theme import apply_theme
@@ -292,7 +319,7 @@ class SpectroApp(tk.Tk):
     # Application title strip
     # ------------------------------------------------------------------
 
-    APP_VERSION = "v3.4"
+    APP_VERSION = DISPLAY_VERSION
 
     def _build_app_bar(self) -> None:
         """White title strip: SciGlob mark, product name, live instrument chip."""
@@ -329,7 +356,7 @@ class SpectroApp(tk.Tk):
         ttk.Label(titles, text="Spectrometer Characterization System",
                   font=Fonts.H2, background=Colors.BG_SURFACE,
                   foreground=Colors.TEXT_PRIMARY).pack(anchor="w")
-        ttk.Label(titles, text=f"SciLab {self.APP_VERSION}", font=Fonts.CAPTION,
+        ttk.Label(titles, text=f"{APP_NAME} {self.APP_VERSION}", font=Fonts.CAPTION,
                   background=Colors.BG_SURFACE,
                   foreground=Colors.TEXT_MUTED).pack(anchor="w")
 

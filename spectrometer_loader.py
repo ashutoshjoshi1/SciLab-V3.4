@@ -12,7 +12,23 @@ from domain.spectrometer import assert_spectrometer_backend
 
 LOGGER = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+def _project_root() -> Path:
+    """Directory the bundled vendor DLLs sit in, source tree or frozen build.
+
+    In a PyInstaller build this module lives inside the bundle, so ``__file__``
+    points at the extraction/_internal directory rather than the source tree;
+    ``sys._MEIPASS`` is where the data files were placed. Falling back to the
+    executable's own folder covers a build whose data was laid out beside it.
+    """
+    if getattr(sys, "frozen", False):
+        bundle = getattr(sys, "_MEIPASS", None)
+        if bundle:
+            return Path(bundle)
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+PROJECT_ROOT = _project_root()
 DLLS_DIR = PROJECT_ROOT / "spectrometers dll files"
 # Where Hamamatsu's C13016 evaluation-software installer puts MICRO_USB2_CLR.dll (used when it is not in DLLS_DIR).
 HAMA6_VENDOR_INSTALL_DLL = Path(r"C:\Program Files\HamamatsuMinispectrometer for C13016\EvaluationSoftware\MICRO_USB2_CLR.dll")

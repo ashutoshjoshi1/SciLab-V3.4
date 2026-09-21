@@ -17,6 +17,9 @@ import os
 import sys
 import time
 import tkinter as tk
+from pathlib import Path
+
+from scilab_version import APP_NAME, DISPLAY_VERSION, PRODUCT_NAME
 
 LOGGER = logging.getLogger(__name__)
 
@@ -115,7 +118,7 @@ def build_splash() -> tk.Tk:
         font=title_font, bg=SPLASH_BG, fg=SPLASH_TEXT,
     ).pack(anchor="w")
     tk.Label(
-        body, text="SciLab v3.4", font=sub_font,
+        body, text=f"{APP_NAME} {DISPLAY_VERSION}", font=sub_font,
         bg=SPLASH_BG, fg=SPLASH_MUTED,
     ).pack(anchor="w", pady=(2, 0))
 
@@ -149,8 +152,189 @@ def preload_heavy_modules(report) -> None:
                 LOGGER.warning("Preload of %s failed: %s", name, exc)
 
 
+SINGLE_INSTANCE_MUTEX = "SciLab.SingleInstance.Mutex"
+_INSTANCE_HANDLE = None
+
+
+def acquire_single_instance() -> bool:
+    """Claim the app-wide mutex; False means another copy is already running.
+
+    Two copies on one bench is not a cosmetic problem: they would both try to
+    open the same USB spectrometer, and the second one's failure looks like
+    broken hardware. The installer watches for this same mutex name, so it can
+    refuse to overwrite a running installation.
+    """
+    global _INSTANCE_HANDLE
+    if not sys.platform.startswith("win"):
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        ERROR_ALREADY_EXISTS = 183
+        # use_last_error=True is not optional: it makes ctypes capture
+        # GetLastError() immediately after the call. Reading
+        # ctypes.get_last_error() without it returns a stale value, which
+        # reported "already running" on a machine with nothing running.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX)
+        error = ctypes.get_last_error()
+        if not handle:
+            return True  # cannot tell; let the app start rather than block it
+        if error == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return False
+        _INSTANCE_HANDLE = handle  # released when the process exits
+        return True
+    except Exception as exc:  # pragma: no cover - Windows only
+        LOGGER.debug("Single-instance check unavailable: %s", exc)
+        return True
+
+
+def focus_running_instance() -> None:
+    """Raise the window of the copy that is already running, if it can be found."""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        handle = user32.FindWindowW(None, f"{PRODUCT_NAME} {DISPLAY_VERSION}")
+        if handle:
+            SW_RESTORE = 9
+            user32.ShowWindow(handle, SW_RESTORE)
+            user32.SetForegroundWindow(handle)
+            return
+    except Exception:
+        pass
+    try:
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo(APP_NAME, f"{APP_NAME} is already running.")
+        root.destroy()
+    except Exception:
+        pass
+
+
+def self_test() -> int:
+    """Check that this build can do its job, without opening a window.
+
+    A frozen bundle that silently lost a hardware backend or a vendor DLL looks
+    perfectly healthy until an operator tries to connect an instrument, and
+    then reports "No spectrometer detected". This is what the build step runs
+    before wrapping the bundle in an installer, and what to ask a site to run
+    when an installed copy misbehaves:
+
+        "C:\\Program Files\\SciLab\\SciLab.exe" --self-test
+    """
+    import importlib
+
+    lines: list[str] = []
+    failures: list[str] = []
+
+    def check(label, fn, *, critical=True):
+        try:
+            detail = fn()
+            lines.append(f"  OK    {label}{f': {detail}' if detail else ''}")
+        except Exception as exc:
+            lines.append(f"  {'FAIL ' if critical else 'warn '} {label}: {exc}")
+            if critical:
+                failures.append(label)
+
+    frozen = getattr(sys, "frozen", False)
+    lines.append(f"{APP_NAME} {DISPLAY_VERSION} self-test")
+    lines.append(f"  build     : {'frozen' if frozen else 'source'}  python {sys.version.split()[0]}")
+    lines.append(f"  executable: {sys.executable}")
+
+    for module in ("numpy", "matplotlib", "matplotlib.backends.backend_tkagg",
+                   "pandas", "scipy.optimize", "scipy.signal", "PIL", "serial",
+                   "serial.tools.list_ports", "tkinter"):
+        check(f"import {module}", lambda m=module: importlib.import_module(m) and "")
+
+    # Optional hardware stacks: absence only limits which instruments work.
+    for module in ("clr", "usb.core", "libusb_package", "pymodbus"):
+        check(f"import {module}", lambda m=module: importlib.import_module(m) and "",
+              critical=False)
+
+    for backend in ("ava1", "hama2", "hama3", "hama4", "hama5", "hama6",
+                    "minispec", "simulated"):
+        name = f"spectrometers.{backend}_spectrometer"
+        check(f"backend {backend}", lambda m=name: importlib.import_module(m) and "")
+
+    def _dlls():
+        from spectrometer_loader import DLLS_DIR
+
+        if not DLLS_DIR.is_dir():
+            raise RuntimeError(f"missing directory {DLLS_DIR}")
+        found = sorted(p.name for p in DLLS_DIR.glob("*.dll"))
+        if not found:
+            raise RuntimeError(f"no DLLs in {DLLS_DIR}")
+        return ", ".join(found)
+
+    check("vendor DLLs", _dlls)
+
+    def _writable():
+        from app import get_writable_path
+
+        probe = Path(get_writable_path(".self_test"))
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return str(probe.parent)
+
+    check("writable data dir", _writable)
+
+    def _assets():
+        from app import get_resource_path
+
+        missing = [name for name in ("sciglob_logoRGB.png", "packaging/scilab.ico")
+                   if not Path(get_resource_path(name)).is_file()]
+        if missing:
+            raise RuntimeError("missing " + ", ".join(missing))
+        return "logo, icon"
+
+    check("bundled assets", _assets)
+
+    lines.append(f"RESULT: {'FAIL - ' + ', '.join(failures) if failures else 'PASS'}")
+    report = "\n".join(lines)
+
+    # A windowed build launched from Explorer has no stdout at all, so the
+    # report is also written next to the app's data where support can find it.
+    try:
+        print(report)
+    except Exception:
+        pass
+    try:
+        from app import get_writable_path
+
+        Path(get_writable_path("self-test.log")).write_text(report + "\n", encoding="utf-8")
+    except Exception:
+        pass
+    return 1 if failures else 0
+
+
 def main() -> None:
+    if "--self-test" in sys.argv:
+        raise SystemExit(self_test())
+    if "--version" in sys.argv:
+        try:
+            print(f"{APP_NAME} {DISPLAY_VERSION}")
+        except Exception:
+            pass
+        raise SystemExit(0)
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    # Before anything touches hardware or draws a splash.
+    if not acquire_single_instance():
+        LOGGER.info("Another instance is already running; focusing it")
+        focus_running_instance()
+        raise SystemExit(0)
+
     enable_windows_dpi_awareness()
 
     started = time.perf_counter()

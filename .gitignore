@@ -14,3 +14,13 @@ dcamapi_error.log
 
 # Hama6 (C13016) operator-specific runtime files
 spectrometers/micro_usb2_api_dump.txt
+
+# Packaging output and the isolated build environment
+build/
+dist/
+.venv-build/
+packaging/file_version_info.txt
+packaging/wizard_banner.bmp
+packaging/wizard_small.bmp
+# Written by --self-test when run from a source checkout
+self-test.log
