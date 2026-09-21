@@ -21,7 +21,15 @@ import tkinter as tk
 LOGGER = logging.getLogger(__name__)
 
 MIN_SPLASH_MS = 800
-SPLASH_BG = "#0f172a"  # deep slate, matches the logo background
+# The SciGlob mark is deep blue on transparent, so it belongs on a light card:
+# on the old near-black splash the "Glob" half almost disappeared.
+SPLASH_BG = "#ffffff"
+SPLASH_EDGE = "#c4cedd"
+SPLASH_RULE = "#e2e8f0"
+SPLASH_ACCENT = "#2563eb"
+SPLASH_TEXT = "#0f172a"
+SPLASH_MUTED = "#64748b"
+SPLASH_FAINT = "#94a3b8"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -47,37 +55,75 @@ def build_splash() -> tk.Tk:
 
     screen_width = splash.winfo_screenwidth()
     screen_height = splash.winfo_screenheight()
-    width = min(680, int(screen_width * 0.45))
-    height = min(420, int(screen_height * 0.45))
+    width = min(620, int(screen_width * 0.42))
+    height = min(320, int(screen_height * 0.38))
     splash.geometry(f"{width}x{height}+{(screen_width - width) // 2}+{(screen_height - height) // 2}")
-    splash.configure(bg=SPLASH_BG)
+    splash.configure(bg=SPLASH_EDGE)
+
+    # 1 px frame drawn by the outer background, so the card has a crisp edge on
+    # any desktop wallpaper without a window border.
+    # Same typography resolution as the main window (Segoe UI Variable where
+    # available), so the splash is not the one screen in another typeface.
+    try:
+        from tabs.theme import Fonts, gradient_rail, resolve_fonts
+
+        resolve_fonts(splash)
+        fonts = (Fonts.H2, Fonts.BODY_SMALL, Fonts.CAPTION, Fonts.H0)
+    except Exception:
+        gradient_rail = None
+        fonts = (("Segoe UI", 13, "bold"), ("Segoe UI", 9), ("Segoe UI", 8),
+                 ("Segoe UI", 24, "bold"))
+    title_font, sub_font, status_font, mark_font = fonts
+
+    card = tk.Frame(splash, bg=SPLASH_BG, bd=0, highlightthickness=0)
+    card.pack(fill="both", expand=True, padx=1, pady=1)
+    if gradient_rail is not None:
+        gradient_rail(card, height=3, start="#1e3a8a", end="#22d3ee",
+                      background=SPLASH_BG).pack(fill="x", side="top")
+    else:
+        tk.Frame(card, bg=SPLASH_ACCENT, height=3, bd=0,
+                 highlightthickness=0).pack(fill="x", side="top")
+
+    body = tk.Frame(card, bg=SPLASH_BG, bd=0, highlightthickness=0)
+    body.pack(fill="both", expand=True, padx=34, pady=(26, 0))
 
     try:
         from PIL import Image, ImageTk  # light (~30 ms); the logo is worth it
 
         image = Image.open(os.path.join(APP_DIR, "sciglob_logoRGB.png"))
-        image.thumbnail((int(width * 0.82), int(height * 0.72)), Image.Resampling.LANCZOS)
+        image.thumbnail((int(width * 0.55), int(height * 0.34)), Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image, master=splash)
-        logo = tk.Label(splash, image=photo, bg=SPLASH_BG, borderwidth=0, highlightthickness=0)
+        logo = tk.Label(body, image=photo, bg=SPLASH_BG, borderwidth=0, highlightthickness=0)
         logo.image = photo  # keep a reference
-        logo.pack(expand=True, pady=(20, 4))
+        logo.pack(anchor="w")
     except Exception as exc:
         LOGGER.warning("Splash logo unavailable: %s", exc)
         tk.Label(
-            splash,
-            text="SciGlob\nSpectrometer Characterization System",
-            font=("Segoe UI", 20, "bold"),
+            body,
+            text="SciGlob",
+            font=mark_font,
             bg=SPLASH_BG,
-            fg="#60a5fa",
+            fg=SPLASH_ACCENT,
             borderwidth=0,
             highlightthickness=0,
-        ).pack(expand=True)
+        ).pack(anchor="w")
 
+    tk.Frame(body, bg=SPLASH_RULE, height=1, bd=0,
+             highlightthickness=0).pack(fill="x", pady=(20, 16))
     tk.Label(
-        splash, text="Spectrometer Characterization System", font=("Segoe UI", 10), bg=SPLASH_BG, fg="#64748b"
-    ).pack(pady=(0, 4))
-    status = tk.Label(splash, text="Loading…", font=("Segoe UI", 9), bg=SPLASH_BG, fg="#94a3b8")
-    status.pack(pady=(0, 14))
+        body, text="Spectrometer Characterization System",
+        font=title_font, bg=SPLASH_BG, fg=SPLASH_TEXT,
+    ).pack(anchor="w")
+    tk.Label(
+        body, text="SciLab v3.4", font=sub_font,
+        bg=SPLASH_BG, fg=SPLASH_MUTED,
+    ).pack(anchor="w", pady=(2, 0))
+
+    footer = tk.Frame(card, bg=SPLASH_BG, bd=0, highlightthickness=0)
+    footer.pack(fill="x", padx=34, pady=(0, 22))
+    status = tk.Label(footer, text="Loading…", font=status_font,
+                      bg=SPLASH_BG, fg=SPLASH_FAINT, anchor="w")
+    status.pack(fill="x")
     splash.status_label = status
     splash.update()
     return splash

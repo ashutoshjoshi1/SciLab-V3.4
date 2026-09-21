@@ -137,11 +137,8 @@ def _candidate_types(spec_type: Optional[str], dll_path: Optional[str], preferre
     if normalized != "Auto":
         return [normalized]
 
-    inferred = infer_spec_type_from_dll_path(dll_path)
-    if inferred:
-        return [inferred]
-
     order = list(AUTO_PROBE_ORDER)
+
     # The type that connected last time is by far the most likely one now.
     try:
         preferred = normalize_spec_type(preferred_type) if preferred_type else None
@@ -150,6 +147,16 @@ def _candidate_types(spec_type: Optional[str], dll_path: Optional[str], preferre
     if preferred in order:
         order.remove(preferred)
         order.insert(0, preferred)
+
+    # A vendor DLL in the path box says "probably this backend", so probe it
+    # first -- but it must not *exclude* the others. Returning only the
+    # inferred type made Auto silently mean "MiniSpec only" whenever a
+    # DCamUSB.dll path was left in the box, and the attached Avantes was then
+    # never probed at all.
+    inferred = infer_spec_type_from_dll_path(dll_path)
+    if inferred in order:
+        order.remove(inferred)
+        order.insert(0, inferred)
     return order
 
 

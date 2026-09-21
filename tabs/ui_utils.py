@@ -28,7 +28,10 @@ class ScrollableFrame(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        canvas_kwargs = {"highlightthickness": 0, "borderwidth": 0}
+        from .theme import Colors
+
+        canvas_kwargs = {"highlightthickness": 0, "borderwidth": 0,
+                         "bg": Colors.BG_PRIMARY}
         if background is not None:
             canvas_kwargs["bg"] = background
         self.canvas = tk.Canvas(self, **canvas_kwargs)
@@ -61,9 +64,11 @@ class ScrollableFrame(ttk.Frame):
     def _on_content_configure(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         self._sync_content_width()
+        self._sync_scrollbars()
 
     def _on_canvas_configure(self, _event=None):
         self._sync_content_width()
+        self._sync_scrollbars()
 
     def _sync_content_width(self):
         if self._window_id is None:
@@ -74,6 +79,28 @@ class ScrollableFrame(ttk.Frame):
             self.canvas.itemconfigure(self._window_id, width=max(canvas_width, req_width))
         else:
             self.canvas.itemconfigure(self._window_id, width=canvas_width)
+
+    def _sync_scrollbars(self):
+        """Show each scrollbar only while it has something to scroll.
+
+        A permanently visible bar on a panel that already fits reads as an
+        error, and the horizontal one on Setup and EEPROM was exactly that.
+        The 4 px slack keeps a bar from flickering on its own presence.
+        """
+        for bar, needed in (
+            (self.v_scrollbar, self.content.winfo_reqheight() > self.canvas.winfo_height() + 4),
+            (self.h_scrollbar, self.content.winfo_reqwidth() > self.canvas.winfo_width() + 4),
+        ):
+            if bar is None:
+                continue
+            try:
+                visible = bool(bar.winfo_manager())
+                if needed and not visible:
+                    bar.grid()
+                elif not needed and visible:
+                    bar.grid_remove()
+            except tk.TclError:
+                pass
 
     def _bind_mousewheel(self, _event=None):
         if self._wheel_bound:
@@ -189,14 +216,24 @@ class StatusBar(ttk.Frame):
         from .theme import Colors, Fonts
 
         self._colors = Colors
-        self.columnconfigure(0, weight=1)
-        self.message = ttk.Label(self, text="Ready", anchor="w", font=Fonts.BODY_SMALL,
+        self.columnconfigure(1, weight=1)
+
+        # Hairline instead of a bevel: the strip reads as part of the window
+        # chrome rather than as a sunken widget.
+        tk.Frame(self, bg=Colors.BORDER_LIGHT, height=1, bd=0,
+                 highlightthickness=0).grid(row=0, column=0, columnspan=4, sticky="ew")
+
+        self.indicator = ttk.Label(self, text="●", font=Fonts.BODY_SMALL,
+                                   background=Colors.BG_HEADER,
+                                   foreground=Colors.TEXT_MUTED)
+        self.indicator.grid(row=1, column=0, sticky="w", padx=(12, 6), pady=5)
+        self.message = ttk.Label(self, text="Ready", anchor="w", font=Fonts.BODY_SMALL_BOLD,
                                  background=Colors.BG_HEADER, foreground=Colors.TEXT_SECONDARY)
-        self.message.grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=3)
+        self.message.grid(row=1, column=1, sticky="ew", padx=(0, 6), pady=5)
         self.progress = ttk.Progressbar(self, orient="horizontal", mode="determinate", length=220)
         self.detail = ttk.Label(self, text="", anchor="e", font=Fonts.BODY_SMALL,
                                 background=Colors.BG_HEADER, foreground=Colors.TEXT_MUTED)
-        self.detail.grid(row=0, column=2, sticky="e", padx=(6, 10), pady=3)
+        self.detail.grid(row=1, column=3, sticky="e", padx=(6, 12), pady=5)
         self._toast_id = None
         self._sticky_text = "Ready"
 
@@ -209,8 +246,14 @@ class StatusBar(ttk.Frame):
             "warning": self._colors.WARNING,
             "error": self._colors.DANGER,
         }.get(kind, self._colors.TEXT_SECONDARY)
+        dot = {
+            "success": self._colors.SUCCESS,
+            "warning": self._colors.WARNING,
+            "error": self._colors.DANGER,
+        }.get(kind, self._colors.TEXT_MUTED)
         self._sticky_text = text
         self.message.configure(text=text, foreground=color)
+        self.indicator.configure(foreground=dot)
 
     def toast(self, text: str, kind: str = "success", ms: int | None = None) -> None:
         """Show ``text`` for a few seconds, then restore the sticky message."""
@@ -233,7 +276,7 @@ class StatusBar(ttk.Frame):
         else:
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
-        self.progress.grid(row=0, column=1, sticky="e", padx=6, pady=3)
+        self.progress.grid(row=1, column=2, sticky="e", padx=6, pady=5)
 
     def progress_update(self, value: int, text: str | None = None, detail: str | None = None) -> None:
         if str(self.progress.cget("mode")) == "determinate":
@@ -294,12 +337,16 @@ class Tooltip:
             window.attributes("-topmost", True)
         except tk.TclError:
             pass
+        # Thin accent rail on the left edge, so a tooltip is recognisable as
+        # help text at a glance rather than as a stray black box.
+        frame = tk.Frame(window, bg=Colors.ACCENT, bd=0, highlightthickness=0)
+        frame.pack()
         label = tk.Label(
-            window, text=self.text, justify="left", wraplength=320,
-            bg=Colors.TEXT_PRIMARY, fg=Colors.TEXT_ON_ACCENT, font=Fonts.BODY_SMALL,
-            padx=8, pady=5, bd=0,
+            frame, text=self.text, justify="left", wraplength=340,
+            bg=Colors.NAVY, fg=Colors.TEXT_ON_NAVY, font=Fonts.BODY_SMALL,
+            padx=10, pady=7, bd=0,
         )
-        label.pack()
+        label.pack(padx=(3, 0))
         self._window = window
 
     def _hide(self, _event=None) -> None:

@@ -10,7 +10,9 @@ from tkinter import ttk, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from .theme import Colors, Fonts, configure_matplotlib_style, make_action_button, screen_dpi
+from .theme import (Colors, Fonts, attach_hover, bind_figure_margins,
+                    configure_matplotlib_style, make_action_button, mount_toolbar,
+                    relax_canvas_size, screen_dpi, source_style, style_legend)
 from .ui_utils import BlitRenderer, ScrollableFrame, ThrottledRedraw, Tooltip, bind_debounced_configure, run_in_worker
 
 LOGGER = logging.getLogger(__name__)
@@ -31,10 +33,16 @@ def build(app):
 
         plot_container = ttk.Frame(main_frame)
         plot_container.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        # A Tk-Agg canvas re-requests its full pixel size after every resize
+        # (figsize * dpi, ~1200x950 px here), which otherwise starves the
+        # control panel beside it. Propagation is per *inner* geometry manager,
+        # and the canvas is packed, so it is pack_propagate that must be off.
+        plot_container.pack_propagate(False)
 
         controls_host = ttk.Frame(main_frame)
         controls_host.grid(row=0, column=1, sticky="nsew", padx=(0, 4), pady=4)
         controls_host.grid_propagate(False)
+        controls_host.pack_propagate(False)
 
         controls_scroll = ScrollableFrame(controls_host, y_scroll=True, background=Colors.BG_PRIMARY)
         controls_scroll.pack(fill="both", expand=True)
@@ -54,13 +62,14 @@ def build(app):
         app.live_sat_line, = app.live_ax.plot([], [], lw=2.2, color=Colors.DANGER, label="Saturated", alpha=0.95)
         app.live_sat_line.set_visible(False)
 
-        app.live_ax.legend(loc="upper right", frameon=True, fancybox=True,
-                          framealpha=0.92, fontsize=9, edgecolor=Colors.BORDER_LIGHT)
+        style_legend(app.live_ax, loc="upper right")
 
         app.live_canvas = FigureCanvasTkAgg(app.live_fig, master=plot_container)
-        app.live_canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        app.live_toolbar = NavigationToolbar2Tk(app.live_canvas, plot_container)
+        relax_canvas_size(app.live_canvas, 620, 340, dpi=screen_dpi(app))
+        bind_figure_margins(app.live_canvas, app.live_fig)
+        # Toolbar first, canvas second: see mount_toolbar.
+        app.live_toolbar = mount_toolbar(app.live_canvas, plot_container, NavigationToolbar2Tk)
+        app.live_canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
 
         # Blit only the two trace lines over a cached background; a full draw is
         # requested when limits/title change, on resize, or after a toolbar zoom.
@@ -121,6 +130,7 @@ def build(app):
                 laser_frame,
                 text=label_text,
                 variable=var,
+                style=source_style(laser_frame, tag, "Bold.TCheckbutton"),
                 command=lambda t=tag, v=var: app.toggle_laser(t, v.get())
             )
             btn.pack(anchor="w", pady=1)
@@ -165,7 +175,7 @@ def build(app):
         app.headsensor_toggle.pack(side="left")
 
         # Status label (shows device ID or error)
-        app.headsensor_status_label = ttk.Label(headsensor_frame, text="Disabled", foreground=Colors.TEXT_MUTED, font=Fonts.BODY_SMALL)
+        app.headsensor_status_label = ttk.Label(headsensor_frame, text="Disabled", foreground=Colors.TEXT_MUTED, font=Fonts.BODY_SMALL_BOLD)
         app.headsensor_status_label.pack(anchor="w", pady=(0, 6))
 
         # Frame to hold all filter wheel controls (initially hidden)
@@ -227,7 +237,7 @@ def build(app):
             app.headsensor_controls_frame,
             text="FW 1: Uncertain",
             foreground=Colors.TEXT_MUTED,
-            font=Fonts.BODY_SMALL
+            font=Fonts.BODY_SMALL_BOLD
         )
         app.fw1_status_label.pack(anchor="w", pady=(0, 3))
 
@@ -236,7 +246,7 @@ def build(app):
             app.headsensor_controls_frame,
             text="FW 2: Uncertain",
             foreground=Colors.TEXT_MUTED,
-            font=Fonts.BODY_SMALL
+            font=Fonts.BODY_SMALL_BOLD
         )
         app.fw2_status_label.pack(anchor="w")
 
@@ -338,14 +348,18 @@ def build(app):
                 btn.pack(anchor="w", pady=2)
                 app._stage_slot_buttons.append(btn)
 
-            app._stage_stop_btn = tk.Button(
+            app._stage_stop_btn = attach_hover(tk.Button(
                 app.stage_slots_container,
                 text="STOP",
                 command=_stop_stage,
                 bg=Colors.DANGER, fg=Colors.TEXT_ON_ACCENT,
+                activebackground=Colors.DANGER_HOVER,
+                activeforeground=Colors.TEXT_ON_ACCENT,
+                disabledforeground=Colors.TEXT_DISABLED,
                 font=Fonts.BODY_SMALL_BOLD,
-                width=16, state="disabled", relief="flat", cursor="hand2",
-            )
+                width=16, state="disabled", relief="flat", overrelief="flat",
+                cursor="hand2", bd=0, highlightthickness=0, pady=4,
+            ))
             app._stage_stop_btn.pack(anchor="w", pady=(6, 0))
 
         app._refresh_stage_slots_ui = _refresh_stage_slots_ui
@@ -366,8 +380,8 @@ def build(app):
                 controls_host.grid_configure(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
                 main_frame.columnconfigure(0, weight=1)
                 main_frame.columnconfigure(1, weight=0)
-                main_frame.rowconfigure(0, weight=5)
-                main_frame.rowconfigure(1, weight=3)
+                main_frame.rowconfigure(0, weight=1)
+                main_frame.rowconfigure(1, weight=0)
                 controls_host.configure(
                     width=max(320, available_width - 16),
                     height=max(240, min(400, int(available_height * 0.40))),

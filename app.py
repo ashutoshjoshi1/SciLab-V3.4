@@ -224,13 +224,17 @@ class SpectroApp(tk.Tk):
 
         from tabs.ui_utils import StatusBar
 
+        # Branded title strip: logo, what this application is, and the live
+        # instrument state. Packed first so it owns the top of the window.
+        self._build_app_bar()
+
         # Persistent status strip (messages, progress, toasts) replaces the ad-hoc
         # window-title messages and most informational pop-ups.
         self.status = StatusBar(self)
         self.status.pack(fill="x", side="bottom")
 
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=6, pady=(6, 4))
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(4, 6))
 
         self.setup_tab = ttk.Frame(self.nb)
         self.live_tab = ttk.Frame(self.nb)
@@ -273,10 +277,99 @@ class SpectroApp(tk.Tk):
             except Exception:
                 LOGGER.exception("Failed to load saved settings")
 
+        # The eager tabs were built before the NotebookTabChanged binding
+        # existed, so tint them here; lazily built tabs are handled on show.
+        for tab in (self.setup_tab, self.measure_tab, self.analysis_tab):
+            self._harmonize_tab(str(tab))
+        self.refresh_instrument_chip()
+
         self._bind_shortcuts()
         self._add_tooltips()
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.status.set("Ready. Connect a spectrometer in Setup (Ctrl+1) to begin.")
+
+    # ------------------------------------------------------------------
+    # Application title strip
+    # ------------------------------------------------------------------
+
+    APP_VERSION = "v3.4"
+
+    def _build_app_bar(self) -> None:
+        """White title strip: SciGlob mark, product name, live instrument chip."""
+        from tabs.theme import Colors, Fonts, gradient_rail, screen_dpi
+
+        bar = ttk.Frame(self, style="Surface.TFrame")
+        bar.pack(fill="x", side="top")
+        inner = ttk.Frame(bar, style="Surface.TFrame")
+        inner.pack(fill="x", padx=14, pady=(9, 9))
+
+        # -- Left: logo + product name ---------------------------------
+        self._logo_image = None
+        logo_height = max(24, int(26 * screen_dpi(self, 96.0) / 96.0))
+        try:
+            from PIL import Image, ImageTk
+
+            image = Image.open(get_resource_path("sciglob_logoRGB.png"))
+            width = max(1, int(image.width * logo_height / max(1, image.height)))
+            image = image.resize((width, logo_height), Image.Resampling.LANCZOS)
+            self._logo_image = ImageTk.PhotoImage(image, master=self)
+            tk.Label(inner, image=self._logo_image, bg=Colors.BG_SURFACE,
+                     bd=0, highlightthickness=0).pack(side="left")
+        except Exception as exc:  # pragma: no cover - Pillow / asset missing
+            LOGGER.debug("App-bar logo unavailable: %s", exc)
+            ttk.Label(inner, text="SciGlob", style="Display.TLabel",
+                      background=Colors.BG_SURFACE,
+                      foreground=Colors.ACCENT_DEEP).pack(side="left")
+
+        tk.Frame(inner, bg=Colors.BORDER_LIGHT, width=1).pack(
+            side="left", fill="y", padx=14, pady=2)
+
+        titles = ttk.Frame(inner, style="Surface.TFrame")
+        titles.pack(side="left")
+        ttk.Label(titles, text="Spectrometer Characterization System",
+                  font=Fonts.H2, background=Colors.BG_SURFACE,
+                  foreground=Colors.TEXT_PRIMARY).pack(anchor="w")
+        ttk.Label(titles, text=f"SciLab {self.APP_VERSION}", font=Fonts.CAPTION,
+                  background=Colors.BG_SURFACE,
+                  foreground=Colors.TEXT_MUTED).pack(anchor="w")
+
+        # -- Right: instrument chip ------------------------------------
+        chip = tk.Frame(inner, bg=Colors.BG_SUBTLE, bd=0, highlightthickness=1,
+                        highlightbackground=Colors.BORDER_LIGHT,
+                        highlightcolor=Colors.BORDER_LIGHT)
+        chip.pack(side="right", padx=(12, 0))
+        self._chip_dot = tk.Label(chip, text="●", font=Fonts.DOT,
+                                  bg=Colors.BG_SUBTLE, fg=Colors.IDLE,
+                                  bd=0, highlightthickness=0)
+        self._chip_dot.pack(side="left", padx=(10, 6), pady=6)
+        self._chip_text = tk.Label(chip, text="No spectrometer",
+                                   font=Fonts.BODY_SMALL_BOLD,
+                                   bg=Colors.BG_SUBTLE, fg=Colors.TEXT_SECONDARY,
+                                   bd=0, highlightthickness=0)
+        self._chip_text.pack(side="left", padx=(0, 12), pady=6)
+
+        gradient_rail(self, height=3, start=Colors.ACCENT_DEEP, end="#22d3ee",
+                      background=Colors.BG_SURFACE).pack(fill="x", side="top")
+
+    def refresh_instrument_chip(self) -> None:
+        """Mirror the spectrometer state into the title strip."""
+        from tabs.theme import Colors
+
+        dot = getattr(self, "_chip_dot", None)
+        text = getattr(self, "_chip_text", None)
+        if dot is None or text is None:
+            return
+        if self.spec is not None:
+            backend = self.spec_backend or "Spectrometer"
+            serial = _clean_text(self.sn) or "Unknown"
+            label, color = f"{backend}  ·  S/N {serial}", Colors.CONNECTED
+        else:
+            label, color = "No spectrometer", Colors.IDLE
+        try:
+            dot.configure(fg=color)
+            text.configure(text=label)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     # Keyboard shortcuts / tooltips
@@ -373,6 +466,25 @@ class SpectroApp(tk.Tk):
             except Exception:
                 LOGGER.exception("Tab show hook failed for %s", selected)
         self._current_tab_id = selected
+        self._harmonize_tab(selected)
+
+    def _harmonize_tab(self, tab_id) -> None:
+        """Re-tint labels/frames to their container background.
+
+        Run on every activation rather than once at build time: several panels
+        (laser rows, stage slots, analysis runs) create widgets long after the
+        tab was built, and they must not come back as grey blocks on the cards.
+        """
+        from tabs.theme import harmonize
+
+        try:
+            widget = self.nametowidget(tab_id)
+        except Exception:
+            return
+        try:
+            harmonize(widget)
+        except Exception:
+            LOGGER.debug("harmonize failed for %s", tab_id, exc_info=True)
 
     @property
     def analysis_service(self):
@@ -793,7 +905,7 @@ class SpectroApp(tk.Tk):
         if notebook is None:
             return
 
-        from tabs.theme import Colors, Fonts
+        from tabs.theme import Colors, style_text
         from tabs.ui_utils import ScrollableFrame
 
         self.analysis_measurement_counter += 1
@@ -865,11 +977,8 @@ class SpectroApp(tk.Tk):
         summary_frame = ttk.LabelFrame(scrollable_frame, text="Analysis Summary", padding=12)
         summary_frame.grid(row=summary_row, column=0, columnspan=cols, padx=10, pady=10, sticky="ew")
 
-        summary_text_widget = tk.Text(
-            summary_frame, height=10, wrap="word",
-            font=Fonts.MONO_SMALL, relief="flat",
-            bg=Colors.BG_PRIMARY, fg=Colors.TEXT_PRIMARY, padx=10, pady=10,
-        )
+        summary_text_widget = tk.Text(summary_frame, height=10, wrap="word")
+        style_text(summary_text_widget)
         summary_text = "\n".join(self.analysis_summary_lines) if self.analysis_summary_lines else "No summary available."
         summary_text_widget.insert("1.0", summary_text)
         summary_text_widget.configure(state="disabled")

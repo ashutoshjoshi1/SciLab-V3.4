@@ -19,9 +19,11 @@ from matplotlib.figure import Figure
 
 from services.check_spectrometer_service import _fit_peak, _mgauss
 
-from .ui_utils import ThrottledRedraw
+from .ui_utils import ScrollableFrame, ThrottledRedraw
 
-from .theme import Colors, Fonts, configure_matplotlib_style, make_action_button, screen_dpi
+from .theme import (Colors, bind_figure_margins, configure_matplotlib_style,
+                    make_action_button, mount_toolbar, relax_canvas_size, screen_dpi,
+                    source_style, style_legend)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,10 +44,20 @@ def build(app):
 
     plot_container = ttk.Frame(main_frame)
     plot_container.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+    # See live_view_tab: keep the canvas from ratcheting the column wider than
+    # the window and pushing the control column off-screen.
+    plot_container.pack_propagate(False)
 
-    controls_host = ttk.Frame(main_frame, width=320)
-    controls_host.grid(row=0, column=1, sticky="ns", padx=(0, 4), pady=4)
+    controls_host = ttk.Frame(main_frame, width=340)
+    controls_host.grid(row=0, column=1, sticky="nsew", padx=(0, 4), pady=4)
     controls_host.grid_propagate(False)
+    controls_host.pack_propagate(False)
+    # Scrollable, so the Fit Readout stays reachable on a short window instead
+    # of being cut off at the bottom edge.
+    controls_scroll = ScrollableFrame(controls_host, y_scroll=True,
+                                      background=Colors.BG_PRIMARY)
+    controls_scroll.pack(fill="both", expand=True)
+    controls_column = controls_scroll.content
 
     # ---------------- Figure ----------------
     # No constrained_layout: its solver re-runs on every draw and dominated the
@@ -53,32 +65,28 @@ def build(app):
     fig = Figure(figsize=(11, 7), dpi=screen_dpi(app))
     fig.subplots_adjust(left=0.08, right=0.985, top=0.92, bottom=0.1)
     ax = fig.add_subplot(111)
-    configure_matplotlib_style(fig, ax, title="Check Resolution — live fit")
-    ax.set_facecolor("white")
-    fig.patch.set_facecolor("white")
-    ax.grid(True, linestyle="--", linewidth=0.7, color="#cccccc",
-            alpha=0.9, zorder=0)
-    ax.set_xlabel("PIXEL", fontsize=12, fontweight="bold")
-    ax.set_ylabel("NORMALIZED SIGNAL", fontsize=12, fontweight="bold")
+    configure_matplotlib_style(fig, ax, title="Check Resolution — live fit",
+                               xlabel="Pixel", ylabel="Normalized Signal")
 
-    # Series — match the colors used in the static Check Spectrometer plot.
-    line_signal,    = ax.plot([], [], lw=0.8, color="#555555", label="SIGNAL", zorder=1)
-    line_bg,        = ax.plot([], [], ".", color="black", ms=6,
-                              label="BACKGROUND DATA", zorder=2)
-    line_fitpts,    = ax.plot([], [], ".", color="blue", ms=4,
-                              label="FITTING DATA", zorder=3)
-    line_fit_curve, = ax.plot([], [], "-", color="red", lw=1.6,
-                              label="FIT", zorder=4)
+    # Series — same roles and draw order as the static Check Spectrometer plot,
+    # drawn in the app palette so both read as one family.
+    line_signal,    = ax.plot([], [], lw=0.9, color=Colors.TEXT_MUTED,
+                              label="Signal", zorder=1)
+    line_bg,        = ax.plot([], [], ".", color=Colors.TEXT_SECONDARY, ms=5,
+                              label="Background data", zorder=2)
+    line_fitpts,    = ax.plot([], [], ".", color=Colors.ACCENT, ms=4,
+                              label="Fitting data", zorder=3)
+    line_fit_curve, = ax.plot([], [], "-", color=Colors.DANGER, lw=1.8,
+                              label="Fit", zorder=4)
 
-    legend = ax.legend(loc="upper left", frameon=False, fontsize=9,
-                       labelspacing=0.2)
-    for text in legend.get_texts():
-        text.set_fontweight("bold")
+    style_legend(ax, loc="upper left", labelspacing=0.3)
 
     canvas = FigureCanvasTkAgg(fig, master=plot_container)
     canvas.draw()
-    canvas.get_tk_widget().pack(fill="both", expand=True)
-    NavigationToolbar2Tk(canvas, plot_container)
+    relax_canvas_size(canvas, 620, 340, dpi=screen_dpi(app))
+    bind_figure_margins(canvas, fig)
+    app.check_res_toolbar = mount_toolbar(canvas, plot_container, NavigationToolbar2Tk)
+    canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
 
     app.check_res_fig = fig
     app.check_res_ax = ax
@@ -97,7 +105,7 @@ def build(app):
     canvas.mpl_connect("button_release_event", _on_release)
 
     # ---------------- Controls ----------------
-    spectrum_frame = ttk.LabelFrame(controls_host, text="Acquisition",
+    spectrum_frame = ttk.LabelFrame(controls_column, text="Acquisition",
                                     padding=8)
     spectrum_frame.pack(fill="x", padx=4, pady=(4, 6))
 
@@ -116,7 +124,7 @@ def build(app):
                                 command=lambda: _reset_zoom())
     reset_zoom_btn.pack(side="left")
 
-    control_frame = ttk.LabelFrame(controls_host, text="Live Fit",
+    control_frame = ttk.LabelFrame(controls_column, text="Live Fit",
                                    padding=8)
     control_frame.pack(fill="x", padx=4, pady=6)
 
@@ -132,7 +140,7 @@ def build(app):
 
     # Laser controls — share the BooleanVars created by live_view_tab so
     # toggling here also reflects in the Live View tab.
-    laser_frame = ttk.LabelFrame(controls_host, text="Laser Controls",
+    laser_frame = ttk.LabelFrame(controls_column, text="Laser Controls",
                                  padding=8)
     laser_frame.pack(fill="x", padx=4, pady=6)
 
@@ -142,12 +150,13 @@ def build(app):
         text = "Hg_Ar" if tag == "Hg_Ar" else f"{tag} nm"
         chk = ttk.Checkbutton(
             laser_frame, text=text, variable=var,
+            style=source_style(laser_frame, tag, "Bold.TCheckbutton"),
             command=lambda t=tag, v=var: app.toggle_laser(t, v.get()),
         )
         chk.pack(anchor="w", pady=1)
 
     # Readout
-    readout_frame = ttk.LabelFrame(controls_host, text="Fit Readout",
+    readout_frame = ttk.LabelFrame(controls_column, text="Fit Readout",
                                    padding=8)
     readout_frame.pack(fill="x", padx=4, pady=6)
 
@@ -155,9 +164,10 @@ def build(app):
         row = ttk.Frame(readout_frame)
         row.pack(fill="x", pady=1)
         ttk.Label(row, text=label_text, width=14, anchor="w",
-                  font=Fonts.BODY_SMALL_BOLD).pack(side="left")
-        val = ttk.Label(row, text="—", anchor="w", foreground=Colors.TEXT_PRIMARY,
-                        font=Fonts.BODY_SMALL)
+                  style="FieldLabel.TLabel").pack(side="left")
+        # The fitted numbers are the point of this tab: bold, monospaced so the
+        # digits line up column-wise, and in the accent colour.
+        val = ttk.Label(row, text="—", anchor="w", style="MetricSmall.TLabel")
         val.pack(side="left", fill="x", expand=True)
         return val
 

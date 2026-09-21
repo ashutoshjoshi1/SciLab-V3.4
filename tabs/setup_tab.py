@@ -20,7 +20,7 @@ from spectrometer_loader import (
     discover_spectrometers,
     suggest_default_dll_path,
 )
-from .theme import Colors, Fonts, Spacing
+from .theme import Colors, Fonts, Spacing, badge, harmonize, source_color, style_listbox
 from .ui_utils import ScrollableFrame, Tooltip, bind_debounced_configure, run_in_worker
 
 LOGGER = logging.getLogger(__name__)
@@ -31,6 +31,16 @@ def build(app):
     DEFAULT_ALL_LASERS = app.DEFAULT_ALL_LASERS
     DEFAULT_LASER_POWERS = app.DEFAULT_LASER_POWERS
     SETTINGS_FILE = app.SETTINGS_FILE
+
+    def _is_suggested_path(path):
+        """True when this path is one the app filled in, not one the user typed."""
+        candidate = (path or "").strip().lower()
+        if not candidate:
+            return True
+        return any(
+            candidate == (suggest_default_dll_path(option) or "").strip().lower()
+            for option in SPECTROMETER_TYPE_OPTIONS
+        )
 
     def _build_setup_tab():
         # Main container with better spacing
@@ -69,9 +79,19 @@ def build(app):
         app.spec_type_combo.grid(row=0, column=1, sticky="w", padx=8, pady=8)
 
         def on_spec_type_change(*_args):
-            if app.dll_entry.get().strip():
+            selected = app.spec_type_var.get().strip()
+            current = app.dll_entry.get()
+            if selected == "Auto":
+                # Auto resolves the DLL per backend as it probes, so a path
+                # left over from a previous selection only gets in the way --
+                # it used to make Auto probe that one backend and nothing else.
+                # A path the operator typed is theirs, so it stays.
+                if _is_suggested_path(current):
+                    app.dll_entry.delete(0, "end")
                 return
-            suggested = suggest_default_dll_path(app.spec_type_var.get())
+            if current.strip():
+                return
+            suggested = suggest_default_dll_path(selected)
             if suggested:
                 app.dll_entry.delete(0, "end")
                 app.dll_entry.insert(0, suggested)
@@ -80,7 +100,7 @@ def build(app):
 
         ttk.Label(spec_group, text="Driver DLL / Runtime Path:",
                  style='SetupLabel.TLabel').grid(row=1, column=0, sticky="w", padx=8, pady=8)
-        app.dll_entry = ttk.Entry(spec_group, width=70, font=Fonts.BODY)
+        app.dll_entry = ttk.Entry(spec_group, width=40, font=Fonts.BODY)
         app.dll_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(spec_group, text="Browse...", command=browse_dll,
                   style='SetupButton.TButton').grid(row=1, column=2, padx=8, pady=8)
@@ -208,7 +228,7 @@ def build(app):
 
         ttk.Label(stage_group, text="Config File:",
                  style='SetupLabel.TLabel').grid(row=0, column=0, sticky="e", padx=8, pady=6)
-        app.stage_config_entry = ttk.Entry(stage_group, width=50, font=Fonts.BODY)
+        app.stage_config_entry = ttk.Entry(stage_group, width=34, font=Fonts.BODY)
         app.stage_config_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=6)
 
         def browse_stage_config():
@@ -328,13 +348,8 @@ def build(app):
         laser_scrollbar = ttk.Scrollbar(list_container, orient="vertical")
         app.laser_listbox = tk.Listbox(list_container, height=6,
                                        yscrollcommand=laser_scrollbar.set,
-                                       font=Fonts.MONO,
-                                       selectmode=tk.SINGLE,
-                                       activestyle='none',
-                                       highlightthickness=1,
-                                       highlightcolor=Colors.ACCENT,
-                                       relief='solid',
-                                       borderwidth=1)
+                                       selectmode=tk.SINGLE)
+        style_listbox(app.laser_listbox)
         laser_scrollbar.config(command=app.laser_listbox.yview)
         app.laser_listbox.pack(side="left", fill="both", expand=True)
         laser_scrollbar.pack(side="right", fill="y")
@@ -371,6 +386,8 @@ def build(app):
         for laser in sorted(app.laser_configs.keys(),
                            key=lambda x: float(x) if x.replace('.','').isdigit() else 999):
             app.laser_listbox.insert(tk.END, format_laser_display(laser))
+            # Tint the row towards its own wavelength; the text still says which.
+            app.laser_listbox.itemconfigure(tk.END, foreground=source_color(laser))
 
         # Buttons for laser management
         laser_button_frame = ttk.Frame(laser_mgmt_group)
@@ -515,6 +532,11 @@ def build(app):
                                    style='SetupButton.TButton', width=12)
             cancel_btn.pack(side="left")
 
+            # Toplevels are outside the tab tree the app harmonises on show.
+            dialog.configure(bg=Colors.BG_SURFACE)
+            dialog_frame.configure(style="Surface.TFrame")
+            harmonize(dialog, Colors.BG_SURFACE)
+
             # Focus on wavelength entry
             wl_entry.focus_set()
             wl_entry.select_range(0, tk.END)
@@ -647,6 +669,7 @@ def build(app):
             for wavelength in sorted(app.laser_configs.keys(),
                                    key=lambda x: float(x) if x.replace('.','').isdigit() else 999):
                 app.laser_listbox.insert(tk.END, format_laser_display(wavelength))
+                app.laser_listbox.itemconfigure(tk.END, foreground=source_color(wavelength))
 
             # Rebuild power configuration section
             rebuild_power_entries()
@@ -713,7 +736,7 @@ def build(app):
                 col_offset = group_index * 4
                 ttk.Label(power_group, text="Wavelength",
                          font=Fonts.BODY_SMALL_BOLD,
-                         foreground=Colors.TEXT_SECONDARY).grid(row=header_row, column=col_offset, sticky="w", padx=(12, 0), pady=(2, 8))
+                         foreground=Colors.TEXT_SECONDARY).grid(row=header_row, column=col_offset, sticky="e", padx=(8, 4), pady=(2, 8))
                 ttk.Label(power_group, text="Type",
                          font=Fonts.BODY_SMALL_BOLD,
                          foreground=Colors.TEXT_SECONDARY).grid(row=header_row, column=col_offset + 1, sticky="w", padx=(4, 0), pady=(2, 8))
@@ -732,17 +755,18 @@ def build(app):
                 max_row_used = max(max_row_used, row)
 
                 # Wavelength label
-                label_text = f"{wavelength} nm"
+                label_text = f"{wavelength} nm" if wavelength != "Hg_Ar" else "Hg-Ar lamp"
                 label = ttk.Label(power_group, text=label_text,
-                                 style='SetupLabel.TLabel')
+                                 style='SetupLabel.TLabel',
+                                 font=Fonts.BODY_BOLD,
+                                 foreground=source_color(wavelength))
                 label.grid(row=row, column=col_offset, sticky="e", padx=(8, 4), pady=4)
 
-                # Type badge
-                type_colors = {"OBIS": Colors.OBIS_COLOR, "CUBE": Colors.CUBE_COLOR, "RELAY": Colors.RELAY_COLOR}
-                type_color = type_colors.get(laser_type, "#666666")
-                type_badge = ttk.Label(power_group, text=f"[{laser_type}]",
-                                      foreground=type_color,
-                                      font=Fonts.CAPTION)
+                # Type pill: filled, so the controller a source hangs off is
+                # readable at a glance instead of being bracketed grey text.
+                kinds = {"OBIS": "info", "CUBE": "warning", "RELAY": "success"}
+                type_badge = badge(power_group, laser_type,
+                                   kind=kinds.get(laser_type, "neutral"))
                 type_badge.grid(row=row, column=col_offset+1, sticky="w", padx=(0, 8), pady=4)
 
                 # Power entry
@@ -767,9 +791,13 @@ def build(app):
             info_frame.grid(row=info_row, column=0, columnspan=total_columns, sticky="ew", padx=8, pady=(0, 8))
 
             ttk.Label(info_frame,
-                     text="Power values are used as setpoints for laser control",
+                     text="Power values are the laser-control setpoints.",
                      foreground=Colors.TEXT_MUTED,
                      font=Fonts.CAPTION_ITALIC).pack(side="left")
+
+            # These rows are rebuilt long after the tab was tinted, so re-run
+            # the pass; otherwise they come back as grey blocks on the card.
+            harmonize(power_group, Colors.BG_SURFACE)
 
         # Initial build of power entries
         rebuild_power_entries(force=True)
@@ -936,13 +964,8 @@ def build(app):
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
         listbox = tk.Listbox(list_frame, height=8,
                             yscrollcommand=scrollbar.set,
-                            font=Fonts.MONO,
-                            selectmode=tk.SINGLE,
-                            activestyle='dotbox',
-                            highlightthickness=1,
-                            highlightcolor=Colors.ACCENT,
-                            relief='solid',
-                            borderwidth=1)
+                            selectmode=tk.SINGLE)
+        style_listbox(listbox)
         scrollbar.config(command=listbox.yview)
         listbox.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -999,6 +1022,11 @@ def build(app):
                                style='SetupButton.TButton', width=12)
         cancel_btn.pack(side="left")
 
+        # Toplevels are outside the tab tree the app harmonises on show.
+        dialog.configure(bg=Colors.BG_SURFACE)
+        dialog_frame.configure(style="Surface.TFrame")
+        harmonize(dialog, Colors.BG_SURFACE)
+
         # Focus on listbox
         listbox.focus_set()
 
@@ -1030,12 +1058,14 @@ def build(app):
             app.spec = None
             app.spec_backend = None
             app.spec_status.config(text="● Disconnected", foreground=Colors.DANGER)
+            app.refresh_instrument_chip()
             app.status.progress_end("Spectrometer connection failed", kind="error")
             app._post_error("Spectrometer Connect", exc)
 
         def _cancelled():
             app._connect_in_progress = False
             app.spec_status.config(text="● Disconnected", foreground=Colors.DANGER)
+            app.refresh_instrument_chip()
             app.status.progress_end("Connection cancelled")
 
         def _finish(payload):
@@ -1056,6 +1086,7 @@ def build(app):
             app.npix = getattr(spec, "npix_active", app.npix)
             app.data.npix = app.npix
             app.spec_status.config(text=f"● Connected ({resolved_type}, S/N: {app.sn})", foreground=Colors.SUCCESS)
+            app.refresh_instrument_chip()
             app.status.progress_end(f"Connected: {resolved_type} S/N {app.sn}, {app.npix} pixels", kind="success")
 
         def _connect_selected(devices, selected_device):
@@ -1113,6 +1144,7 @@ def build(app):
             app.spec_backend = None
             app.install_laser_controller_for_backend(None)
             app.spec_status.config(text="● Disconnected", foreground=Colors.DANGER)
+            app.refresh_instrument_chip()
         except Exception as e:
             app._post_error("Spectrometer Disconnect", e)
 
@@ -1222,12 +1254,24 @@ def build(app):
                 apply_defaults()
                 return
 
+            # Always come up on Auto. Reopening pinned to whichever backend was
+            # saved is how an operator ends up staring at "MiniSpec" on a bench
+            # that has an Avantes plugged in. last_connected_type is still
+            # honoured -- it just orders the probe instead of restricting it.
             saved_type = obj.get("spectrometer_type", getattr(app.hw, "spectrometer_type", "Auto"))
-            app.spec_type_var.set(saved_type)
-            app.hw.spectrometer_type = saved_type
-            app.hw.last_connected_type = str(obj.get("last_connected_type", "") or "")
-            # Load DLL path
+            if saved_type != "Auto":
+                LOGGER.info("Starting on Auto (saved type %s is used as the probe hint)", saved_type)
+            app.spec_type_var.set("Auto")
+            app.hw.spectrometer_type = "Auto"
+            app.hw.last_connected_type = str(
+                obj.get("last_connected_type", "") or (saved_type if saved_type != "Auto" else "")
+            )
+            # Load DLL path. Since we start on Auto, a path the app suggested
+            # for some other backend is dropped for the same reason as in
+            # on_spec_type_change; a hand-typed one is kept and shown.
             app.hw.dll_path = obj.get("dll_path", "")
+            if _is_suggested_path(app.hw.dll_path):
+                app.hw.dll_path = ""
             app.dll_entry.delete(0, "end")
             app.dll_entry.insert(0, app.hw.dll_path)
 

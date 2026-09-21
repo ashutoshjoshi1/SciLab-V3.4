@@ -17,7 +17,9 @@ from services.measurement_orchestrator import (
 )
 from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure
 
-from .theme import Colors, Fonts, configure_matplotlib_style, make_run_button
+from .theme import (Colors, Fonts, bind_figure_margins, configure_matplotlib_style,
+                    make_run_button, relax_canvas_size, source_style, style_legend,
+                    style_listbox)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -69,7 +71,7 @@ def build(app):
                     messagebox.showerror("CSV Error", f"Error reading {os.path.basename(file_path)}:\n{str(e)}")
 
             # Update count label
-            app.reference_csv_count_label.config(text=f"({len(app.reference_csv_paths)} file(s) selected)")
+            app.reference_csv_count_label.config(text=f"{len(app.reference_csv_paths)} files selected")
         except Exception as e:
             LOGGER.exception("Error in _add_reference_csv")
             messagebox.showerror("Upload Error", f"Error uploading file:\n{str(e)}")
@@ -88,7 +90,7 @@ def build(app):
                 app.reference_csv_paths.pop(idx)
 
             # Update count label
-            app.reference_csv_count_label.config(text=f"({len(app.reference_csv_paths)} file(s) selected)")
+            app.reference_csv_count_label.config(text=f"{len(app.reference_csv_paths)} files selected")
             LOGGER.info("Reference CSV(s) removed. %d remaining.", len(app.reference_csv_paths))
         except Exception as e:
             messagebox.showerror("Remove Error", f"Error removing file:\n{e}")
@@ -97,7 +99,7 @@ def build(app):
         """Clear all reference CSVs."""
         app.reference_csv_listbox.delete(0, tk.END)
         app.reference_csv_paths.clear()
-        app.reference_csv_count_label.config(text="(0 file(s) selected)")
+        app.reference_csv_count_label.config(text="0 files selected")
         LOGGER.info("All reference CSVs cleared.")
 
     def _build_measure_tab():
@@ -105,9 +107,11 @@ def build(app):
         main_frame = ttk.Frame(app.measure_tab)
         main_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # Top section - Live measurement plot (maximize space)
+        # Top section - Live measurement plot (maximize space). Packed *after*
+        # the control panel below, so that panel keeps its slice of the window:
+        # pack hands the whole remaining cavity to the first expanding slave.
         plot_frame = ttk.Frame(main_frame)
-        plot_frame.pack(fill="both", expand=True, pady=(0, 4))
+        plot_frame.pack_propagate(False)
 
         def _ensure_measure_figure():
             """Create the matplotlib figure the first time the tab is shown.
@@ -140,9 +144,11 @@ def build(app):
             app.meas_dark_sat_line, = app.measure_ax.plot([], [], lw=2, color=Colors.DANGER, linestyle='--', label='Saturated Dark')
             app.meas_sig_sat_line.set_visible(False)
             app.meas_dark_sat_line.set_visible(False)
-            app.measure_ax.legend(loc='upper right')
+            style_legend(app.measure_ax, loc='upper right')
 
             canvas = FigureCanvasTkAgg(app.measure_fig, plot_frame)
+            relax_canvas_size(canvas, 640, 340, dpi=screen_dpi(app))
+            bind_figure_margins(canvas, app.measure_fig)
             canvas.get_tk_widget().pack(fill="both", expand=True)
             app.meas_canvas = canvas
             app.meas_ax = app.measure_ax
@@ -162,9 +168,10 @@ def build(app):
         hooks[str(app.measure_tab)] = _ensure_measure_figure
 
         # Bottom section - responsive, scrollable controls
-        controls_host = ttk.Frame(main_frame, relief="flat")
-        controls_host.pack(fill="both", pady=(0, 0))
+        controls_host = ttk.Frame(main_frame, relief="flat", height=300)
+        controls_host.pack(side="bottom", fill="x", pady=(0, 0))
         controls_host.pack_propagate(False)
+        plot_frame.pack(side="top", fill="both", expand=True, pady=(0, 6))
 
         controls_scroll = ScrollableFrame(controls_host, y_scroll=True, background=Colors.BG_PRIMARY)
         controls_scroll.pack(fill="both", expand=True)
@@ -194,7 +201,7 @@ def build(app):
 
         select_all_chk = ttk.Checkbutton(
             select_all_frame,
-            text="Select All / Deselect All",
+            text="Select all",
             variable=app.select_all_lasers_var,
             command=toggle_all_lasers,
             style='Large.TCheckbutton'
@@ -207,14 +214,14 @@ def build(app):
         quick_scan_btn = ttk.Button(
             select_all_frame,
             text="Quick Scan",
-            width=16,
+            width=12,
             command=lambda: app.preset_var.set("Quick Scan") if hasattr(app, 'preset_var') else None,
         )
         quick_scan_btn.grid(row=0, column=2, sticky="w", padx=2)
         full_spectrum_btn = ttk.Button(
             select_all_frame,
             text="Full Spectrum",
-            width=18,
+            width=14,
             command=lambda: app.preset_var.set("Full Spectrum") if hasattr(app, 'preset_var') else None,
         )
         full_spectrum_btn.grid(row=0, column=3, sticky="w", padx=2)
@@ -251,7 +258,8 @@ def build(app):
             v = tk.BooleanVar(value=True)  # Default all selected
             label_text = f"{tag} nm" if tag != "Hg_Ar" else "Hg_Ar"
             chk = ttk.Checkbutton(laser_frame, text=label_text, variable=v,
-                                 style='Large.TCheckbutton')
+                                 style=source_style(laser_frame, tag,
+                                                    'Large.TCheckbutton'))
             chk.grid(row=(i // 4) + 2, column=i % 4, padx=8, pady=3, sticky="w")
             app.measure_vars[tag] = v
             measure_checkbuttons.append(chk)
@@ -266,10 +274,14 @@ def build(app):
         # Grid layout for settings
         settings_grid = ttk.Frame(settings_frame)
         settings_grid.pack(fill="both", expand=True)
+        # One control per row, label above it: a side-by-side label plus field
+        # asked for more width than this column is ever given, which clipped
+        # the preset dropdown and the target-count field.
+        settings_grid.columnconfigure(0, weight=1)
 
         # ===== MEASUREMENT PRESETS =====
-        ttk.Label(settings_grid, text="Measurement Preset:", font=Fonts.BODY_SMALL_BOLD).grid(
-            row=0, column=0, sticky="w", pady=3)
+        ttk.Label(settings_grid, text="Preset", font=Fonts.BODY_SMALL_BOLD).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 2))
 
         # Define presets
         app.measurement_presets = {
@@ -294,8 +306,8 @@ def build(app):
         app.preset_var = tk.StringVar(value="Custom")
         preset_combo = ttk.Combobox(settings_grid, textvariable=app.preset_var,
                                     values=list(app.measurement_presets.keys()),
-                                    width=15, font=Fonts.BODY_SMALL, state="readonly")
-        preset_combo.grid(row=0, column=1, sticky="w", pady=3, padx=(6, 0))
+                                    width=12, font=Fonts.BODY_SMALL, state="readonly")
+        preset_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 2))
 
         def apply_preset(*args):
             """Apply the selected measurement preset."""
@@ -334,7 +346,7 @@ def build(app):
         # Preset description label
         app.preset_desc_label = ttk.Label(settings_grid, text="",
                                          font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED)
-        app.preset_desc_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        app.preset_desc_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 4))
 
         def update_preset_description(*args):
             """Update the description label when preset changes."""
@@ -346,11 +358,11 @@ def build(app):
         app.preset_var.trace_add("write", update_preset_description)
         update_preset_description()  # Set initial description
 
-        ttk.Separator(settings_grid, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", pady=5)
+        ttk.Separator(settings_grid, orient="horizontal").grid(row=3, column=0, columnspan=2, sticky="ew", pady=6)
 
         # Target Peak Count - Larger font
-        ttk.Label(settings_grid, text="Target Peak Count (mid):", font=Fonts.BODY_SMALL).grid(
-            row=3, column=0, sticky="w", pady=3)
+        ttk.Label(settings_grid, text="Target peak (mid)", font=Fonts.BODY_SMALL).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, 2))
         try:
             default_mid = app.TARGET_MID if hasattr(app, "TARGET_MID") else 62500
         except Exception:
@@ -358,14 +370,14 @@ def build(app):
         app.target_peak_var = tk.IntVar(value=default_mid)
         app.target_peak_entry = ttk.Entry(settings_grid, width=12, textvariable=app.target_peak_var,
                                          font=Fonts.BODY_SMALL)
-        app.target_peak_entry.grid(row=3, column=1, sticky="w", pady=3, padx=(6, 0))
+        app.target_peak_entry.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 2))
 
         # Target window display - Larger font
         try:
             app.target_band_label = ttk.Label(settings_grid,
                 text=f"Target window: {getattr(app, 'TARGET_LOW', default_mid-2500)}–{getattr(app, 'TARGET_HIGH', default_mid+2500)}",
                 font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED)
-            app.target_band_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 5))
+            app.target_band_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
         except Exception:
             pass
 
@@ -382,14 +394,14 @@ def build(app):
 
         # Auto-IT start - Larger font
         ttk.Label(settings_grid, text="Auto-IT start (ms):", font=Fonts.BODY_SMALL).grid(
-            row=5, column=0, sticky="w", pady=3)
+            row=7, column=0, columnspan=2, sticky="w", pady=(0, 2))
         app.auto_it_entry = ttk.Entry(settings_grid, width=12, font=Fonts.BODY_SMALL)
         app.auto_it_entry.insert(0, "")
-        app.auto_it_entry.grid(row=5, column=1, sticky="w", pady=3, padx=(6, 0))
+        app.auto_it_entry.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(0, 2))
 
         ttk.Label(settings_grid, text="(Leave blank for defaults)",
                  font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(0, 5))
+            row=9, column=0, columnspan=2, sticky="w", pady=(0, 2))
 
         # === MIDDLE CENTER: Reference CSV Files ===
         reference_frame = ttk.LabelFrame(controls_frame, text="Reference CSV Files", padding=(10, 6, 10, 6))
@@ -398,7 +410,7 @@ def build(app):
         # Header with file count
         ref_header_frame = ttk.Frame(reference_frame)
         ref_header_frame.pack(fill="x", pady=(0, 4))
-        app.reference_csv_count_label = ttk.Label(ref_header_frame, text="(0 file(s) selected)",
+        app.reference_csv_count_label = ttk.Label(ref_header_frame, text="0 files selected",
                                                   foreground=Colors.TEXT_MUTED, font=Fonts.BODY_SMALL)
         app.reference_csv_count_label.pack(side="left")
 
@@ -409,8 +421,8 @@ def build(app):
         scrollbar = ttk.Scrollbar(listbox_frame, orient="vertical")
         app.reference_csv_listbox = tk.Listbox(listbox_frame, height=3,
                                                yscrollcommand=scrollbar.set,
-                                               selectmode=tk.MULTIPLE,
-                                               font=Fonts.BODY_SMALL)
+                                               selectmode=tk.MULTIPLE)
+        style_listbox(app.reference_csv_listbox, mono=False)
         scrollbar.config(command=app.reference_csv_listbox.yview)
         app.reference_csv_listbox.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -434,10 +446,12 @@ def build(app):
         actions_buttons_frame = ttk.Frame(actions_frame)
         actions_buttons_frame.pack(fill="x")
 
-        button_style = {"width": 15}  # Wider buttons
+        # No fixed widths: the buttons stretch with sticky="ew" below, and a
+        # character width only inflates the minimum this column demands.
+        button_style = {}
 
         app.run_all_btn = make_run_button(actions_buttons_frame, text="Run Selected",
-                                          command=app.run_all_selected, width=15)
+                                          command=app.run_all_selected, width=12)
 
         app.stop_all_btn = ttk.Button(actions_buttons_frame, text="Stop",
                                     command=app.stop_measure, **button_style)
@@ -497,15 +511,18 @@ def build(app):
                 controls_frame.rowconfigure(row, weight=0)
 
             if available_width >= 1450:
+                # One row of four cards: stacking Settings over Reference used to
+                # push Reference below the visible strip on a 1500 px window.
                 layouts = (
-                    (laser_frame, 0, 0, {"rowspan": 2, "padx": (0, 6)}),
+                    (laser_frame, 0, 0, {"padx": (0, 6)}),
                     (settings_frame, 0, 1, {"padx": 6}),
-                    (reference_frame, 1, 1, {"padx": 6}),
-                    (actions_frame, 0, 2, {"rowspan": 2, "padx": (6, 0)}),
+                    (reference_frame, 0, 2, {"padx": 6}),
+                    (actions_frame, 0, 3, {"padx": (6, 0)}),
                 )
-                for col in range(3):
+                controls_frame.columnconfigure(0, weight=3)
+                for col in (1, 2, 3):
                     controls_frame.columnconfigure(col, weight=1)
-                laser_panel_width = max(420, int(available_width * 0.44))
+                laser_panel_width = max(420, int(available_width * 0.38))
             elif available_width >= 1100:
                 layouts = (
                     (laser_frame, 0, 0, {"columnspan": 2, "padx": 0}),
@@ -537,10 +554,23 @@ def build(app):
                     columnspan=options.get("columnspan", 1),
                 )
 
-            if available_width >= 1100:
+            if available_width >= 1450:
+                # 2x2 block: a single row of four buttons demanded ~580 px, which
+                # is what squeezed the Settings and Reference cards.
+                for col in range(4):
+                    actions_buttons_frame.columnconfigure(col, weight=1 if col < 2 else 0)
+                for idx, button in enumerate(action_buttons):
+                    button.grid_configure(row=idx // 2, column=idx % 2, sticky="ew",
+                                          padx=(0 if idx % 2 == 0 else 6, 0),
+                                          pady=(0 if idx < 2 else 6, 0))
+            elif available_width >= 1100:
+                for col in range(4):
+                    actions_buttons_frame.columnconfigure(col, weight=1)
                 for idx, button in enumerate(action_buttons):
                     button.grid_configure(row=0, column=idx, sticky="ew", padx=(0 if idx == 0 else 6, 0), pady=0)
             else:
+                for col in range(4):
+                    actions_buttons_frame.columnconfigure(col, weight=1 if col == 0 else 0)
                 for idx, button in enumerate(action_buttons):
                     button.grid_configure(row=idx, column=0, sticky="ew", padx=0, pady=(0, 6 if idx < len(action_buttons) - 1 else 0))
 
@@ -719,14 +749,25 @@ def build(app):
         countdown ends, is skipped, or the dialog is closed. Returns the
         Toplevel so a caller can destroy it early.
         """
+        from .theme import harmonize
+
         top = tk.Toplevel(self)
         top.title(title)
         top.transient(self)
         top.resizable(False, False)
-        ttk.Label(top, text=message, wraplength=460).pack(padx=16, pady=(14, 6))
-        lbl = ttk.Label(top, text=f"{int(seconds)} sec", font=Fonts.H1)
-        lbl.pack(pady=(4, 6))
-        ttk.Label(top, text="Press Enter to continue now", style="Muted.TLabel").pack(pady=(0, 12))
+        top.configure(bg=Colors.BG_SURFACE)
+        tk.Frame(top, bg=Colors.ACCENT, height=3, bd=0,
+                 highlightthickness=0).pack(fill="x", side="top")
+        body = ttk.Frame(top, style="Surface.TFrame")
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=message, wraplength=460, justify="center",
+                  anchor="center").pack(fill="x", padx=20, pady=(16, 6))
+        lbl = ttk.Label(body, text=f"{int(seconds)} sec", font=Fonts.H0,
+                        foreground=Colors.ACCENT_DEEP, anchor="center")
+        lbl.pack(fill="x", pady=(4, 6))
+        ttk.Label(body, text="Press Enter to continue now", style="Muted.TLabel",
+                  anchor="center").pack(fill="x", pady=(0, 14))
+        harmonize(top, Colors.BG_SURFACE)
 
         top.update_idletasks()
         width, height = max(500, top.winfo_reqwidth()), max(160, top.winfo_reqheight())

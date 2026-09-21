@@ -14,7 +14,7 @@ import logging
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from .theme import Colors, Fonts, Spacing
+from .theme import Colors, Fonts, Spacing, style_text
 from .ui_utils import ScrollableFrame, bind_debounced_configure
 
 LOGGER = logging.getLogger(__name__)
@@ -46,7 +46,10 @@ def build(app):
     device_group = ttk.LabelFrame(frame, text="Device Information",
                                   style='EEPROM.TLabelframe')
     device_group.pack(fill="x", padx=8, pady=8)
-    device_group.columnconfigure(1, weight=1)
+    device_group.columnconfigure(1, weight=0)
+    # Column 2 (the address hint) soaks up the spare width, so the hint
+    # stays beside its value instead of drifting to the window edge.
+    device_group.columnconfigure(2, weight=1)
 
     row = 0
 
@@ -83,7 +86,10 @@ def build(app):
     pixel_group = ttk.LabelFrame(frame, text="Pixel Configuration",
                                  style='EEPROM.TLabelframe')
     pixel_group.pack(fill="x", padx=8, pady=8)
-    pixel_group.columnconfigure(1, weight=1)
+    pixel_group.columnconfigure(1, weight=0)
+    # Column 2 (the address hint) soaks up the spare width, so the hint
+    # stays beside its value instead of drifting to the window edge.
+    pixel_group.columnconfigure(2, weight=1)
 
     row = 0
 
@@ -140,7 +146,8 @@ def build(app):
     gain_offset_group = ttk.LabelFrame(frame, text="Gain and Offset Values (Editable)",
                                        style='EEPROM.TLabelframe')
     gain_offset_group.pack(fill="x", padx=8, pady=8)
-    gain_offset_group.columnconfigure(1, weight=1)
+    gain_offset_group.columnconfigure(1, weight=0)
+    gain_offset_group.columnconfigure(2, weight=1)
 
     ttk.Label(gain_offset_group, text="Edit values below and click 'Save' to write to EEPROM:",
              font=Fonts.CAPTION_ITALIC,
@@ -152,7 +159,7 @@ def build(app):
     ttk.Label(gain_offset_group, text="Gain[0]:",
              style='EEPROMLabel.TLabel').grid(row=row, column=0, sticky="w", padx=12, pady=6)
     app.eeprom_gain_0_entry = ttk.Entry(gain_offset_group, width=20,
-                                        font=Fonts.MONO)
+                                        font=Fonts.MONO, style="Editable.TEntry")
     app.eeprom_gain_0_entry.grid(row=row, column=1, sticky="w", padx=12, pady=6)
     app.eeprom_gain_0_entry.insert(0, "--")
     row += 1
@@ -160,7 +167,7 @@ def build(app):
     ttk.Label(gain_offset_group, text="Gain[1]:",
              style='EEPROMLabel.TLabel').grid(row=row, column=0, sticky="w", padx=12, pady=6)
     app.eeprom_gain_1_entry = ttk.Entry(gain_offset_group, width=20,
-                                        font=Fonts.MONO)
+                                        font=Fonts.MONO, style="Editable.TEntry")
     app.eeprom_gain_1_entry.grid(row=row, column=1, sticky="w", padx=12, pady=6)
     app.eeprom_gain_1_entry.insert(0, "--")
     row += 1
@@ -169,7 +176,7 @@ def build(app):
     ttk.Label(gain_offset_group, text="Offset[0]:",
              style='EEPROMLabel.TLabel').grid(row=row, column=0, sticky="w", padx=12, pady=6)
     app.eeprom_offset_0_entry = ttk.Entry(gain_offset_group, width=20,
-                                          font=Fonts.MONO)
+                                          font=Fonts.MONO, style="Editable.TEntry")
     app.eeprom_offset_0_entry.grid(row=row, column=1, sticky="w", padx=12, pady=6)
     app.eeprom_offset_0_entry.insert(0, "--")
     row += 1
@@ -177,7 +184,7 @@ def build(app):
     ttk.Label(gain_offset_group, text="Offset[1]:",
              style='EEPROMLabel.TLabel').grid(row=row, column=0, sticky="w", padx=12, pady=6)
     app.eeprom_offset_1_entry = ttk.Entry(gain_offset_group, width=20,
-                                          font=Fonts.MONO)
+                                          font=Fonts.MONO, style="Editable.TEntry")
     app.eeprom_offset_1_entry.grid(row=row, column=1, sticky="w", padx=12, pady=6)
     app.eeprom_offset_1_entry.insert(0, "--")
     row += 1
@@ -186,7 +193,7 @@ def build(app):
     ttk.Label(gain_offset_group, text="Extended Offset:",
              style='EEPROMLabel.TLabel').grid(row=row, column=0, sticky="w", padx=12, pady=6)
     app.eeprom_ext_offset_entry = ttk.Entry(gain_offset_group, width=20,
-                                            font=Fonts.MONO)
+                                            font=Fonts.MONO, style="Editable.TEntry")
     app.eeprom_ext_offset_entry.grid(row=row, column=1, sticky="w", padx=12, pady=6)
     app.eeprom_ext_offset_entry.insert(0, "--")
     row += 1
@@ -225,11 +232,9 @@ def build(app):
     defect_scrollbar = ttk.Scrollbar(defect_frame, orient="vertical")
     app.eeprom_defect_text = tk.Text(defect_frame, height=4, width=80,
                                      yscrollcommand=defect_scrollbar.set,
-                                     font=Fonts.MONO,
-                                     wrap='word',
-                                     relief='solid',
-                                     borderwidth=1,
-                                     bg='#FFFACD')  # Light yellow to indicate editable
+                                     wrap='word')
+    # Warm tint marks the field as one that writes back to the device.
+    style_text(app.eeprom_defect_text, editable=True)
     defect_scrollbar.config(command=app.eeprom_defect_text.yview)
     app.eeprom_defect_text.pack(side="left", fill="both", expand=True)
     defect_scrollbar.pack(side="right", fill="y")
@@ -253,7 +258,8 @@ def build(app):
     wl_group = ttk.LabelFrame(frame, text="Wavelength Calibration Polynomial",
                               style='EEPROM.TLabelframe')
     wl_group.pack(fill="x", padx=8, pady=8)
-    wl_group.columnconfigure(1, weight=1)
+    wl_group.columnconfigure(1, weight=0)
+    wl_group.columnconfigure(2, weight=1)
 
     ttk.Label(wl_group, text="4th order polynomial (Address: 0x92-0xA5):",
              style='EEPROMLabel.TLabel', foreground=Colors.ACCENT).grid(
@@ -261,7 +267,7 @@ def build(app):
 
     ttk.Label(wl_group, text="λ(pixel) = x₀ + x₁·pixel + x₂·pixel² + x₃·pixel³ + x₄·pixel⁴",
              font=Fonts.CAPTION_ITALIC,
-             foreground='#555').grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+             foreground=Colors.TEXT_SECONDARY).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
     row = 2
     for i in range(5):
@@ -285,7 +291,7 @@ def build(app):
              font=Fonts.BODY_SMALL_BOLD).grid(row=0, column=0, sticky="w", padx=(8, 4))
     app.eeprom_status_label = ttk.Label(status_frame, text="Ready - Click 'Read EEPROM' to load data",
                                        font=Fonts.BODY_SMALL,
-                                       foreground='#555')
+                                       foreground=Colors.TEXT_SECONDARY)
     app.eeprom_status_label.grid(row=0, column=1, sticky="ew")
 
     def _layout_eeprom_tab(width=None, _height=None):

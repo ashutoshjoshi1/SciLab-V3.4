@@ -1,5 +1,6 @@
 {
-  "spectrometer_type": "MiniSpec",
+  "spectrometer_type": "Auto",
+  "last_connected_type": "Ava1",
   "dll_path": "",
   "com_ports": {
     "OBIS": "COM9",
