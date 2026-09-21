@@ -4,6 +4,9 @@ Desktop application (Python + Tkinter) that drives lab spectrometers and light
 sources to characterize an instrument: live spectra, automated multi-source
 measurements with auto-exposure, and LSF / dispersion / resolution analysis.
 
+Release notes live in [`CHANGELOG.md`](CHANGELOG.md); the current version is
+set in [`scilab_version.py`](scilab_version.py).
+
 ## What changed in v3.4
 
 | Area | v3.3 | v3.4 |
@@ -19,6 +22,15 @@ measurements with auto-exposure, and LSF / dispersion / resolution analysis.
 | Tests | none shipped | 58 unit/golden/orchestrator tests + 5 GUI smoke tests |
 
 ## Windows setup (operators)
+
+**Installer (recommended).** Run `SciLab-Setup-<version>.exe` and launch
+SciLab from the Start menu -- no Python needed. It bundles the interpreter,
+the scientific stack and the vendor DLLs, and checks itself after installing.
+To confirm an installation later, use the "SciLab self-test" Start-menu
+shortcut and send `%LOCALAPPDATA%\SciLab\self-test.log` to support. Building
+the installer is described in [`packaging/README.md`](packaging/README.md).
+
+**From source** (development, or a platform with no build):
 
 1. Install Python 3.11 or newer (the standard installer includes Tk).
 2. `pip install -r requirements.txt`
