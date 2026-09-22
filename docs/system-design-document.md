@@ -138,12 +138,14 @@ The important point here is simple: the UI still drives the application, but the
 
 ### Spectrometers
 
-Supported spectrometer families remain:
+Supported spectrometer families:
 
-- Ava1
-- Hama2
-- Hama3
-- Hama4
+- Ava1 (Avantes, avaspecx64.dll)
+- Hama2 (Hamamatsu DCAM-API, dcamapi.dll)
+- Hama3 (Hamamatsu DcIcUSB.dll)
+- Hama4 (Hamamatsu HiasApi.dll)
+- MiniSpec (Hamamatsu Micro Series Plus, DCamUSB.dll)
+- OcOpt1 (Ocean Insight / Ocean Optics via the OceanDirect SDK, OceanDirect.dll; verified on the Flame-S FLMS17243, see `docs/flame-s-oceandirect-integration-guide.md`)
 
 The shared contract is now explicit. A backend is expected to expose:
 

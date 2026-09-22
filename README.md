@@ -18,7 +18,7 @@ set in [`scilab_version.py`](scilab_version.py).
 | Live plot | Full redraw every frame, layout solver on each draw, unbounded frame rate | Blitted trace over a cached background, 25 fps cap, hysteresis on autoscale |
 | Thread safety | Tk called from worker threads (crashes on some builds); no ownership of the spectrometer handle | One main-thread UI pump; single-owner acquisition guard; Stop aborts the device immediately |
 | Bugs fixed | EEPROM tab non-functional (`NameError`); Hg-Ar analysis crashed on every run; Check Resolution blank if opened before Live View; countdown ran 0.2 s per second; lasers not switched off on exit; settings not saved on exit; power values lost on resize | all fixed, with regression tests |
-| Hardware | Ava1, Hama2, Hama3, Hama4, MiniSpec | + **Hama5** (supported Hamamatsu TM/TG/RC mini-spectrometers over USB), **Hama6** (Hamamatsu C13016 / C13985 micro-spectrometer circuit via its .NET DLL) and a **Simulated** backend |
+| Hardware | Ava1, Hama2, Hama3, Hama4, MiniSpec | + **Hama5** (supported Hamamatsu TM/TG/RC mini-spectrometers over USB), **Hama6** (Hamamatsu C13016 / C13985 micro-spectrometer circuit via its .NET DLL), **OcOpt1** (Ocean Insight / Ocean Optics via OceanDirect SDK) and a **Simulated** backend |
 | Tests | none shipped | 58 unit/golden/orchestrator tests + 5 GUI smoke tests |
 
 ## Windows setup (operators)
@@ -38,6 +38,10 @@ the installer is described in [`packaging/README.md`](packaging/README.md).
 
 Default vendor DLLs live in `spectrometers dll files/`. Hama2 needs the Hamamatsu
 DCAM runtime; Hama4 uses `HiasApi.dll` with `hias.conf` next to it.
+
+OcOpt1 drives OceanDirect-supported Ocean Insight spectrometers. `OceanDirect.dll`
+is not redistributed in this repository; install the OceanDirect SDK on the target
+PC (or set `OCEANDIRECT_HOME`) and point Setup's DLL path at that DLL.
 
 ### Hamamatsu C10785: use MiniSpec
 

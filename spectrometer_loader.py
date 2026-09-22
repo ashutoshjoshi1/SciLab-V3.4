@@ -37,7 +37,7 @@ HAMA6_VENDOR_INSTALL_DLL = Path(r"C:\Program Files\HamamatsuMinispectrometer for
 # falls back to fake data.
 # "Hama6" = Hamamatsu C13016 evaluation circuit / C13985 module via the vendor .NET
 # assembly MICRO_USB2_CLR.dll (pythonnet).
-SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "Hama5", "Hama6", "MiniSpec", "Simulated"]
+SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "Hama5", "Hama6", "MiniSpec", "Simulated", "OcOpt1"]
 
 
 def normalize_spec_type(spec_type: Optional[str]) -> str:
@@ -64,11 +64,19 @@ def infer_spec_type_from_dll_path(dll_path: Optional[str]) -> Optional[str]:
         return "MiniSpec"
     if name == "micro_usb2_clr.dll":
         return "Hama6"
+    if name == "oceandirect.dll":
+        return "OcOpt1"
     return None
 
 
 def suggest_default_dll_path(spec_type: Optional[str]) -> str:
     normalized = normalize_spec_type(spec_type)
+    if normalized == "OcOpt1":
+        # OceanDirect.dll is licensed for use in place (not bundled); look it up in
+        # OCEANDIRECT_HOME / the default SDK install folder.
+        from spectrometers.oceandirect_spectrometer import find_oceandirect_dll
+
+        return find_oceandirect_dll()
     suggestions = {
         "Ava1": DLLS_DIR / "avaspecx64.dll",
         "Hama3": DLLS_DIR / "DcIcUSB.dll",
@@ -110,7 +118,7 @@ def _clean_text(value) -> str:
 
 # Default Auto probe order. Hama5 only claims Hamamatsu USB devices that are not
 # DCamUSB units, so it is safe to try last.
-AUTO_PROBE_ORDER = ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5", "Hama6"]
+AUTO_PROBE_ORDER = ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5", "Hama6", "OcOpt1"]
 
 # USB vendor IDs each backend can possibly talk to. In Auto mode a backend is not
 # even loaded when no device of its vendor is attached: each skipped probe saves a
@@ -255,6 +263,9 @@ def _import_backend_class(spec_type: str, dll_path: Optional[str] = None):
     if normalized == "Simulated":
         module = importlib.import_module("spectrometers.simulated_spectrometer")
         return module.SimulatedSpectrometer
+    if normalized == "OcOpt1":
+        module = importlib.import_module("spectrometers.oceandirect_spectrometer")
+        return module.OceanDirect_Spectrometer
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 
@@ -438,6 +449,40 @@ def _discover_simulated(_dll_path: Optional[str]) -> List[Dict[str, str]]:
     return [{"serial": "SIM-0001", "label": "SIM-0001 (Simulated spectrometer) [Simulated]", "type": "Simulated"}]
 
 
+def _discover_oceandirect(dll_path: Optional[str]) -> List[Dict[str, str]]:
+    spec = _new_spec_instance("OcOpt1", dll_path, serial=None, debug_mode=0)
+    try:
+        res = spec.load_spec_dll()
+        if res != "OK":
+            raise RuntimeError(res)
+        res = spec.initialize_dll()
+        if res != "OK":
+            raise RuntimeError(res)
+        res, count = spec.get_number_of_devices()
+        if res != "OK":
+            raise RuntimeError(res)
+        if count == 0:
+            return []
+        res, devices_info = spec.get_all_devices_info(count)
+        if res != "OK":
+            raise RuntimeError(res)
+
+        devices = []
+        for index, dev_info in devices_info.items():
+            serial_number = _clean_text(dev_info.get("id", ""))
+            model = _clean_text(dev_info.get("model", "Ocean Insight"))
+            if not serial_number:
+                # Unit is held open by another program: list it, but it cannot be selected by serial.
+                LOGGER.warning("OceanDirect device %s is busy (%s)", index, model)
+                continue
+            devices.append(
+                {"serial": serial_number, "label": f"{serial_number} ({model}) [OcOpt1]", "type": "OcOpt1"}
+            )
+        return devices
+    finally:
+        _release_probe(spec)
+
+
 def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str, str]]:
     normalized = normalize_spec_type(spec_type)
     if normalized == "Ava1":
@@ -456,6 +501,8 @@ def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str
         return _discover_hama6(dll_path)
     if normalized == "Simulated":
         return _discover_simulated(dll_path)
+    if normalized == "OcOpt1":
+        return _discover_oceandirect(dll_path)
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 

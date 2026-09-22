@@ -53,6 +53,7 @@ hiddenimports = [
     "spectrometers.hama5_spectrometer",
     "spectrometers.hama6_spectrometer",
     "spectrometers.minispec_spectrometer",
+    "spectrometers.oceandirect_spectrometer",
     "spectrometers.simulated_spectrometer",
     "spectrometers.spec_hama2",
     "spectrometers.spec_hama2.Hamamatsu_DCAMSDK4_v25056964.dcam",
