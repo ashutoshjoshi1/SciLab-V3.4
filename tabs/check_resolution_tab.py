@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import tkinter as tk
 from tkinter import ttk, messagebox
 
 import numpy as np
@@ -19,6 +18,12 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from services.check_spectrometer_service import _fit_peak, _mgauss
+
+from .ui_utils import ScrollableFrame, ThrottledRedraw
+
+from .theme import (Colors, bind_figure_margins, configure_matplotlib_style,
+                    make_action_button, mount_toolbar, relax_canvas_size, screen_dpi,
+                    source_style, style_legend)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,12 +34,8 @@ _FRAME_PAUSE_S = 0.05  # idle between frames
 
 
 def build(app):
-    from .theme import Colors, Fonts, configure_matplotlib_style, make_action_button
-
     app.check_res_running = threading.Event()
     app._check_res_pending_it = None
-    app._check_res_pending_plot = None
-    app._check_res_redraw_id = None
 
     main_frame = ttk.Frame(app.check_res_tab)
     main_frame.pack(fill="both", expand=True)
@@ -43,40 +44,49 @@ def build(app):
 
     plot_container = ttk.Frame(main_frame)
     plot_container.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+    # See live_view_tab: keep the canvas from ratcheting the column wider than
+    # the window and pushing the control column off-screen.
+    plot_container.pack_propagate(False)
 
-    controls_host = ttk.Frame(main_frame, width=320)
-    controls_host.grid(row=0, column=1, sticky="ns", padx=(0, 4), pady=4)
+    controls_host = ttk.Frame(main_frame, width=340)
+    controls_host.grid(row=0, column=1, sticky="nsew", padx=(0, 4), pady=4)
     controls_host.grid_propagate(False)
+    controls_host.pack_propagate(False)
+    # Scrollable, so the Fit Readout stays reachable on a short window instead
+    # of being cut off at the bottom edge.
+    controls_scroll = ScrollableFrame(controls_host, y_scroll=True,
+                                      background=Colors.BG_PRIMARY)
+    controls_scroll.pack(fill="both", expand=True)
+    controls_column = controls_scroll.content
 
     # ---------------- Figure ----------------
-    fig = Figure(figsize=(11, 7), dpi=100, constrained_layout=True)
+    # No constrained_layout: its solver re-runs on every draw and dominated the
+    # per-frame cost of a simple line plot. One fixed margin set instead.
+    fig = Figure(figsize=(11, 7), dpi=screen_dpi(app))
+    fig.subplots_adjust(left=0.08, right=0.985, top=0.92, bottom=0.1)
     ax = fig.add_subplot(111)
-    configure_matplotlib_style(fig, ax, title="Check Resolution — live fit")
-    ax.set_facecolor("white")
-    fig.patch.set_facecolor("white")
-    ax.grid(True, linestyle="--", linewidth=0.7, color="#cccccc",
-            alpha=0.9, zorder=0)
-    ax.set_xlabel("PIXEL", fontsize=12, fontweight="bold")
-    ax.set_ylabel("NORMALIZED SIGNAL", fontsize=12, fontweight="bold")
+    configure_matplotlib_style(fig, ax, title="Check Resolution — live fit",
+                               xlabel="Pixel", ylabel="Normalized Signal")
 
-    # Series — match the colors used in the static Check Spectrometer plot.
-    line_signal,    = ax.plot([], [], lw=0.8, color="#555555", label="SIGNAL", zorder=1)
-    line_bg,        = ax.plot([], [], ".", color="black", ms=6,
-                              label="BACKGROUND DATA", zorder=2)
-    line_fitpts,    = ax.plot([], [], ".", color="blue", ms=4,
-                              label="FITTING DATA", zorder=3)
-    line_fit_curve, = ax.plot([], [], "-", color="red", lw=1.6,
-                              label="FIT", zorder=4)
+    # Series — same roles and draw order as the static Check Spectrometer plot,
+    # drawn in the app palette so both read as one family.
+    line_signal,    = ax.plot([], [], lw=0.9, color=Colors.TEXT_MUTED,
+                              label="Signal", zorder=1)
+    line_bg,        = ax.plot([], [], ".", color=Colors.TEXT_SECONDARY, ms=5,
+                              label="Background data", zorder=2)
+    line_fitpts,    = ax.plot([], [], ".", color=Colors.ACCENT, ms=4,
+                              label="Fitting data", zorder=3)
+    line_fit_curve, = ax.plot([], [], "-", color=Colors.DANGER, lw=1.8,
+                              label="Fit", zorder=4)
 
-    legend = ax.legend(loc="upper left", frameon=False, fontsize=9,
-                       labelspacing=0.2)
-    for text in legend.get_texts():
-        text.set_fontweight("bold")
+    style_legend(ax, loc="upper left", labelspacing=0.3)
 
     canvas = FigureCanvasTkAgg(fig, master=plot_container)
     canvas.draw()
-    canvas.get_tk_widget().pack(fill="both", expand=True)
-    NavigationToolbar2Tk(canvas, plot_container)
+    relax_canvas_size(canvas, 620, 340, dpi=screen_dpi(app))
+    bind_figure_margins(canvas, fig)
+    app.check_res_toolbar = mount_toolbar(canvas, plot_container, NavigationToolbar2Tk)
+    canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
 
     app.check_res_fig = fig
     app.check_res_ax = ax
@@ -95,7 +105,7 @@ def build(app):
     canvas.mpl_connect("button_release_event", _on_release)
 
     # ---------------- Controls ----------------
-    spectrum_frame = ttk.LabelFrame(controls_host, text="Acquisition",
+    spectrum_frame = ttk.LabelFrame(controls_column, text="Acquisition",
                                     padding=8)
     spectrum_frame.pack(fill="x", padx=4, pady=(4, 6))
 
@@ -114,7 +124,7 @@ def build(app):
                                 command=lambda: _reset_zoom())
     reset_zoom_btn.pack(side="left")
 
-    control_frame = ttk.LabelFrame(controls_host, text="Live Fit",
+    control_frame = ttk.LabelFrame(controls_column, text="Live Fit",
                                    padding=8)
     control_frame.pack(fill="x", padx=4, pady=6)
 
@@ -130,22 +140,23 @@ def build(app):
 
     # Laser controls — share the BooleanVars created by live_view_tab so
     # toggling here also reflects in the Live View tab.
-    laser_frame = ttk.LabelFrame(controls_host, text="Laser Controls",
+    laser_frame = ttk.LabelFrame(controls_column, text="Laser Controls",
                                  padding=8)
     laser_frame.pack(fill="x", padx=4, pady=6)
 
-    laser_tags = ["377", "405", "445", "488", "517", "532", "640", "685", "Hg_Ar"]
+    laser_tags = app.laser_tags()
     for tag in laser_tags:
         var = app.laser_var(tag)
         text = "Hg_Ar" if tag == "Hg_Ar" else f"{tag} nm"
         chk = ttk.Checkbutton(
             laser_frame, text=text, variable=var,
+            style=source_style(laser_frame, tag, "Bold.TCheckbutton"),
             command=lambda t=tag, v=var: app.toggle_laser(t, v.get()),
         )
         chk.pack(anchor="w", pady=1)
 
     # Readout
-    readout_frame = ttk.LabelFrame(controls_host, text="Fit Readout",
+    readout_frame = ttk.LabelFrame(controls_column, text="Fit Readout",
                                    padding=8)
     readout_frame.pack(fill="x", padx=4, pady=6)
 
@@ -153,9 +164,10 @@ def build(app):
         row = ttk.Frame(readout_frame)
         row.pack(fill="x", pady=1)
         ttk.Label(row, text=label_text, width=14, anchor="w",
-                  font=Fonts.BODY_SMALL_BOLD).pack(side="left")
-        val = ttk.Label(row, text="—", anchor="w", foreground=Colors.TEXT_PRIMARY,
-                        font=Fonts.BODY_SMALL)
+                  style="FieldLabel.TLabel").pack(side="left")
+        # The fitted numbers are the point of this tab: bold, monospaced so the
+        # digits line up column-wise, and in the accent colour.
+        val = ttk.Label(row, text="—", anchor="w", style="MetricSmall.TLabel")
         val.pack(side="left", fill="x", expand=True)
         return val
 
@@ -167,7 +179,7 @@ def build(app):
     val_peak  = _row("Peak counts:")
     val_fps   = _row("Frame rate:")
     val_status = _row("Status:")
-    val_status.config(text="Idle", foreground="gray")
+    val_status.config(text="Idle", foreground=Colors.TEXT_MUTED)
 
     # ---------------- Helpers ----------------
     def _read_it_entry() -> float:
@@ -190,45 +202,43 @@ def build(app):
         if app.check_res_running.is_set():
             app._check_res_pending_it = it
             val_status.config(text=f"IT change queued ({it:.2f} ms)",
-                              foreground="blue")
+                              foreground=Colors.INFO)
         else:
-            try:
-                app.spec.set_it(it)
-                val_status.config(text=f"IT applied ({it:.2f} ms)",
-                                  foreground="green")
-            except Exception as exc:
-                messagebox.showerror("Apply IT", str(exc))
+            with app.acq.hold("Apply IT") as acquired:
+                if not acquired:
+                    messagebox.showwarning("Apply IT", app.acq.busy_reason() or "Spectrometer is busy.")
+                    return
+                try:
+                    app.spec.set_it(it)
+                    val_status.config(text=f"IT applied ({it:.2f} ms)",
+                                      foreground=Colors.SUCCESS)
+                except Exception as exc:
+                    messagebox.showerror("Apply IT", str(exc))
 
     def _reset_zoom():
         app._check_res_locked = False
 
     def _start():
-        if not app.spec:
-            messagebox.showwarning("Spectrometer", "Not connected.")
-            return
         if app.check_res_running.is_set():
             return
-        # Make sure other live loops aren't fighting for the spectrometer.
-        if getattr(app, "live_running", None) and app.live_running.is_set():
-            messagebox.showwarning(
-                "Check Resolution",
-                "Live View is running. Stop it first.",
-            )
+        if not app.claim_spectrometer("Check Resolution"):
             return
         try:
             it = _read_it_entry()
             app.spec.set_it(it)
         except Exception as exc:
+            app.release_spectrometer("Check Resolution")
             messagebox.showerror("Start", str(exc))
             return
 
         app.check_res_running.set()
-        val_status.config(text="Running…", foreground="green")
-        threading.Thread(target=_loop, daemon=True).start()
+        val_status.config(text="Running…", foreground=Colors.SUCCESS)
+        threading.Thread(target=_loop, daemon=True, name="check-resolution").start()
 
     def _stop():
         app.check_res_running.clear()
-        val_status.config(text="Stopped", foreground="gray")
+        app.request_spectrometer_stop()
+        val_status.config(text="Stopped", foreground=Colors.TEXT_MUTED)
 
     # ---------------- Acquisition loop ----------------
     def _blind_correct(spec, signal_mean, signal_std):
@@ -246,6 +256,13 @@ def build(app):
         return sig, unc
 
     def _loop():
+        try:
+            _loop_body()
+        finally:
+            app.check_res_running.clear()
+            app.release_spectrometer("Check Resolution")
+
+    def _loop_body():
         last_t = time.time()
         ema_dt = None
         while app.check_res_running.is_set():
@@ -261,6 +278,8 @@ def build(app):
 
                 app.spec.measure(ncy=1)
                 app.spec.wait_for_measurement()
+                if not app.check_res_running.is_set():
+                    break
 
                 rcm = np.asarray(getattr(app.spec, "rcm", []), dtype=float)
                 rcs = np.asarray(getattr(app.spec, "rcs", []), dtype=float)
@@ -321,71 +340,66 @@ def build(app):
                     "shape": float(a[3]), "rms": float(rms),
                     "fit_err": int(fit_err), "fps": fps,
                 }
-                app._check_res_pending_plot = snapshot
-                _schedule_redraw()
+                redraw.submit(snapshot)
 
             except Exception as exc:
                 LOGGER.exception("Check Resolution loop error")
-                app.after(0, lambda e=exc: val_status.config(
-                    text=f"Error: {e}", foreground="red"))
+                app.pump.post(val_status.config, {"text": f"Error: {exc}", "foreground": "red"})
                 break
             time.sleep(_FRAME_PAUSE_S)
 
-        app.after(0, lambda: val_status.config(text="Stopped",
-                                               foreground="gray"))
+        app.pump.post(val_status.config, {"text": "Stopped", "foreground": "gray"})
 
-    def _schedule_redraw():
-        if app._check_res_redraw_id is not None:
-            return
+    _title_cache = {"text": None}
 
-        def _do():
-            app._check_res_redraw_id = None
-            snap = app._check_res_pending_plot
-            if snap is None:
-                return
+    def _render_snapshot(snap):
+        """Main thread: push the newest fit snapshot into the existing artists."""
+        line_signal.set_data(snap["pix"], snap["norm"])
+        line_bg.set_data(snap["x_bg"], snap["y_bg"])
+        line_fitpts.set_data(snap["x_fitpts"], snap["y_fitpts"])
+        line_fit_curve.set_data(snap["x_curve"], snap["y_curve"])
 
-            line_signal.set_data(snap["pix"], snap["norm"])
-            line_bg.set_data(snap["x_bg"], snap["y_bg"])
-            line_fitpts.set_data(snap["x_fitpts"], snap["y_fitpts"])
-            line_fit_curve.set_data(snap["x_curve"], snap["y_curve"])
+        if not app._check_res_locked:
+            # Default zoom: tight on the windowed pixels.
+            if snap["x_fitpts"].size:
+                x_min = float(np.min(snap["x_fitpts"]))
+                x_max = float(np.max(snap["x_fitpts"]))
+                span = max(x_max - x_min, 1.0)
+                pad = max(2.0, span * 0.05)
+                ax.set_xlim(x_min - pad, x_max + pad)
+                y_min = -0.05
+                y_max = 1.15
+                ax.set_ylim(y_min, y_max)
 
-            if not app._check_res_locked:
-                # Default zoom: tight on the windowed pixels.
-                if snap["x_fitpts"].size:
-                    x_min = float(np.min(snap["x_fitpts"]))
-                    x_max = float(np.max(snap["x_fitpts"]))
-                    span = max(x_max - x_min, 1.0)
-                    pad = max(2.0, span * 0.05)
-                    ax.set_xlim(x_min - pad, x_max + pad)
-                    y_min = -0.05
-                    y_max = 1.15
-                    ax.set_ylim(y_min, y_max)
+        err = snap["fit_err"]
+        err_tag = ""
+        if err == 1:
+            err_tag = " >maxfun!"
+        elif err == 2:
+            err_tag = " >maxiter!"
+        title = (
+            f"Check Resolution — CEN={snap['xcen']:.2f}, "
+            f"w={snap['resolfit']:.2f}, n={snap['shape']:.2f}, "
+            f"rms={snap['rms']:.4f}{err_tag}"
+        )
+        if title != _title_cache["text"]:
+            ax.set_title(title, fontsize=11)
+            _title_cache["text"] = title
 
-            err = snap["fit_err"]
-            err_tag = ""
-            if err == 1:
-                err_tag = " >maxfun!"
-            elif err == 2:
-                err_tag = " >maxiter!"
-            ax.set_title(
-                f"Check Resolution — CEN={snap['xcen']:.2f}, "
-                f"w={snap['resolfit']:.2f}, n={snap['shape']:.2f}, "
-                f"rms={snap['rms']:.4f}{err_tag}",
-                fontsize=11,
-            )
+        val_cen.config(text=f"{snap['xcen']:.3f}")
+        val_width.config(text=f"{snap['resolfit']:.3f}")
+        val_shape.config(text=f"{snap['shape']:.3f}")
+        val_rms.config(text=f"{snap['rms']:.5f}")
+        val_indm.config(text=str(snap["indm"]))
+        val_peak.config(text=f"{snap['peak']:.0f}")
+        val_fps.config(text=f"{snap['fps']:.1f} Hz")
 
-            val_cen.config(text=f"{snap['xcen']:.3f}")
-            val_width.config(text=f"{snap['resolfit']:.3f}")
-            val_shape.config(text=f"{snap['shape']:.3f}")
-            val_rms.config(text=f"{snap['rms']:.5f}")
-            val_indm.config(text=str(snap["indm"]))
-            val_peak.config(text=f"{snap['peak']:.0f}")
-            val_fps.config(text=f"{snap['fps']:.1f} Hz")
-
-            if getattr(app, "_is_tab_visible", lambda _w: True)(app.check_res_tab):
-                canvas.draw_idle()
-
-        app._check_res_redraw_id = app.after(33, _do)
+    redraw = ThrottledRedraw(
+        app.pump,
+        _render_snapshot,
+        draw=canvas.draw_idle,
+        visible=lambda: app._is_tab_visible(app.check_res_tab),
+    )
 
     # Stop streaming if the tab/window is destroyed.
     def _on_destroy(_event=None):

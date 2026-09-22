@@ -1,6 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "gui: needs a Tk-capable interpreter and a display; self-skips otherwise",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
@@ -21,6 +24,8 @@ select = ["E", "F", "W", "B006", "B008"]
 ignore = [
     "E501",  # line length handled loosely in the large vendor-facing drivers
     "E402",  # imports after sys.path manipulation in tests/tools
+    "E701",  # legacy one-line `if x: y` in the setup tab / drivers (cosmetic)
+    "E702",  # legacy `a; b` one-liners (cosmetic)
     "E731",  # lambda assignments are used deliberately for Tk callbacks
     "E741",  # ambiguous variable names in the scientific code (l, I) are conventional there
 ]

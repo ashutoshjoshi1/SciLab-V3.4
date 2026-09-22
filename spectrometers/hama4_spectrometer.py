@@ -7,7 +7,7 @@ import platform
 import numpy as np
 from time import sleep
 from copy import deepcopy
-from spec_xfus import spec_clock, calc_msl, split_cycles
+from spec_xfus import spec_clock, calc_msl, split_cycles, measurement_timeout_s
 
 if sys.version_info[0] < 3:
     # Python 2.x
@@ -408,7 +408,7 @@ class Hama4_Spectrometer(object):
         The actual work is done by the data_arrival_watchdog / measure_blocking.
         """
         self.measuring = True
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch = True
         self.error = "OK"
 
@@ -560,7 +560,7 @@ class Hama4_Spectrometer(object):
         self.measuring = True
 
         _ = self.abort(ignore_errors=True)
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch = True
         self.ncy_requested = ncy
         self.reset_spec_data()
@@ -641,8 +641,8 @@ class Hama4_Spectrometer(object):
             self.arrival_times.append(spec_clock.now())
             for i in range(ncy_pack):
                 self.ncy_read += 1
-                issat = self.handle_cycle_data(self.ncy_read, rc[i, :], [], [])
-                if issat and self.abort_on_saturation:
+                issat, data_ok = self.handle_cycle_data(self.ncy_read, rc[i, :], [], [])
+                if (issat and self.abort_on_saturation) or not data_ok:
                     self.logger.info("Measurement aborted due to saturation in cycle " +
                                      str(self.ncy_read) + "/" + str(self.ncy_requested))
                     self.measurement_done()
@@ -660,7 +660,7 @@ class Hama4_Spectrometer(object):
                 return "OK"
 
             # Wait for a frame
-            x_data, y_data = self._wait_and_get_frame()
+            _x_unused, y_data = self._wait_and_get_frame(want_x=False)
             arrival_time = spec_clock.now()
 
             if y_data is None:
@@ -678,8 +678,8 @@ class Hama4_Spectrometer(object):
             if self.debug_mode > 2:
                 self.logger.debug("Data arrived for cycle " + str(self.ncy_read))
 
-            issat = self.handle_cycle_data(self.ncy_read, y_data.astype(np.float64), [], [])
-            if issat and self.abort_on_saturation:
+            issat, data_ok = self.handle_cycle_data(self.ncy_read, y_data.astype(np.float64), [], [])
+            if (issat and self.abort_on_saturation) or not data_ok:
                 self.logger.info("Measurement aborted due to saturation in cycle " +
                                  str(self.ncy_read) + "/" + str(self.ncy_requested))
                 self.measurement_done()
@@ -691,9 +691,41 @@ class Hama4_Spectrometer(object):
 
         return "OK"
 
-    def wait_for_measurement(self):
-        """Block until the current measurement is fully handled."""
-        self.internal_meas_done_event.wait()
+    def request_stop(self):
+        """Stop on behalf of the operator (UI Stop button) and wake any thread blocked in
+        wait_for_measurement() right away, without waiting for the DLL callback.
+
+        Unlike ``abort()``, which is also used internally on saturation, this marks the
+        measurement as stopped so callers do not consume stale data.
+        """
+        self._stop_requested = True
+        res = self.abort(ignore_errors=True)
+        self.internal_meas_done_event.set()
+        return res
+
+    def wait_for_measurement(self, timeout=None):
+        """Block until the current measurement is fully handled.
+
+        ``timeout`` defaults to twice the expected duration plus a margin
+        (see spec_xfus.measurement_timeout_s). On timeout the measurement is
+        aborted and an error string is returned, so a stalled watchdog thread
+        can never hang the caller forever.
+        """
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested, self.it_ms)
+        if not self.internal_meas_done_event.wait(timeout):
+            self.error = ("Timeout after %.1f s waiting for measurement of spec %s (ncy=%s, IT=%s ms)"
+                          % (timeout, self.alias, self.ncy_requested, self.it_ms))
+            self.logger.error(self.error)
+            try:
+                self.abort(ignore_errors=True)
+            except Exception:
+                self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
+            self.internal_meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
     # ===================================================================
@@ -1173,7 +1205,7 @@ class Hama4_Spectrometer(object):
             pass
         self.is_streaming = False
 
-    def _wait_and_get_frame(self, timeout_ms=None):
+    def _wait_and_get_frame(self, timeout_ms=None, want_x=True):
         """
         Wait for the next frame and return (x_array, y_array) as numpy arrays.
         Returns (None, None) on timeout / error.
@@ -1222,10 +1254,12 @@ class Hama4_Spectrometer(object):
         x_ctype = _HIAS_DATA_TYPES.get(xy.x_type, ctypes.c_double)
         y_ctype = _HIAS_DATA_TYPES.get(xy.y_type, ctypes.c_double)
 
-        x_buf = ctypes.cast(xy.buffer_x, ctypes.POINTER(x_ctype * num_pixels))
         y_buf = ctypes.cast(xy.buffer_y, ctypes.POINTER(y_ctype * num_pixels))
-
-        return np.array(x_buf.contents, dtype=np.float64), np.array(y_buf.contents, dtype=np.float64)
+        y_data = np.array(y_buf.contents, dtype=np.float64)
+        if not want_x:
+            return None, y_data  # the acquisition loop discards X; skip the second 16 KB copy per frame
+        x_buf = ctypes.cast(xy.buffer_x, ctypes.POINTER(x_ctype * num_pixels))
+        return np.array(x_buf.contents, dtype=np.float64), y_data
 
     def _close_device(self, ignore_errors=False):
         """Free buffer, close device handle."""
@@ -1342,10 +1376,15 @@ class Hama4_Spectrometer(object):
             elif not self.docatch:
                 continue
             else:
-                issat = self.handle_cycle_data(ncy_read, rc, rc_blind_left, rc_blind_right)
-                if issat and self.abort_on_saturation:
-                    self.logger.info("data_handling_watchdog, saturation detected in spec " + self.alias +
-                                     ", ncy=" + str(ncy_read) + "/" + str(self.ncy_requested))
+                issat, data_ok = self.handle_cycle_data(ncy_read, rc, rc_blind_left, rc_blind_right)
+                if (issat and self.abort_on_saturation) or not data_ok:
+                    if issat:
+                        self.logger.info("data_handling_watchdog, saturation detected in spec " + self.alias +
+                                         ", ncy=" + str(ncy_read) + "/" + str(self.ncy_requested))
+                    if not data_ok:
+                        self.logger.warning("data_handling_watchdog, data not consistent in spec " + self.alias +
+                                            ", ncy=" + str(ncy_read) + "/" + str(self.ncy_requested) +
+                                            ". Aborting due to inconsistent data (as if it were saturated)")
                     self.docatch = False
                     while not self.read_data_queue.empty():
                         sleep(0.1)
@@ -1377,24 +1416,27 @@ class Hama4_Spectrometer(object):
         rcmax = rc.max()
         rcmin = rc.min()
 
+        # Negative values are only warned about: HiasApi frames may be
+        # background-corrected, so a negative count is not proof of a bad frame.
         if rcmin < 0:
             self.logger.warning("handle_cycle_data, negative counts detected!")
-        if np.isnan(rcmax) or np.isnan(rcmin):
+        data_ok = not (np.isnan(rcmax) or np.isnan(rcmin))
+        if not data_ok:
             self.logger.warning("handle_cycle_data, NaN counts detected!")
 
         issat = rcmax >= self.eff_saturation_limit
         if issat and self.abort_on_saturation:
-            return issat
+            return issat, data_ok
 
         # Accumulate
-        self.sy  = self.sy + rc
-        self.syy = self.syy + rc ** 2
-        self.sxy = self.sxy + cycle_index * rc
+        self.sy += rc
+        self.syy += rc * rc
+        self.sxy += cycle_index * rc
         self.ncy_handled += 1
         if issat:
             self.ncy_saturated += 1
 
-        return issat
+        return issat, data_ok
 
     def measurement_done(self):
         """Final actions when a measurement is complete."""
@@ -1597,7 +1639,7 @@ if __name__ == "__main__":
         SP[i].alias = str(i + 1)
 
         if instr == "TestBench":
-            SP[i].sn = "725YA001" 
+            SP[i].sn = "725YA001"
             SP[i].npix_active = 256
             SP[i].min_it_ms = 0.005
             SP[i].performance_test_it_ms_list = np.arange(0.05, 10.1, 1.0)

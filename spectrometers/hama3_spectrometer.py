@@ -1,12 +1,14 @@
 import logging
-from ctypes import windll, byref, c_int, c_uint, c_uint32, c_ushort, c_ubyte, c_bool, create_string_buffer
+from ctypes import byref, c_int, c_uint, c_uint32, c_ushort, c_ubyte, c_bool, create_string_buffer
+from spectrometers._winapi import windll  # importable on every OS; fails on first use off Windows
 from time import sleep
 import numpy as np
 import platform
 import threading
-import os, sys
+import os
+import sys
 from copy import deepcopy
-from spec_xfus import spec_clock, calc_msl, split_cycles
+from spec_xfus import spec_clock, calc_msl, split_cycles, measurement_timeout_s
 from datetime import datetime
 from collections import OrderedDict
 
@@ -203,7 +205,7 @@ class Hama3_Spectrometer():
 
             #Load the spectrometer control dll:
             res=self.load_spec_dll() #This will be only needed at initial connection.
-            
+
             #Initialize dll
             if res=="OK":
                 res=self.initialize_dll() #AVS_Init()
@@ -505,7 +507,7 @@ class Hama3_Spectrometer():
         This can be much simpler, but in this way we ensure the spec is already measuring the next cycle while
         we are handling the data of the previous cycle.
         """
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.measuring=True
         self.docatch=True
         self.error="OK" #Reset last error
@@ -743,7 +745,7 @@ class Hama3_Spectrometer():
 
         # Abort any ongoing measurement
         _ = self.abort(ignore_errors=True,log=False)
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.measuring = True
         self.docatch = True
         self.ncy_requested = ncy
@@ -776,9 +778,10 @@ class Hama3_Spectrometer():
                         self.logger.debug("Data arrived for measurement call "+str(call_index+1)+"/"+str(ncalls)+", ncy_pack="+str(ncy_pack))
 
                     #Enqueue data into the data_handling_queue
+                    #One memcpy of the DLL buffer (a deepcopy of a ctypes array pickles it element by element).
                     self.handle_data_queue.put((call_index, #measurement index
                                                 arrival_time, #arrival_time,
-                                                (deepcopy(raw_data), [], []))) # a deepcopy of the raw data (active pixels, blind left, blind right).
+                                                (np.ctypeslib.as_array(raw_data).copy(), [], []))) # copy of the raw data (active pixels, blind left, blind right).
                     break # -> Quit the attempts loop; move to next call (pack of cycles) or finish with res="OK".
                 else: #Error happened while measuring the pack, or the measurement was aborted while waiting for data
                     if not self.docatch:
@@ -818,14 +821,46 @@ class Hama3_Spectrometer():
 
         return res
 
-    def wait_for_measurement(self):
+    def request_stop(self):
         """
-        res=wait_for_measurement()
-        Wait until all data read is already handled.
+        res=request_stop()
+        Stop the ongoing measurement on behalf of the operator (UI Stop button) and wake up any thread
+        blocked in wait_for_measurement() right away, without waiting for the DLL callback.
+        Unlike abort(), which is also used internally (saturation), this marks the measurement as
+        stopped so callers do not consume stale data.
+        returns:
+            <res>: "OK" or an error description from abort()
+        """
+        self._stop_requested=True
+        res=self.abort(ignore_errors=True)
+        self.internal_meas_done_event.set()
+        return res
+
+    def wait_for_measurement(self, timeout=None):
+        """
+        res=wait_for_measurement(timeout=None)
+        Wait until all data read is already handled, or until <timeout> seconds elapse
+        (default: twice the expected duration plus a margin, see spec_xfus.measurement_timeout_s).
+        On timeout the measurement is aborted and an error is returned, so a stalled watchdog
+        thread can never hang the caller forever.
         returns:
             <res>: If any problem happened while measuring, the last produced error will be stored in self.error
         """
-        self.internal_meas_done_event.wait()
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested, self.it_ms)
+        if not self.internal_meas_done_event.wait(timeout):
+            self.error = ("Timeout after %.1f s waiting for measurement of spec %s (ncy=%s, IT=%s ms)"
+                          % (timeout, self.alias, self.ncy_requested, self.it_ms))
+            self.logger.error(self.error)
+            try:
+                self.abort(ignore_errors=True)
+            except Exception:
+                self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
+            self.internal_meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
     def initialize_dll(self):
@@ -1267,8 +1302,12 @@ class Hama3_Spectrometer():
         _ = self.abort(ignore_errors=True,log=False,disable_docatch=False) #This is in theory not needed,
         # but if it is not here then the wait function returns a timeout error every X calls.
 
-        # Prepare buffer for actual measurement
-        meas_buff = (c_ushort * npix_pack)() #C array of WORD (c_ushort in Python)
+        # Prepare buffer for actual measurement. The buffer is reused between packs of the same
+        # size (the data is copied out before it is queued), avoiding a zeroed 400 KB allocation per pack.
+        meas_buff = getattr(self, "_meas_buff_cache", None)
+        if meas_buff is None or len(meas_buff) != npix_pack:
+            meas_buff = (c_ushort * npix_pack)() #C array of WORD (c_ushort in Python)
+            self._meas_buff_cache = meas_buff
         meas_buff_len_bytes = c_uint(npix_pack * 2)  # 2 bytes per pixel
 
         # Start measurement
@@ -1297,7 +1336,9 @@ class Hama3_Spectrometer():
                 res="Error happen while waiting for data, "+res+"."
                 return res, None, None
             elif status == 1:  # Still measuring
-                sleep((self.it_ms/10.0) / 1000.0)  # Wait 10% of the integration time, ie 10ms if IT=100ms
+                # Wait ~10% of the integration time between polls, clamped to [2 ms, 50 ms]: at IT=0.2 ms the
+                # unclamped 20 us sleep was a GIL-hogging busy-wait, at IT=3000 ms it added 300 ms of dead latency.
+                sleep(min(0.05, max(0.002, (self.it_ms/10.0) / 1000.0)))
 
     def data_arrival_watchdog(self):
         """
@@ -1456,9 +1497,9 @@ class Hama3_Spectrometer():
         else: #Continue even if saturation is detected:
 
             #Add cycle data to accumulated data for active pixels:
-            self.sy=self.sy+rc
-            self.syy=self.syy+rc**2
-            self.sxy=self.sxy+cycle_index*rc
+            self.sy+=rc
+            self.syy+=rc*rc
+            self.sxy+=cycle_index*rc
 
             # #Do the same for blind pixels (if any):
             # if len(rc_blind_left)>0:
@@ -1468,9 +1509,9 @@ class Hama3_Spectrometer():
             #     if self.discriminator_factor!=1:
             #         rc_blind_left=rc_blind_left*float(self.discriminator_factor)
             #     #Add data to accumulated data:
-            #     self.sy_blind_left=self.sy_blind_left+rc_blind_left
-            #     self.syy_blind_left=self.syy_blind_left+rc_blind_left**2
-            #     self.sxy_blind_left=self.sxy_blind_left+cycle_index*rc_blind_left
+            #     self.sy_blind_left+=rc_blind_left
+            #     self.syy_blind_left+=rc_blind_left*rc_blind_left
+            #     self.sxy_blind_left+=cycle_index*rc_blind_left
             #
             # if len(rc_blind_right)>0:
             #     #Convert to float64
@@ -1479,9 +1520,9 @@ class Hama3_Spectrometer():
             #     if self.discriminator_factor!=1:
             #         rc_blind_right=rc_blind_right*float(self.discriminator_factor)
             #     #Add data to accumulated data:
-            #     self.sy_blind_right=self.sy_blind_right+rc_blind_right
-            #     self.syy_blind_right=self.syy_blind_right+rc_blind_right**2
-            #     self.sxy_blind_right=self.sxy_blind_right+cycle_index*rc_blind_right
+            #     self.sy_blind_right+=rc_blind_right
+            #     self.syy_blind_right+=rc_blind_right*rc_blind_right
+            #     self.sxy_blind_right+=cycle_index*rc_blind_right
 
             self.ncy_handled+=1
             if issat:
@@ -1493,8 +1534,9 @@ class Hama3_Spectrometer():
         """
         Final actions to be done when a measurement is complete.
         """
-        self.meas_end_time=self.arrival_times[-1] #Unix Time in which the spectrometer indicated to the pc
-        # that the last cycle (pack of cycles) was finished, and it was ready to be read.
+        #Unix Time in which the spectrometer indicated to the pc that the last cycle (pack of cycles) was
+        # finished, and it was ready to be read. (Guarded: an aborted run may have handled no cycles at all.)
+        self.meas_end_time=self.arrival_times[-1] if len(self.arrival_times)>0 else spec_clock.now()
         #Calculate mean, standard deviation and rms to a fitted straight line (for active pixels):
         x=np.arange(self.ncy_handled)
         res,self.rcm,self.rcs,self.rcl=calc_msl(self.alias,x,self.sxy,self.sy,self.syy)

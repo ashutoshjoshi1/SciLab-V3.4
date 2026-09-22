@@ -18,8 +18,6 @@ class MeasurementOrchestratorConfig:
     target_mid: float
     it_min: float
     it_max: float
-    it_step_up: float
-    it_step_down: float
     max_it_adjust_iters: int
     sat_thresh: float
     n_sig: int
@@ -34,6 +32,19 @@ class MeasurementOrchestratorConfig:
     cube_stabilize_delay_s: float = 3.0
     dark_delay_s: float = 0.3
     nm640_warmup_delay_s: float = 1.0
+    # Auto-IT controller: back off by this factor while the detector is saturated
+    # (a clipped frame carries no amplitude information), and stop iterating once a
+    # proposed change is smaller than this relative amount.
+    saturation_backoff: float = 0.7
+    it_convergence_rel: float = 0.005
+    max_nonfinite_frames: int = 3
+    # --- Bench-validated speed options (default = v3.3 behaviour) ---------------
+    # Turn off only the source that is lit instead of sending all_off() before
+    # every laser (saves ~1-2 s of serial sleeps per source).
+    smart_source_off: bool = False
+    # Arm the CUBE (EXT/CW/P, no emission) while the previous source's dark is
+    # being acquired, so only L=1 + settle remains when 377 nm starts.
+    cube_prearm: bool = False
 
 
 @dataclass
@@ -44,6 +55,8 @@ class MeasurementOrchestratorCallbacks:
     measurement_completed: Callable[[str], None] = lambda *_args, **_kwargs: None
     countdown: Callable[[int, str, str], None] = lambda *_args, **_kwargs: None
     error_handler: Callable[[str, Exception], None] = lambda *_args, **_kwargs: None
+    # (tag, index, total) just before a source is measured: drives the progress bar.
+    source_started: Callable[[str, int, int], None] = lambda *_args, **_kwargs: None
 
 
 class MeasurementOrchestrator:
@@ -65,6 +78,8 @@ class MeasurementOrchestrator:
         self.callbacks = callbacks
         self.it_history = it_history if it_history is not None else []
         self.sleep = sleep_fn
+        self._lit_source: Optional[str] = None
+        self._cube_armed = False
 
     def run(
         self,
@@ -79,6 +94,8 @@ class MeasurementOrchestrator:
         self.callbacks.prepare_devices()
         self.lasers.open_all()
         self._turn_all_sources_off()
+        self._lit_source = None
+        self._cube_armed = False
 
         try:
             main_tags = [tag for tag in laser_tags if tag != "640"]
@@ -87,20 +104,27 @@ class MeasurementOrchestrator:
             else:
                 trailing_640 = []
 
-            for tag in [*main_tags, *trailing_640]:
+            sequence = [str(tag) for tag in [*main_tags, *trailing_640]]
+            for index, tag in enumerate(sequence):
                 if not continue_run():
                     result.stopped_early = True
                     break
 
+                next_tag = sequence[index + 1] if index + 1 < len(sequence) else None
+                self.callbacks.source_started(tag, index + 1, len(sequence))
                 try:
                     completed = (
                         self._run_640_measurement(continue_run)
                         if tag == "640"
-                        else self._run_single_measurement(str(tag), start_it_override, continue_run)
+                        else self._run_single_measurement(tag, start_it_override, continue_run, next_tag=next_tag)
                     )
                     if completed:
                         result.completed_tags.append(str(tag))
                 except Exception as exc:
+                    if not continue_run():
+                        # The operator pressed Stop mid-capture: not an error worth a dialog.
+                        result.stopped_early = True
+                        break
                     result.errors.append(f"{tag}: {exc}")
                     self.callbacks.error_handler(f"Measurement {tag}", exc)
         finally:
@@ -113,7 +137,17 @@ class MeasurementOrchestrator:
         if isinstance(result, str) and result and result != "OK":
             raise RuntimeError(f"{action} failed: {result}")
 
+    def _turn_off_before(self, tag: str) -> None:
+        """Make sure nothing else is lit before ``tag`` is switched on."""
+        if self.config.smart_source_off:
+            lit = self._lit_source
+            if lit is not None and lit != tag:
+                self._ensure_source_state(lit, False)
+            return
+        self._turn_all_sources_off()
+
     def _turn_all_sources_off(self) -> None:
+        self._lit_source = None
         if hasattr(self.lasers, "all_off"):
             self.lasers.all_off()
             return
@@ -134,6 +168,10 @@ class MeasurementOrchestrator:
         except Exception:
             pass
 
+    def _cube_power_mw(self) -> float:
+        value = float(self.callbacks.power_lookup("377"))
+        return value * 1000.0 if value <= 0.3 else value
+
     def _ensure_source_state(self, tag: str, turn_on: bool) -> None:
         self.lasers.ensure_open_for_tag(tag)
         obis_map = getattr(self.lasers, "OBIS_MAP", {})
@@ -145,18 +183,16 @@ class MeasurementOrchestrator:
                 self.lasers.obis_on(channel)
             else:
                 self.lasers.obis_off(channel)
-            return
-
-        if tag == "377":
+        elif tag == "377":
             if turn_on:
-                value = float(self.callbacks.power_lookup(tag))
-                mw = value * 1000.0 if value <= 0.3 else value
-                self.lasers.cube_on(power_mw=mw)
+                if self.config.cube_prearm and self._cube_armed and hasattr(self.lasers, "cube_emit"):
+                    self.lasers.cube_emit()
+                else:
+                    self.lasers.cube_on(power_mw=self._cube_power_mw())
+                    self._cube_armed = True
             else:
                 self.lasers.cube_off()
-            return
-
-        if tag in self.config.relay_channel_map:
+        elif tag in self.config.relay_channel_map:
             relay_number = int(self.config.relay_channel_map[tag])
             if turn_on:
                 if tag == "Hg_Ar":
@@ -168,12 +204,45 @@ class MeasurementOrchestrator:
                 self.lasers.relay_on(relay_number)
             else:
                 self.lasers.relay_off(relay_number)
-            return
+        else:
+            raise RuntimeError(f"Unsupported measurement tag '{tag}'.")
 
-        raise RuntimeError(f"Unsupported measurement tag '{tag}'.")
+        if turn_on:
+            self._lit_source = tag
+        elif self._lit_source == tag:
+            self._lit_source = None
+
+    def _prearm_cube_if_next(self, next_tag: Optional[str]) -> None:
+        """Bench option: send the CUBE's EXT/CW/P setup (no emission) during a dark capture."""
+        if not self.config.cube_prearm or next_tag != "377" or self._cube_armed:
+            return
+        if not hasattr(self.lasers, "cube_arm"):
+            return
+        try:
+            self.lasers.ensure_open_for_tag("377")
+            self.lasers.cube_arm(power_mw=self._cube_power_mw())
+            self._cube_armed = True
+        except Exception as exc:
+            self.callbacks.error_handler("CUBE pre-arm", exc)
+
+    def _apply_it(self, it_ms: float) -> None:
+        """Send set_it only when the value actually changes.
+
+        Signal and dark captures reuse the settled auto-IT value, so this removes
+        two DLL round trips per source (on Hama4 each set_it also stops and
+        restarts the stream with a fixed 0.2 s pause).
+        """
+        current = getattr(self.spec, "it_ms", None)
+        try:
+            unchanged = current is not None and abs(float(current) - float(it_ms)) <= 1e-9
+        except (TypeError, ValueError):
+            unchanged = False
+        if unchanged:
+            return
+        self._check_backend_call(self.spec.set_it(it_ms), "set_it")
 
     def _capture_counts(self, it_ms: float, num_cycles: int) -> np.ndarray:
-        self._check_backend_call(self.spec.set_it(it_ms), "set_it")
+        self._apply_it(it_ms)
         self._check_backend_call(self.spec.measure(ncy=num_cycles), "measure")
         self._check_backend_call(self.spec.wait_for_measurement(), "wait_for_measurement")
         raw = getattr(self.spec, "rcm", None)
@@ -184,39 +253,56 @@ class MeasurementOrchestrator:
             raise RuntimeError("Spectrometer returned an empty or invalid measurement frame.")
         return counts
 
+    def _clamp_it(self, it_ms: float) -> float:
+        return max(self.config.it_min, min(self.config.it_max, float(it_ms)))
+
     def _auto_adjust_it(self, start_it: float, tag: str, should_continue: Callable[[], bool]) -> tuple[float, float]:
-        it_ms = max(self.config.it_min, min(self.config.it_max, float(start_it)))
+        """Find the integration time that puts the peak inside the target band.
+
+        Detector counts scale linearly with integration time, so each unsaturated
+        frame lets us jump straight to ``it * target / peak``; a saturated frame
+        (which carries no amplitude information) backs off geometrically. This
+        converges in a handful of frames where the previous additive stepper
+        (+0.3 ms / -0.1 ms per frame) needed hundreds.
+        """
+        cfg = self.config
+        it_ms = self._clamp_it(start_it)
         peak = float("nan")
         self.it_history.clear()
+        nonfinite_frames = 0
 
-        iterations = 0
-        while iterations <= self.config.max_it_adjust_iters and should_continue():
+        for _ in range(max(1, cfg.max_it_adjust_iters) + 1):
+            if not should_continue():
+                break
             counts = self._capture_counts(it_ms, 1)
             peak = float(np.nanmax(counts))
             if not np.isfinite(peak):
-                iterations += 1
+                nonfinite_frames += 1
+                if nonfinite_frames >= cfg.max_nonfinite_frames:
+                    raise RuntimeError(f"{tag}: spectrometer returned {nonfinite_frames} non-finite frames during auto-IT")
                 continue
+            nonfinite_frames = 0
 
             self.it_history.append((it_ms, peak))
             self.callbacks.auto_it_update(tag, counts, it_ms, peak)
 
-            if peak >= self.config.sat_thresh:
-                it_ms = max(self.config.it_min, it_ms * 0.7)
-                iterations += 1
-                continue
-
-            if self.config.target_low <= peak <= self.config.target_high:
+            if cfg.target_low <= peak <= cfg.target_high:
                 return it_ms, peak
 
-            error = self.config.target_mid - peak
-            if error > 0:
-                delta = min(self.config.it_step_up, max(0.05, abs(error) / 5000.0))
-                it_ms = min(self.config.it_max, it_ms + delta)
+            if peak >= cfg.sat_thresh:
+                if it_ms <= cfg.it_min * (1.0 + 1e-9):
+                    raise RuntimeError(
+                        f"{tag}: detector saturates even at the minimum integration time ({cfg.it_min} ms); reduce the source power"
+                    )
+                proposed = it_ms * cfg.saturation_backoff
             else:
-                delta = min(self.config.it_step_down, max(0.05, abs(error) / 5000.0))
-                it_ms = max(self.config.it_min, it_ms - delta)
+                proposed = it_ms * (cfg.target_mid / max(peak, 1.0))
 
-            iterations += 1
+            proposed = self._clamp_it(proposed)
+            if abs(proposed - it_ms) <= cfg.it_convergence_rel * max(it_ms, 1e-9):
+                # Pinned against it_min/it_max: no further progress is possible.
+                return proposed, peak
+            it_ms = proposed
 
         return it_ms, peak
 
@@ -225,8 +311,9 @@ class MeasurementOrchestrator:
         tag: str,
         start_it_override: Optional[float],
         should_continue: Callable[[], bool],
+        next_tag: Optional[str] = None,
     ) -> bool:
-        self._turn_all_sources_off()
+        self._turn_off_before(tag)
         self._ensure_source_state(tag, True)
         self.sleep(self.config.cube_stabilize_delay_s if tag == "377" else self.config.source_delay_s)
 
@@ -248,6 +335,7 @@ class MeasurementOrchestrator:
             return False
 
         self.sleep(self.config.dark_delay_s)
+        self._prearm_cube_if_next(next_tag)
         dark = self._capture_counts(it_ms, self.config.n_dark)
 
         self.data.append_measurement(tag, it_ms, self.config.n_sig, signal)
@@ -260,6 +348,7 @@ class MeasurementOrchestrator:
             return False
 
         measurements_recorded = False
+        self._turn_off_before("640")
         self._ensure_source_state("640", True)
         self.sleep(self.config.nm640_warmup_delay_s)
 

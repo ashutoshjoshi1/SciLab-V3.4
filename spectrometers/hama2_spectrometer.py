@@ -3,7 +3,7 @@
 #directly (see the __main__ section at the end of the file).
 #Written by Daniel Santana
 
-from spec_xfus import spec_clock, calc_msl, split_cycles
+from spec_xfus import spec_clock, calc_msl, split_cycles, measurement_timeout_s
 import logging
 from ctypes import c_double
 
@@ -343,7 +343,7 @@ class Hama2_Spectrometer():
         we are handling the data of the previous cycle.
         """
         self.measuring=True
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch=True
         self.error="OK" #Reset last error
 
@@ -579,7 +579,7 @@ class Hama2_Spectrometer():
 
         #Abort any ongoing measurement
         _ = self.abort(ignore_errors=True)
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
 
         self.ncy_requested=ncy
         self.reset_spec_data() #reset accumulated data and measurements done/handled counters
@@ -667,8 +667,8 @@ class Hama2_Spectrometer():
             self.arrival_times.append(spec_clock.now()) #In this case there will be only 1 arrival time = time when pack of cycles arrived.
             for i in range(ncy_pack):
                 self.ncy_read += 1
-                issat = self.handle_cycle_data(self.ncy_read, rc[i,:], [], [])
-                if issat and self.abort_on_saturation:
+                issat, data_ok = self.handle_cycle_data(self.ncy_read, rc[i,:], [], [])
+                if (issat and self.abort_on_saturation) or not data_ok:
                     self.logger.info(
                         "Measurement aborted due to saturation in cycle " + str(self.ncy_read) + "/" + str(self.ncy_requested))
                     # Finish measurement
@@ -733,8 +733,8 @@ class Hama2_Spectrometer():
             if self.debug_mode > 2:
                 self.logger.debug("Data arrived for cycle " + str(i + 1) + "/" + str(ncy_pack))
             self.ncy_read += 1
-            issat = self.handle_cycle_data(self.ncy_read, rc_i, [], [])
-            if issat and self.abort_on_saturation:
+            issat, data_ok = self.handle_cycle_data(self.ncy_read, rc_i, [], [])
+            if (issat and self.abort_on_saturation) or not data_ok:
                 self.logger.info(
                     "Measurement aborted due to saturation in cycle " + str(self.ncy_read) + "/" + str(self.ncy_requested))
                 # Abort operation in the spectrometer, reset timeout timers.
@@ -761,7 +761,7 @@ class Hama2_Spectrometer():
 
         #Abort any ongoing measurement
         _ = self.abort(ignore_errors=True)
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch=True
 
         self.ncy_requested=ncy
@@ -851,15 +851,47 @@ class Hama2_Spectrometer():
         return res
 
 
-    def wait_for_measurement(self):
+    def request_stop(self):
         """
-        res=wait_for_measurement()
+        res=request_stop()
+        Stop the ongoing measurement on behalf of the operator (UI Stop button) and wake up any thread
+        blocked in wait_for_measurement() right away, without waiting for the DLL callback.
+        Unlike abort(), which is also used internally (saturation), this marks the measurement as
+        stopped so callers do not consume stale data.
+        returns:
+            <res>: "OK" or an error description from abort()
+        """
+        self._stop_requested=True
+        res=self.abort(ignore_errors=True)
+        self.internal_meas_done_event.set()
+        return res
+
+    def wait_for_measurement(self, timeout=None):
+        """
+        res=wait_for_measurement(timeout=None)
         Wait for the measurement to be complete
-        Blocking call function that will wait until all spectrometer read data is handled.
+        Blocking call function that will wait until all spectrometer read data is handled, or until
+        <timeout> seconds elapse (default: twice the expected duration plus a margin, see
+        spec_xfus.measurement_timeout_s). On timeout the measurement is aborted and an error is
+        returned, so a stalled watchdog thread can never hang the caller forever.
         returns:
             <res>: If any problem happened while measuring, the last produced error will be stored in self.error
         """
-        self.internal_meas_done_event.wait()
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested, self.it_ms)
+        if not self.internal_meas_done_event.wait(timeout):
+            self.error = ("Timeout after %.1f s waiting for measurement of spec %s (ncy=%s, IT=%s ms)"
+                          % (timeout, self.alias, self.ncy_requested, self.it_ms))
+            self.logger.error(self.error)
+            try:
+                self.abort(ignore_errors=True)
+            except Exception:
+                self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
+            self.internal_meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
     #---Auxiliary functions (used by the Main functions)---
@@ -1538,12 +1570,17 @@ class Hama2_Spectrometer():
             elif not self.docatch:
                 continue #Ignore any data arrival
             else: #Normal data arrival -> handle cycle data:
-                # Check for saturation
-                issat=self.handle_cycle_data(ncy_read,rc,rc_blind_left,rc_blind_right)
-                if issat and self.abort_on_saturation:
-                    self.logger.info("data_handling_watchdog, saturation detected in spec "+self.alias+
-                                     ", for nmeas read ="+str(ncy_read)+"/"+str(self.ncy_requested)+
-                                     ". Aborting due to saturation...")
+                # Check for saturation / inconsistent data
+                issat,data_ok=self.handle_cycle_data(ncy_read,rc,rc_blind_left,rc_blind_right)
+                if (issat and self.abort_on_saturation) or not data_ok:
+                    if issat:
+                        self.logger.info("data_handling_watchdog, saturation detected in spec "+self.alias+
+                                         ", for nmeas read ="+str(ncy_read)+"/"+str(self.ncy_requested)+
+                                         ". Aborting due to saturation...")
+                    if not data_ok:
+                        self.logger.warning("data_handling_watchdog, data not consistent in spec "+self.alias+
+                                            ", for nmeas read ="+str(ncy_read)+"/"+str(self.ncy_requested)+
+                                            ". Aborting due to inconsistent data (as if it were saturated)")
                     self.docatch=False #Ignore the data arrival events from now on.
 
                     #Wait until the current elements in the read_data_queue are processed:
@@ -1598,9 +1635,15 @@ class Hama2_Spectrometer():
             rc=rc*float(self.discriminator_factor)
         rcmax=rc.max()
         rcmin=rc.min()
-        #TODO: Check consistency of the data. (eg. all elements >0, no nans, etc.)
+        #Consistency check of the data (same contract as Ava1: negative or NaN counts are not usable).
         if rcmin<0:
             self.logger.warning("handle_cycle_data, negative counts detected in spec "+self.alias+" data.")
+            data_ok=False
+        elif np.isnan(rcmax) or np.isnan(rcmin):
+            self.logger.warning("handle_cycle_data, NaN counts detected in spec "+self.alias+" data.")
+            data_ok=False
+        else:
+            data_ok=True
 
         #Detect saturation:
         issat=rcmax>=self.eff_saturation_limit
@@ -1609,14 +1652,14 @@ class Hama2_Spectrometer():
             #No more cycles will be handled from now on.
             #This cycle data won't be used.
             #(in the accumulated data there won't be any saturated cycle)
-            return issat #-> Quit
+            return issat, data_ok #-> Quit
 
         else: #Continue even if saturation is detected:
 
             #Add cycle data to accumulated data for active pixels:
-            self.sy=self.sy+rc
-            self.syy=self.syy+rc**2
-            self.sxy=self.sxy+cycle_index*rc
+            self.sy+=rc
+            self.syy+=rc*rc
+            self.sxy+=cycle_index*rc
 
             #Do the same for blind pixels (if any):
             if len(rc_blind_left)>0:
@@ -1626,9 +1669,9 @@ class Hama2_Spectrometer():
                 if self.discriminator_factor!=1:
                     rc_blind_left=rc_blind_left*float(self.discriminator_factor)
                 #Add data to accumulated data:
-                self.sy_blind_left=self.sy_blind_left+rc_blind_left
-                self.syy_blind_left=self.syy_blind_left+rc_blind_left**2
-                self.sxy_blind_left=self.sxy_blind_left+cycle_index*rc_blind_left
+                self.sy_blind_left+=rc_blind_left
+                self.syy_blind_left+=rc_blind_left*rc_blind_left
+                self.sxy_blind_left+=cycle_index*rc_blind_left
 
             if len(rc_blind_right)>0:
                 #Convert to float64
@@ -1637,22 +1680,23 @@ class Hama2_Spectrometer():
                 if self.discriminator_factor!=1:
                     rc_blind_right=rc_blind_right*float(self.discriminator_factor)
                 #Add data to accumulated data:
-                self.sy_blind_right=self.sy_blind_right+rc_blind_right
-                self.syy_blind_right=self.syy_blind_right+rc_blind_right**2
-                self.sxy_blind_right=self.sxy_blind_right+cycle_index*rc_blind_right
+                self.sy_blind_right+=rc_blind_right
+                self.syy_blind_right+=rc_blind_right*rc_blind_right
+                self.sxy_blind_right+=cycle_index*rc_blind_right
 
             self.ncy_handled+=1
             if issat:
                 self.ncy_saturated+=1
 
-        return issat
+        return issat, data_ok
 
     def measurement_done(self):
         """
         Final actions to be done when a measurement is complete.
         """
-        self.meas_end_time=self.arrival_times[-1] #Unix Time in which the spectrometer indicated to the pc that
-        # that the last cycle was finished and it was ready to be read.
+        #Unix Time in which the spectrometer indicated to the pc that the last cycle was finished and it was
+        # ready to be read. (Guarded: an aborted run may have handled no cycles at all.)
+        self.meas_end_time=self.arrival_times[-1] if len(self.arrival_times)>0 else spec_clock.now()
         #Calculate mean, standard deviation and rms to a fitted straight line (for active pixels):
         x=np.arange(self.ncy_handled)
         _,self.rcm,self.rcs,self.rcl=calc_msl(self.alias,x,self.sxy,self.sy,self.syy)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import List
 
@@ -10,9 +9,18 @@ from matplotlib.figure import Figure
 from .models import AnalysisArtifact, CharacterizationComputation
 
 
+# 150 dpi keeps a 10x6 in figure at 1500x900 px (more than the 720x440 preview
+# and any report page needs) while rendering ~3x faster and ~5x smaller on disk
+# than the previous 300 dpi.
+SAVE_DPI = 150
+# The SDF matrix is npix x npix (2048 x 2048); the heatmap canvas is ~1500 px wide,
+# so drawing every 4th sample is visually identical and ~4x faster.
+HEATMAP_DOWNSAMPLE = 4
+
+
 def _save_figure(fig: Figure, path: Path, artifact_name: str) -> AnalysisArtifact:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    fig.savefig(path, dpi=SAVE_DPI, bbox_inches="tight")
     return AnalysisArtifact(name=artifact_name, path=str(path))
 
 
@@ -48,28 +56,29 @@ def render_characterization_artifacts(
             )
         )
 
-    fig_640 = Figure(figsize=(12, 6))
-    ax_640 = fig_640.add_subplot(111)
-    ax_640.set_xticks(np.arange(0, max(npix, 1), 100))
-    for spectrum in computation.corrected_640_spectra:
-        ax_640.plot(spectrum.values, label=f"{spectrum.label} @ {spectrum.integration_time_ms:.1f} ms")
-    ax_640.set_title(f"Spectrometer= {serial_number}: Dark-Corrected 640 nm Measurements")
-    ax_640.set_xlabel("Pixel Index")
-    ax_640.set_ylabel("Corrected Intensity")
-    ax_640.grid(True)
     if computation.corrected_640_spectra:
+        fig_640 = Figure(figsize=(12, 6))
+        ax_640 = fig_640.add_subplot(111)
+        ax_640.set_xticks(np.arange(0, max(npix, 1), 100))
+        for spectrum in computation.corrected_640_spectra:
+            ax_640.plot(spectrum.values, label=f"{spectrum.label} @ {spectrum.integration_time_ms:.1f} ms")
+        ax_640.set_title(f"Spectrometer= {serial_number}: Dark-Corrected 640 nm Measurements")
+        ax_640.set_xlabel("Pixel Index")
+        ax_640.set_ylabel("Corrected Intensity")
+        ax_640.grid(True)
         ax_640.legend()
-    artifacts.append(
-        _save_figure(
-            fig_640,
-            output_dir / f"OOR_640nm_Plot_{serial_number}_{timestamp}.png",
-            "640 nm Dark-Corrected",
+        artifacts.append(
+            _save_figure(
+                fig_640,
+                output_dir / f"OOR_640nm_Plot_{serial_number}_{timestamp}.png",
+                "640 nm Dark-Corrected",
+            )
         )
-    )
 
-    fig_hg = Figure(figsize=(14, 6))
-    ax_hg = fig_hg.add_subplot(111)
+    # Hg-Ar peaks: only when a lamp spectrum exists (a blank axes carries no information).
     if computation.hg_ar_peak_match.signal is not None:
+        fig_hg = Figure(figsize=(14, 6))
+        ax_hg = fig_hg.add_subplot(111)
         signal = computation.hg_ar_peak_match.signal
         pixels = np.arange(len(signal))
         ax_hg.set_yscale("log")
@@ -81,9 +90,10 @@ def render_characterization_artifacts(
             computation.hg_ar_peak_match.matched_pixels,
             computation.hg_ar_peak_match.matched_wavelengths_nm,
         ):
+            # Label just above the peak on the log axis (a multiplicative offset, not +2500 counts).
             ax_hg.text(
                 pixel_value,
-                signal[int(pixel_value)] + 2500,
+                signal[int(pixel_value)] * 1.15,
                 f"{wavelength_nm:.1f} nm",
                 rotation=0,
                 color="brown",
@@ -91,54 +101,63 @@ def render_characterization_artifacts(
                 ha="center",
                 va="bottom",
             )
-    ax_hg.set_xlabel("Pixel")
-    ax_hg.set_ylabel("Signal (Counts)")
-    ax_hg.set_title(f"Spectrometer= {serial_number}: Hg-Ar Lamp Spectrum with Detected Peaks")
-    if ax_hg.lines:
-        ax_hg.legend()
-    ax_hg.grid(True)
-    artifacts.append(
-        _save_figure(
-            fig_hg,
-            output_dir / f"HgAr_Peaks_Plot_{serial_number}_{timestamp}.png",
-            "Hg-Ar Peaks",
+        ax_hg.set_xlabel("Pixel")
+        ax_hg.set_ylabel("Signal (Counts)")
+        ax_hg.set_title(f"Spectrometer= {serial_number}: Hg-Ar Lamp Spectrum with Detected Peaks")
+        if ax_hg.lines:
+            ax_hg.legend()
+        ax_hg.grid(True)
+        artifacts.append(
+            _save_figure(
+                fig_hg,
+                output_dir / f"HgAr_Peaks_Plot_{serial_number}_{timestamp}.png",
+                "Hg-Ar Peaks",
+            )
         )
-    )
 
-    fig_sdf = Figure(figsize=(12, 6))
-    ax_sdf = fig_sdf.add_subplot(111)
-    ax_sdf.set_xlim(0, max(npix, 1))
-    ax_sdf.set_xticks(np.arange(0, max(npix, 1), 100))
-    for column in computation.sdf_reference_pixels:
-        ax_sdf.plot(computation.sdf_matrix[:, int(column)], label=f"{int(column)} pixel")
-    ax_sdf.set_xlabel("Pixels")
-    ax_sdf.set_ylabel("SDF Value")
-    ax_sdf.set_title(f"Spectrometer= {serial_number}: Spectral Distribution Function (SDF)")
-    ax_sdf.grid(True)
-    if computation.sdf_reference_pixels.size:
+    # SDF plots: only when at least one laser LSF populated the matrix.
+    if computation.sdf_reference_pixels.size and computation.sdf_matrix.size:
+        fig_sdf = Figure(figsize=(12, 6))
+        ax_sdf = fig_sdf.add_subplot(111)
+        ax_sdf.set_xlim(0, max(npix, 1))
+        ax_sdf.set_xticks(np.arange(0, max(npix, 1), 100))
+        for column in computation.sdf_reference_pixels:
+            ax_sdf.plot(computation.sdf_matrix[:, int(column)], label=f"{int(column)} pixel")
+        ax_sdf.set_xlabel("Pixels")
+        ax_sdf.set_ylabel("SDF Value")
+        ax_sdf.set_title(f"Spectrometer= {serial_number}: Spectral Distribution Function (SDF)")
+        ax_sdf.grid(True)
         ax_sdf.legend()
-    artifacts.append(
-        _save_figure(
-            fig_sdf,
-            output_dir / f"SDF_Plot_{serial_number}_{timestamp}.png",
-            "SDF",
+        artifacts.append(
+            _save_figure(
+                fig_sdf,
+                output_dir / f"SDF_Plot_{serial_number}_{timestamp}.png",
+                "SDF",
+            )
         )
-    )
 
-    fig_sdf_heat = Figure(figsize=(10, 6))
-    ax_heat = fig_sdf_heat.add_subplot(111)
-    image = ax_heat.imshow(computation.sdf_matrix, aspect="auto", cmap="coolwarm", origin="lower")
-    fig_sdf_heat.colorbar(image, ax=ax_heat, label="SDF Value")
-    ax_heat.set_xlabel("Pixels")
-    ax_heat.set_ylabel("Spectral Pixel Index")
-    ax_heat.set_title(f"Spectrometer= {serial_number}: SDF Matrix Heatmap")
-    artifacts.append(
-        _save_figure(
-            fig_sdf_heat,
-            output_dir / f"SDF_Heatmap_{serial_number}_{timestamp}.png",
-            "SDF Heatmap",
+        fig_sdf_heat = Figure(figsize=(10, 6))
+        ax_heat = fig_sdf_heat.add_subplot(111)
+        step = max(1, HEATMAP_DOWNSAMPLE)
+        heat = computation.sdf_matrix[::step, ::step]
+        image = ax_heat.imshow(
+            heat,
+            aspect="auto",
+            cmap="coolwarm",
+            origin="lower",
+            extent=(0, computation.sdf_matrix.shape[1], 0, computation.sdf_matrix.shape[0]),
         )
-    )
+        fig_sdf_heat.colorbar(image, ax=ax_heat, label="SDF Value")
+        ax_heat.set_xlabel("Pixels")
+        ax_heat.set_ylabel("Spectral Pixel Index")
+        ax_heat.set_title(f"Spectrometer= {serial_number}: SDF Matrix Heatmap")
+        artifacts.append(
+            _save_figure(
+                fig_sdf_heat,
+                output_dir / f"SDF_Heatmap_{serial_number}_{timestamp}.png",
+                "SDF Heatmap",
+            )
+        )
 
     if len(computation.dispersion_fit_pixels) >= 2:
         fig_disp = Figure(figsize=(14, 6))
@@ -359,31 +378,31 @@ def render_characterization_artifacts(
             )
         )
 
-    fig_lamp = Figure(figsize=(10, 6))
-    ax_lamp = fig_lamp.add_subplot(111)
-    for curve in computation.hg_ar_lamp_curves:
-        ax_lamp.plot(
-            curve.x_values_nm,
-            curve.y_values,
-            linewidth=2,
-            label=f"{curve.wavelength_nm:.1f} nm (FWHM={curve.fwhm_nm:.2f})",
-        )
-    ax_lamp.set_yscale("log")
-    ax_lamp.set_title(f"Spectrometer = {serial_number}: Normalized LSFs of Hg-Ar Lamp", fontsize=12, fontweight="bold")
-    ax_lamp.set_xlabel("Wavelength Offset from Peak (nm)", fontsize=10)
-    ax_lamp.set_ylabel("Normalized Intensity", fontsize=10)
-    ax_lamp.set_xlim(-7, 7)
-    ax_lamp.set_ylim(1e-4, 1.5)
-    ax_lamp.grid(True, alpha=0.3)
     if computation.hg_ar_lamp_curves:
+        fig_lamp = Figure(figsize=(10, 6))
+        ax_lamp = fig_lamp.add_subplot(111)
+        for curve in computation.hg_ar_lamp_curves:
+            ax_lamp.plot(
+                curve.x_values_nm,
+                curve.y_values,
+                linewidth=2,
+                label=f"{curve.wavelength_nm:.1f} nm (FWHM={curve.fwhm_nm:.2f})",
+            )
+        ax_lamp.set_yscale("log")
+        ax_lamp.set_title(f"Spectrometer = {serial_number}: Normalized LSFs of Hg-Ar Lamp", fontsize=12, fontweight="bold")
+        ax_lamp.set_xlabel("Wavelength Offset from Peak (nm)", fontsize=10)
+        ax_lamp.set_ylabel("Normalized Intensity", fontsize=10)
+        ax_lamp.set_xlim(-7, 7)
+        ax_lamp.set_ylim(1e-4, 1.5)
+        ax_lamp.grid(True, alpha=0.3)
         ax_lamp.legend(loc="upper right", fontsize=9, ncol=2)
-    fig_lamp.tight_layout()
-    artifacts.append(
-        _save_figure(
-            fig_lamp,
-            output_dir / f"Normalized_LSFs_HgAr_Lamp_{serial_number}_{timestamp}.png",
-            "Hg-Ar Lamp LSFs",
+        fig_lamp.tight_layout()
+        artifacts.append(
+            _save_figure(
+                fig_lamp,
+                output_dir / f"Normalized_LSFs_HgAr_Lamp_{serial_number}_{timestamp}.png",
+                "Hg-Ar Lamp LSFs",
+            )
         )
-    )
 
     return artifacts

@@ -3,10 +3,11 @@
 #directly (see the __main__ section at the end of the file).
 #Written by Daniel Santana
 
-from spec_xfus import spec_clock, calc_msl
+from spec_xfus import spec_clock, calc_msl, measurement_timeout_s
 import logging
 import ctypes
-from ctypes import windll,c_char,Structure,c_uint,c_byte,c_ushort,sizeof,byref,c_ubyte,c_float,c_uint8,c_uint16,c_uint32,c_double,c_bool,c_int
+from ctypes import c_char,Structure,c_uint,c_byte,c_ushort,sizeof,byref,c_ubyte,c_float,c_uint8,c_uint16,c_uint32,c_double,c_bool,c_int
+from spectrometers._winapi import windll  # importable on every OS; fails on first use off Windows
 import numpy as np
 from time import sleep
 from copy import deepcopy
@@ -622,7 +623,7 @@ class Avantes_Spectrometer():
              (only possible if store_to_ram is disabled)
 
         """
-        self.internal_meas_done_event.clear()
+        self.internal_meas_done_event.clear(); self._stop_requested = False  # new measurement: clear operator stop
         self.docatch=True
         self.measuring=True
 
@@ -897,14 +898,46 @@ class Avantes_Spectrometer():
         else:
             return res
 
-    def wait_for_measurement(self):
+    def request_stop(self):
         """
-        res=wait_for_measurement()
-        Wait for the measurement to be complete
+        res=request_stop()
+        Stop the ongoing measurement on behalf of the operator (UI Stop button) and wake up any thread
+        blocked in wait_for_measurement() right away, without waiting for the DLL callback.
+        Unlike abort(), which is also used internally (saturation), this marks the measurement as
+        stopped so callers do not consume stale data.
+        returns:
+            <res>: "OK" or an error description from abort()
+        """
+        self._stop_requested=True
+        res=self.abort(ignore_errors=True)
+        self.internal_meas_done_event.set()
+        return res
+
+    def wait_for_measurement(self, timeout=None):
+        """
+        res=wait_for_measurement(timeout=None)
+        Wait for the measurement to be complete, or until <timeout> seconds elapse (default: twice
+        the expected duration plus a margin, see spec_xfus.measurement_timeout_s). On timeout the
+        measurement is aborted and an error is returned, so a stalled watchdog thread can never hang
+        the caller forever.
         returns:
             <res>: If any problem happened while measuring, the last produced error will be stored in self.error
         """
-        self.internal_meas_done_event.wait()
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested, self.it_ms)
+        if not self.internal_meas_done_event.wait(timeout):
+            self.error = ("Timeout after %.1f s waiting for measurement of spec %s (ncy=%s, IT=%s ms)"
+                          % (timeout, self.alias, self.ncy_requested, self.it_ms))
+            self.logger.error(self.error)
+            try:
+                self.abort(ignore_errors=True)
+            except Exception:
+                self.logger.exception("abort() after measurement timeout failed for spec %s", self.alias)
+            self.internal_meas_done_event.set()
+        elif getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            if self.error == "OK":
+                self.error = "Measurement stopped by user"
         return self.error
 
 
@@ -1804,10 +1837,12 @@ class Avantes_Spectrometer():
         """
         cycle_index=ncy_read-1 #0-based index of the cycle read
 
-        #Convert raw counts ctypes array to numpy array
-        rc=np.array(rc)
-        #Convert to float64
-        rc=rc.astype(np.float64)
+        #Convert raw counts (ctypes c_double array from AVS_GetScopeData, or an ndarray in simulation) to float64.
+        #np.ctypeslib.as_array is a zero-copy view; astype(copy=False) only copies when the dtype differs.
+        if isinstance(rc, ctypes.Array):
+            rc=np.ctypeslib.as_array(rc).astype(np.float64, copy=False)
+        else:
+            rc=np.asarray(rc, dtype=np.float64)
         #Apply discriminator factor:
         if self.discriminator_factor!=1:
             rc=rc*float(self.discriminator_factor)
@@ -1836,9 +1871,9 @@ class Avantes_Spectrometer():
         else: #Continue even if saturation is detected:
 
             #Add cycle data to accumulated data for active pixels:
-            self.sy=self.sy+rc
-            self.syy=self.syy+rc**2
-            self.sxy=self.sxy+cycle_index*rc # cycle index must be 0-based here, so it is the same as ncy_read-1
+            self.sy+=rc
+            self.syy+=rc*rc
+            self.sxy+=cycle_index*rc # cycle index must be 0-based here, so it is the same as ncy_read-1
 
             #Do the same for blind pixels (if any):
             if len(rc_blind_left)>0:
@@ -1849,9 +1884,9 @@ class Avantes_Spectrometer():
                 #Apply discriminator factor:
                 rc_blind_left=rc_blind_left*float(self.discriminator_factor)
                 #Add data to accumulated data:
-                self.sy_blind_left=self.sy_blind_left+rc_blind_left
-                self.syy_blind_left=self.syy_blind_left+rc_blind_left**2
-                self.sxy_blind_left=self.sxy_blind_left+cycle_index*rc_blind_left
+                self.sy_blind_left+=rc_blind_left
+                self.syy_blind_left+=rc_blind_left*rc_blind_left
+                self.sxy_blind_left+=cycle_index*rc_blind_left
 
             self.ncy_handled+=1
             if issat:
@@ -1863,8 +1898,9 @@ class Avantes_Spectrometer():
         """
         Final actions to be done when a measurement is complete.
         """
-        self.meas_end_time=self.arrival_times[-1] #Time in which the spectrometer indicated to the pc that
-        # the last cycle was finished, and it was ready to be read.
+        #Time in which the spectrometer indicated to the pc that the last cycle was finished, and it was
+        # ready to be read. (Guarded: an aborted run may have handled no cycles at all.)
+        self.meas_end_time=self.arrival_times[-1] if len(self.arrival_times)>0 else spec_clock.now()
         #Calculate mean, standard deviation and rms to a fitted straight line (for active pixels):
         x=np.arange(self.ncy_handled)
         _,self.rcm,self.rcs,self.rcl=calc_msl(self.alias,x,self.sxy,self.sy,self.syy)

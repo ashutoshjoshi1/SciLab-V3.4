@@ -9,3 +9,11 @@ scipy>=1.10
 pyserial>=3.5
 pymodbus>=3.5
 Pillow>=10.0
+# Hama5 USB backend for supported TM/TG/RC models; C10785 uses MiniSpec/DCamUSB.
+# libusb-package bundles libusb-1.0. Hama5 requires a compatible WinUSB binding
+# on Windows; retain the working vendor driver for C10785/MiniSpec devices.
+pyusb>=1.2
+libusb-package>=1.0.26
+# Hama6 backend (Hamamatsu C13016 / C13985 micro-spectrometer circuit): the vendor
+# MICRO_USB2_CLR.dll is a .NET assembly, loaded through pythonnet on Windows.
+pythonnet>=3.0; sys_platform == "win32"

@@ -1,16 +1,46 @@
 """Analysis tab - tabbed interface for viewing measurement analysis results."""
 import logging
 
-import tkinter as tk
 from tkinter import ttk
 
 from .ui_utils import bind_debounced_configure
 
 LOGGER = logging.getLogger(__name__)
 
+def _build_empty_state(app, notebook):
+    """A centred card explaining what to do, instead of an empty grey panel."""
+    from .theme import Colors, Fonts, shade
+
+    frame = ttk.Frame(notebook)
+    notebook.add(frame, text="  Welcome  ")
+
+    card = ttk.Frame(frame, style="Card.TFrame", padding=32)
+    card.place(relx=0.5, rely=0.5, anchor="center")
+
+    ttk.Label(card, text="◎", font=(Fonts.FAMILY, 34),
+              background=Colors.BG_SURFACE,
+              foreground=shade(Colors.ACCENT, 1.45)).pack(pady=(0, 6))
+    ttk.Label(card, text="No analysis results yet", font=Fonts.H2,
+              background=Colors.BG_SURFACE,
+              foreground=Colors.TEXT_PRIMARY).pack()
+    ttk.Label(card,
+              text="\n".join((
+                  "Run a measurement, then press Analysis.",
+                  "Completed runs are collected here as tabs.",
+              )),
+              font=Fonts.BODY_SMALL, justify="center",
+              background=Colors.BG_SURFACE,
+              foreground=Colors.TEXT_MUTED).pack(pady=(8, 16))
+    ttk.Button(card, text="Go to Measurements", style="Accent.TButton",
+               command=lambda: app.nb.select(app.measure_tab)).pack()
+
+    app.analysis_welcome_tab = frame
+    return frame
+
+
 def build(app):
     """Build the Analysis tab with a tabbed interface for multiple measurement runs."""
-    from .theme import Colors, Fonts, Spacing
+    from .theme import Colors, Fonts
 
     container = ttk.Frame(app.analysis_tab)
     container.pack(fill="both", expand=True, padx=6, pady=6)
@@ -22,61 +52,53 @@ def build(app):
     title_frame = ttk.Frame(header)
     title_frame.grid(row=0, column=0, sticky="w")
     ttk.Label(title_frame, text="Analysis Results",
-             font=Fonts.H1).pack(side="left")
-    
+              font=Fonts.H1).pack(anchor="w")
+    ttk.Label(title_frame, text="One tab per completed run, newest last",
+              font=Fonts.BODY_SMALL,
+              foreground=Colors.TEXT_MUTED).pack(anchor="w")
+
     # Action buttons on the right with better styling
     button_frame = ttk.Frame(header)
     button_frame.grid(row=0, column=1, sticky="e", padx=4)
-    
+
     def clear_all_measurements():
         """Clear all measurement tabs except welcome tab."""
         try:
             # Get all tabs
             tabs = app.analysis_measurements_notebook.tabs()
-            
-            # Remove all except welcome (if it exists)
+
+            # Remove all except welcome (if it exists). forget() only detaches a
+            # tab; destroy() is what actually frees its widgets and preview images.
             for tab_id in tabs:
                 try:
-                    # Get tab text to check if it's not the welcome tab
                     tab_text = app.analysis_measurements_notebook.tab(tab_id, "text")
-                    if tab_text != "Welcome":
+                    if tab_text.strip() != "Welcome":
+                        widget = app.nametowidget(tab_id)
                         app.analysis_measurements_notebook.forget(tab_id)
+                        widget.destroy()
                 except Exception:
                     pass
-            
+
             # Reset counter
             app.analysis_measurement_counter = 0
-            
+
             # Clear measurement tabs dictionary
             app.analysis_measurement_tabs.clear()
-            
+
             # Re-add welcome tab if no tabs remain
             if not app.analysis_measurements_notebook.tabs():
-                welcome_frame = ttk.Frame(app.analysis_measurements_notebook)
-                app.analysis_measurements_notebook.add(welcome_frame, text="  Welcome  ")
+                _build_empty_state(app, app.analysis_measurements_notebook)
 
-                welcome_container = ttk.Frame(welcome_frame)
-                welcome_container.place(relx=0.5, rely=0.5, anchor="center")
-
-                ttk.Label(welcome_container, text="No Analysis Results Yet",
-                         font=Fonts.H1).pack(pady=(0, 10))
-                ttk.Label(welcome_container,
-                         text="Run a measurement from the Measurements tab\nand click 'Analysis' to view results here.",
-                         font=Fonts.BODY, justify="center",
-                         foreground=Colors.TEXT_MUTED).pack()
-                
-                app.analysis_welcome_tab = welcome_frame
-            
             # Disable action buttons
             if hasattr(app, 'export_plots_btn'):
                 app.export_plots_btn.state(["disabled"])
             if hasattr(app, 'open_folder_btn'):
                 app.open_folder_btn.state(["disabled"])
-            
+
             LOGGER.info("All measurement tabs cleared")
         except Exception as e:
             LOGGER.warning("Error clearing measurements: %s", e)
-    
+
     ttk.Button(
         button_frame,
         text="Clear All",
@@ -101,41 +123,18 @@ def build(app):
         width=14
     )
     app.open_folder_btn.pack(side="left", padx=2)
-    
+
     # Notebook for multiple measurement runs
-    app.analysis_measurements_notebook = ttk.Notebook(container)
+    app.analysis_measurements_notebook = ttk.Notebook(container, style="Inner.TNotebook")
     app.analysis_measurements_notebook.pack(fill="both", expand=True)
-    
+
     # Dictionary to keep track of measurement tabs
     app.analysis_measurement_tabs = {}
-    
+
     # Welcome tab (shown when no measurements)
-    welcome_frame = ttk.Frame(app.analysis_measurements_notebook)
-    app.analysis_measurements_notebook.add(welcome_frame, text="  Welcome  ")
+    _build_empty_state(app, app.analysis_measurements_notebook)
 
-    welcome_container = ttk.Frame(welcome_frame)
-    welcome_container.place(relx=0.5, rely=0.5, anchor="center")
-
-    ttk.Label(
-        welcome_container,
-        text="No Analysis Results Yet",
-        font=Fonts.H1
-    ).pack(pady=(0, 10))
-
-    welcome_label = ttk.Label(
-        welcome_container,
-        text="Run a measurement from the Measurements tab\nand click 'Analysis' to view results here.",
-        font=Fonts.BODY,
-        justify="center",
-        foreground=Colors.TEXT_MUTED
-    )
-    welcome_label.pack()
-    
-    # Store reference to welcome tab
-    app.analysis_welcome_tab = welcome_frame
-    
     # Initialize analysis data storage
-    app.analysis_canvases = []
     app.analysis_artifacts = []
     app.analysis_summary_lines = []
     app.analysis_measurement_counter = 0

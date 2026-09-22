@@ -1,5 +1,6 @@
 {
-  "spectrometer_type": "MiniSpec",
+  "spectrometer_type": "Auto",
+  "last_connected_type": "Ava1",
   "dll_path": "",
   "com_ports": {
     "OBIS": "COM9",
@@ -64,5 +65,10 @@
     "685",
     "Hg_Ar"
   ],
-  "stage_config_path": ""
+  "stage_config_path": "",
+  "measurement_flags": {
+    "smart_source_off": false,
+    "cube_prearm": false,
+    "framed_serial_reads": false
+  }
 }

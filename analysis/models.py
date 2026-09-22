@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -39,6 +39,20 @@ class CharacterizationConfig:
     ib_region_size: int = 20
     sat_threshold: float = 65400.0
     win_hg: int = 30
+    # Hg-Ar peak detection (scipy.signal.find_peaks). Both values were tuned on a
+    # 2048-pixel, ~0.155 nm/px instrument; adjust them for a different grating.
+    peak_prominence_fraction: float = 0.014
+    peak_min_distance_px: int = 20
+    # Half-window (pixels) around each line used for the slit-function fit.
+    fit_window_px: int = 25
+    # Bounds for the slit-function fit: a2 (width, nm), a3 (shape exponent), c1 (baseline).
+    slit_a2_bounds: Tuple[float, float] = (1e-3, 10.0)
+    slit_a3_bounds: Tuple[float, float] = (0.5, 12.0)
+    slit_c1_bounds: Tuple[float, float] = (-0.5, 0.5)
+    # Illustrative slit-function curves drawn at these wavelengths (nm).
+    slit_example_wavelengths_nm: Sequence[float] = (350.0, 400.0, 480.0)
+    slit_example_a2_clip: Tuple[float, float] = (0.2, 5.0)
+    resolution_curve_points: int = 200
 
 
 @dataclass(frozen=True)
@@ -145,6 +159,7 @@ class CharacterizationResult:
     metrics: CharacterizationMetrics
     artifacts: List[AnalysisArtifact]
     summary_lines: List[str]
+    metrics_path: Optional[str] = None
 
     @property
     def summary_text(self) -> str:
