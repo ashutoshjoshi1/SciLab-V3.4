@@ -1,4 +1,5 @@
 from app import SpectroApp
+from scilab_version import __version__
 import tkinter as tk
 from PIL import Image, ImageTk
 import os
@@ -45,7 +46,7 @@ def show_splash_screen():
         print(f"Could not load logo: {e}")
 
     # Subtle version / tagline
-    tag = tk.Label(splash, text="Spectrometer Characterization System",
+    tag = tk.Label(splash, text=f"Spectrometer Characterization System   v{__version__}",
                    font=("Segoe UI", 10), bg=bg_color, fg="#64748b",
                    borderwidth=0, highlightthickness=0)
     tag.pack(pady=(0, 18))
@@ -66,7 +67,7 @@ def show_splash_screen():
 if __name__ == '__main__':
     # Show splash screen
     show_splash_screen()
-    
+
     # Create and run main application
     app = SpectroApp()
     app.mainloop()

@@ -10,3 +10,9 @@ __pycache__/
 results/
 .write_test
 dcamapi_error.log
+
+# Build outputs (packaging/build.py)
+build/
+dist/
+.venv-build/
+packaging/file_version_info.txt

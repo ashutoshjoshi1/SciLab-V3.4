@@ -1,0 +1,49 @@
+MICRO_USB2_CLR.dll public API (2026-09-18 12:26:52)
+
+MICRO_USB2_GetBootVersion(Int64 id, ref String strVersion, String strCheck) -> Int64
+MICRO_USB2_captureStart(Int64 id) -> Int64
+MICRO_USB2_captureStop(Int64 id) -> Int64
+MICRO_USB2_close(Int64 id) -> Int64
+MICRO_USB2_getADMode(Int64 id, ref Int64 ADMode, String strCheck) -> Int64
+MICRO_USB2_getAdOffset(Int64 id, ref Int64 offset, String strCheck) -> Int64
+MICRO_USB2_getAdOffsetProperty(Int64 id, ref AdOffsetProperty AdOffsetProperty, String strCheck) -> Int64
+MICRO_USB2_getAdOffsetPropertyForLabVIEW(Int64 id, ref Int64 lower, ref Int64 upper, String strCheck) -> Int64
+MICRO_USB2_getCalibrationCoefficient(Int64 id, Int64 index, Double[] coefficient) -> Int64
+MICRO_USB2_getCaptureMode(Int64 id, ref Int64 mode) -> Int64
+MICRO_USB2_getCaptureStatus(Int64 id) -> Int64
+MICRO_USB2_getExposureCycle(Int64 id, ref Double sec, String strCheck) -> Int64
+MICRO_USB2_getExposureProperty(Int64 id, ref ExposureProperty ExposureProperty) -> Int64
+MICRO_USB2_getExposurePropertyForLabVIEW(Int64 id, ref Double lowertime, ref Double uppertime, ref Double timestep, ref Double lowercycle, ref Double uppercycle, ref Double cyclestep) -> Int64
+MICRO_USB2_getExposureTime(Int64 id, ref Double sec) -> Int64
+MICRO_USB2_getImageData(Int64 id, ref UInt16[] imageData, ref UInt64[] time) -> Int64
+MICRO_USB2_getImageHeaderData(Int64 id, ref UInt16[] headerData, ref UInt16[] imageData, ref UInt64[] time, String strCheck) -> Int64
+MICRO_USB2_getImageSize(Int64 id, ref Int64 sizeX, ref Int64 sizeY, String strCheck) -> Int64
+MICRO_USB2_getModuleConnectionList(Int16[] list, ref UInt16 number) -> Int64
+MICRO_USB2_getModuleInformation(Int64 id, ref ModuleInformation information) -> Int64
+MICRO_USB2_getModuleInformationForLabVIEW(Int64 id, ref String vender, ref String product, ref String serial, ref String firmware, ref String driver, ref String library) -> Int64
+MICRO_USB2_getModuleProperty(Int64 id, ref ModuleProperty ModuleProperty) -> Int64
+MICRO_USB2_getModulePropertyForLabVIEW(Int64 id, ref Int64 pixel, ref Int64 resolution, ref Int64 capturemode) -> Int64
+MICRO_USB2_getSpectroInformation(Int64 id, ref SpectroInformation information) -> Int64
+MICRO_USB2_getSpectroInformationForLabVIEW(Int64 id, ref String unit, ref String sensor) -> Int64
+MICRO_USB2_getTriggerOutput(Int64 id, ref Int64 output) -> Int64
+MICRO_USB2_getTriggerPolarity(Int64 id, ref Int64 polarity) -> Int64
+MICRO_USB2_getWaveLengthProperty(Int64 id, ref WaveLengthProperty WaveLengthProperty, String strCheck) -> Int64
+MICRO_USB2_getWaveLengthPropertyForLabVIEW(Int64 id, ref Int64 lowerwavelength, ref Int64 upperwavelength, String strCheck) -> Int64
+MICRO_USB2_initialize() -> Int64
+MICRO_USB2_open(Int64 id) -> Int64
+MICRO_USB2_readEeprom(Int64 id, UInt16 address, ref Byte[] data, UInt32 length, String strCheck) -> Int64
+MICRO_USB2_readEepromUserArea(Int64 id, UInt16 address, ref Byte[] data, UInt32 length, String strCheck) -> Int64
+MICRO_USB2_setADMode(Int64 id, Int64 ADMode, String strCheck) -> Int64
+MICRO_USB2_setAdOffset(Int64 id, Int64 offset, String strCheck) -> Int64
+MICRO_USB2_setCalibrationCoefficient(Int64 id, Int64 index, Double[] coefficient) -> Int64
+MICRO_USB2_setCaptureMode(Int64 id, Int64 mode) -> Int64
+MICRO_USB2_setEventHandle(Int64 id, Int64 eventid, ManualResetEvent hEvent, String strCheck) -> Int64
+MICRO_USB2_setExposureCycle(Int64 id, Double sec, String strCheck) -> Int64
+MICRO_USB2_setExposureTime(Int64 id, Double sec) -> Int64
+MICRO_USB2_setTriggerOutput(Int64 id, Int64 output) -> Int64
+MICRO_USB2_setTriggerPolarity(Int64 id, Int64 polarity) -> Int64
+MICRO_USB2_uninitialize() -> Int64
+MICRO_USB2_writeEeprom(Int64 id, UInt16 address, ref Byte[] data, UInt32 length, String strCheck) -> Int64
+MICRO_USB2_writeEepromUserArea(Int64 id, UInt16 address, ref Byte[] data, UInt32 length, String strCheck) -> Int64
+
+diagnostics: initialize=0, getModuleConnectionList=0, module_ids=[0], uninitialize=0, open=0, getModuleInformationForLabVIEW=0, getSpectroInformationForLabVIEW=0, module_info={'vendor': 'Hamamatsu', 'product': 'C13016', 'serial': '326VA021', 'firmware': '1.08', 'driver': '1.00', 'library': '1.00', 'head_serial': '26C00021', 'sensor': 'S11639'}, getModulePropertyForLabVIEW=0, module_property={'pixel': 288, 'resolution': 16, 'capturemode': 32}, getExposurePropertyForLabVIEW=0, exposure_property={'lower': 11.0, 'upper': 1000000.0, 'step': 1.0, 'cycle': {'lower': 1043.0, 'upper': 1100000.0, 'step': 1.0}, 'unit': 'us'}, getCaptureMode=0, getExposureCycle=0, getWaveLengthPropertyForLabVIEW=0, getTriggerOutput=0, getTriggerPolarity=0, getCaptureStatus=1, capture_state={'mode': 0, 'supported': 32, 'exposure_cycle': 12000.0, 'trigger': {'output': 1, 'polarity': 3}, 'wavelength_range_nm': (200, 800), 'status_before_start': 1}, getCalibrationCoefficient=0, calibration={'board': [317.7690273, 2.700686029, -0.001144517407, -8.530887275e-06, 1.496279381e-08, -5.706326871e-12]}, setExposureTime=0, getExposureTime=0, setExposureCycle=0, captureStop=0, captureStart=0, getImageData=6

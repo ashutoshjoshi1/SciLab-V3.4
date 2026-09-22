@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from domain.spectrometer import assert_spectrometer_backend
 
@@ -14,7 +14,7 @@ LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DLLS_DIR = PROJECT_ROOT / "spectrometers dll files"
-SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "MiniSpec"]
+SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "MiniSpec", "OcOpt1"]
 
 
 def normalize_spec_type(spec_type: Optional[str]) -> str:
@@ -39,11 +39,19 @@ def infer_spec_type_from_dll_path(dll_path: Optional[str]) -> Optional[str]:
         return "Hama2"
     if name == "dcamusb.dll":
         return "MiniSpec"
+    if name == "oceandirect.dll":
+        return "OcOpt1"
     return None
 
 
 def suggest_default_dll_path(spec_type: Optional[str]) -> str:
     normalized = normalize_spec_type(spec_type)
+    if normalized == "OcOpt1":
+        # OceanDirect.dll is licensed for use in place (not bundled); look it up in
+        # OCEANDIRECT_HOME / the default SDK install folder.
+        from spectrometers.oceandirect_spectrometer import find_oceandirect_dll
+
+        return find_oceandirect_dll()
     suggestions = {
         "Ava1": DLLS_DIR / "avaspecx64.dll",
         "Hama3": DLLS_DIR / "DcIcUSB.dll",
@@ -86,7 +94,7 @@ def _candidate_types(spec_type: Optional[str], dll_path: Optional[str]) -> List[
     inferred = infer_spec_type_from_dll_path(dll_path)
     if inferred:
         return [inferred]
-    return ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec"]
+    return ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "OcOpt1"]
 
 
 def _candidate_dll_path(candidate: str, requested_type: Optional[str], dll_path: Optional[str]) -> str:
@@ -132,6 +140,9 @@ def _import_backend_class(spec_type: str, dll_path: Optional[str] = None):
     if normalized == "MiniSpec":
         module = importlib.import_module("spectrometers.minispec_spectrometer")
         return module.MiniSpec_Spectrometer
+    if normalized == "OcOpt1":
+        module = importlib.import_module("spectrometers.oceandirect_spectrometer")
+        return module.OceanDirect_Spectrometer
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 
@@ -311,6 +322,39 @@ def _discover_minispec(dll_path: Optional[str]) -> List[Dict[str, str]]:
     return devices
 
 
+def _discover_oceandirect(dll_path: Optional[str]) -> List[Dict[str, str]]:
+    spec = _new_spec_instance("OcOpt1", dll_path, serial=None, debug_mode=0)
+
+    # load_spec_dll() falls back to the installed SDK when no path is given.
+    res = spec.load_spec_dll()
+    if res != "OK":
+        raise RuntimeError(res)
+    res = spec.initialize_dll()
+    if res != "OK":
+        raise RuntimeError(res)
+    res, count = spec.get_number_of_devices()
+    if res != "OK":
+        raise RuntimeError(res)
+    if count == 0:
+        return []
+    res, devices_info = spec.get_all_devices_info(count)
+    if res != "OK":
+        raise RuntimeError(res)
+
+    devices = []
+    for index, dev_info in devices_info.items():
+        serial_number = _clean_text(dev_info.get("id", ""))
+        model = _clean_text(dev_info.get("model", "Ocean Insight"))
+        if not serial_number:
+            # Unit is held open by another program: list it, but it cannot be selected by serial.
+            LOGGER.warning("OceanDirect device %s is busy (%s)", index, model)
+            continue
+        devices.append(
+            {"serial": serial_number, "label": f"{serial_number} ({model}) [OcOpt1]", "type": "OcOpt1"}
+        )
+    return devices
+
+
 def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str, str]]:
     normalized = normalize_spec_type(spec_type)
     if normalized == "Ava1":
@@ -323,6 +367,8 @@ def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str
         return _discover_hama4(dll_path)
     if normalized == "MiniSpec":
         return _discover_minispec(dll_path)
+    if normalized == "OcOpt1":
+        return _discover_oceandirect(dll_path)
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 
