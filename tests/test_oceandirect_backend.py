@@ -145,3 +145,33 @@ def test_get_error_ok(code, expected):
     spec = od.OceanDirect_Spectrometer()
     assert spec.get_error(code) == expected
     assert spec.get_error(5).startswith("OceanDirect error 5")  # no DLL loaded -> numeric fallback
+
+
+def test_request_stop_breaks_cycle_loop_and_reports_user_stop():
+    """The UI Stop button must end the run early and not look like a clean finish."""
+    spec = od.OceanDirect_Spectrometer()
+    spec.simulation_mode = True
+    spec.alias = "1"
+    spec.initialize_spec_logger()
+    assert spec.connect() == "OK"
+    assert spec.set_it(5.0) == "OK"
+    assert spec.measure(ncy=1) == "OK"        # consumes the discard frame set_it armed
+
+    real_frame = spec._simulated_frame
+
+    def stop_during_first_cycle():
+        spec.request_stop()
+        return real_frame()
+
+    spec._simulated_frame = stop_during_first_cycle
+    assert spec.measure(ncy=10) == "OK"
+    assert spec.wait_for_measurement() == "Measurement stopped by user"
+    assert spec.ncy_read == 1                 # broke out instead of running all 10
+    assert spec.rcm.shape == (spec.npix_active,)
+
+    # The flag is consumed, so the next run reports its own status.
+    spec._simulated_frame = real_frame
+    assert spec.measure(ncy=2) == "OK"
+    assert spec.wait_for_measurement() == "OK"
+    assert spec.ncy_read == 2
+    assert spec.disconnect() == "OK"
