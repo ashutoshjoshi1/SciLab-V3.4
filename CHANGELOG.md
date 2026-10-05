@@ -12,6 +12,38 @@ the installer. The single source of truth is
 
 Nothing yet.
 
+## [3.4.1.0] — 2026-09-22
+
+### Added
+
+- **OcOpt1 backend** — Ocean Insight / Ocean Optics spectrometers through the
+  OceanDirect SDK (`OceanDirect.dll`, bound directly with ctypes like the other
+  vendor DLLs). Verified on a Flame-S (FLMS17243, 2048 px, 339.7–1019.7 nm):
+  discovery by serial, raw counts with the SDK's electric-dark and nonlinearity
+  corrections switched off, 388 spectra/s at 1 ms, reconnect after close.
+  The DLL is not bundled (its licence forbids redistribution); the app finds the
+  installed SDK, `OCEANDIRECT_HOME`, or a path typed in Setup. The
+  hands-on study is in `docs/flame-s-oceandirect-integration-guide.md`, a live
+  check in `tools/oceandirect_smoke_test.py`, and `--self-test` now imports
+  this backend too.
+
+### Changed
+
+- **Startup is ~1.4 s faster.** pandas and scipy were imported before the main
+  window appeared, although nothing on screen uses them until a run is saved
+  or analysed. They are now imported on a worker thread two seconds after the
+  window is up (`main.preload_analysis_stack_later`), and the measurement
+  model no longer imports pandas at module load. Source tree: ~3.0 s → ~1.6 s
+  from launch to a usable window; a test guards the startup import set.
+
+### Fixed
+
+- **MiniSpec lifecycle test failed on Windows**: the acquisition thread's Win32
+  message pump reached `user32` through the module-level DLL-loader name that
+  the tests replace with a fake. It now uses `ctypes.windll` directly.
+- Removed the duplicate `packaging/SciLab.iss`; the build uses
+  `packaging/installer.iss`.
+
 ## [3.4.0.6] — 2026-09-21
 
 First packaged release: SciLab now ships as a Windows installer rather than a

@@ -54,7 +54,7 @@ from ctypes import (
 
 import numpy as np
 
-from spec_xfus import spec_clock
+from spec_xfus import measurement_timeout_s, spec_clock
 
 
 logger = logging.getLogger(__name__)
@@ -908,6 +908,7 @@ class OceanDirect_Spectrometer(object):
         self.rcm, self.rcs, self.rcl = stats.result()
         return "OK"
 
+<<<<<<< Updated upstream
     def wait_for_measurement(self):
         # measure() blocks already; this just returns the last status.
         self._meas_done_event.wait()
@@ -916,7 +917,30 @@ class OceanDirect_Spectrometer(object):
             if self.error == "OK":
                 # The cycle loop broke early, so the partial average is not a clean run.
                 self.error = "Measurement stopped by user"
+=======
+    def wait_for_measurement(self, timeout=None):
+        """
+        measure() blocks already, so this normally returns at once with the last
+        status.  The wait is bounded (default from spec_xfus.measurement_timeout_s)
+        so a stalled SDK call can never hang the caller forever.
+        """
+        if timeout is None:
+            timeout = measurement_timeout_s(self.ncy_requested or 1, self.it_ms or 10.0)
+        if not self._meas_done_event.wait(timeout):
+            self.error = "OceanDirect measurement timed out after %.1f s" % float(timeout)
+            return self.error
+>>>>>>> Stashed changes
         return self.error
+
+    def request_stop(self):
+        """
+        Stop on behalf of the operator: end the cycle loop after the frame in
+        flight and wake any thread blocked in wait_for_measurement().  A single
+        frame cannot be interrupted on the Flame-S (no acquisition control).
+        """
+        res = self.abort(ignore_errors=True)
+        self._meas_done_event.set()
+        return res
 
     def abort(self, ignore_errors=False):
         """

@@ -136,9 +136,12 @@ class _DcamLifecycleThread:
     def _message_pump():
         if sys.platform != "win32":
             return None
+        import ctypes
         from ctypes import wintypes
 
-        user32 = windll.user32
+        # ctypes.windll directly: the module-level ``windll`` is the DLL *loader*
+        # (replaced by a fake in tests); the message pump is plain Win32.
+        user32 = ctypes.windll.user32
         user32.PeekMessageW.argtypes = [POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
         user32.PeekMessageW.restype = wintypes.BOOL
         user32.TranslateMessage.argtypes = [POINTER(wintypes.MSG)]

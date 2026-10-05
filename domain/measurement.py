@@ -6,10 +6,9 @@ from typing import List, Optional
 
 import numpy as np
 
-try:
-    import pandas as pd
-except Exception:  # pragma: no cover - runtime dependency on target machine
-    pd = None
+# pandas is imported inside to_dataframe(): it costs ~0.7 s to import and this
+# module is on the startup path (app.py imports it), while a DataFrame is only
+# needed when a run is saved or analysed.
 
 
 @dataclass(frozen=True)
@@ -69,8 +68,10 @@ class MeasurementData:
         return capture
 
     def to_dataframe(self):
-        if pd is None:
-            raise RuntimeError("pandas is required to save measurement data.")
+        try:
+            import pandas as pd
+        except Exception as exc:  # pragma: no cover - runtime dependency on target machine
+            raise RuntimeError("pandas is required to save measurement data.") from exc
 
         columns = ["Timestamp", "Wavelength", "IntegrationTime", "NumCycles"] + [
             f"Pixel_{idx}" for idx in range(int(self.npix))

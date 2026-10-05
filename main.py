@@ -7,6 +7,9 @@ Startup order matters for perceived speed:
    modules are imported *while the logo is visible*.
 3. The splash is closed and the main window is built (~0.4 s of widgets).
 
+4. pandas, scipy and the analysis modules are imported on a worker thread a
+   couple of seconds after the window is up; nothing visible needs them first.
+
 v3.3 did these in the opposite order: ~2.5 s of imports with nothing on screen,
 then a fixed 2.5 s splash, then the build.
 """
@@ -133,11 +136,16 @@ def build_splash() -> tk.Tk:
 
 
 def preload_heavy_modules(report) -> None:
-    """Import everything expensive while the splash is on screen."""
+    """Import what the first window needs while the splash is on screen.
+
+    pandas and scipy are deliberately *not* here: nothing on screen uses them
+    until a measurement is saved or analysed, and together they cost ~1.4 s of
+    the old ~3 s startup. They are imported by ``preload_analysis_stack_later``
+    once the main window is up and idle.
+    """
     steps = (
         ("Loading numerics…", ("numpy",)),
         ("Loading plotting…", ("matplotlib.figure", "matplotlib.backends.backend_tkagg")),
-        ("Loading analysis…", ("pandas", "scipy.optimize", "scipy.signal")),
         ("Loading application…", ("app", "tabs.setup_tab", "tabs.measurements_tab", "tabs.analysis_tab")),
     )
     import importlib
@@ -150,6 +158,39 @@ def preload_heavy_modules(report) -> None:
             except Exception as exc:
                 # A missing optional package is reported by the app itself later.
                 LOGGER.warning("Preload of %s failed: %s", name, exc)
+
+
+# The analysis path (pandas, scipy, analysis.*, services.analysis_service) is
+# imported on a worker thread a moment after the main window is shown, so the
+# first "Save" or "Analyze" does not stall for a second and a half, and startup
+# does not pay for it either.
+ANALYSIS_PRELOAD_DELAY_MS = 2000
+
+
+def preload_analysis_stack_later(root: tk.Tk) -> None:
+    """Schedule a background import of pandas/scipy/analysis after ``root`` is idle."""
+
+    def _import_all() -> None:
+        started = time.perf_counter()
+        try:
+            # A literal import statement, not importlib with a string: PyInstaller
+            # only bundles modules it can see imported.
+            import services.analysis_stack_preload  # noqa: F401
+        except Exception as exc:
+            # A missing optional package is reported by the app itself later.
+            LOGGER.debug("Background preload of the analysis stack skipped: %s", exc)
+            return
+        LOGGER.info("Analysis stack preloaded in the background in %.2f s", time.perf_counter() - started)
+
+    def _start() -> None:
+        import threading
+
+        threading.Thread(target=_import_all, daemon=True, name="analysis-preload").start()
+
+    try:
+        root.after(ANALYSIS_PRELOAD_DELAY_MS, _start)
+    except tk.TclError:
+        pass
 
 
 SINGLE_INSTANCE_MUTEX = "SciLab.SingleInstance.Mutex"
@@ -262,7 +303,7 @@ def self_test() -> int:
               critical=False)
 
     for backend in ("ava1", "hama2", "hama3", "hama4", "hama5", "hama6",
-                    "minispec", "simulated"):
+                    "minispec", "oceandirect", "simulated"):
         name = f"spectrometers.{backend}_spectrometer"
         check(f"backend {backend}", lambda m=name: importlib.import_module(m) and "")
 
@@ -359,6 +400,7 @@ def main() -> None:
     LOGGER.info("Startup preload finished in %.2f s", time.perf_counter() - started)
 
     app = SpectroApp()
+    preload_analysis_stack_later(app)
     app.mainloop()
 
 
