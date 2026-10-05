@@ -908,39 +908,25 @@ class OceanDirect_Spectrometer(object):
         self.rcm, self.rcs, self.rcl = stats.result()
         return "OK"
 
-<<<<<<< Updated upstream
-    def wait_for_measurement(self):
-        # measure() blocks already; this just returns the last status.
-        self._meas_done_event.wait()
-        if self._stop_requested:
-            self._stop_requested = False
-            if self.error == "OK":
-                # The cycle loop broke early, so the partial average is not a clean run.
-                self.error = "Measurement stopped by user"
-=======
     def wait_for_measurement(self, timeout=None):
         """
         measure() blocks already, so this normally returns at once with the last
         status.  The wait is bounded (default from spec_xfus.measurement_timeout_s)
-        so a stalled SDK call can never hang the caller forever.
+        so a stalled SDK call can never hang the caller forever.  A run the
+        operator stopped reports "Measurement stopped by user" once, because the
+        cycle loop still returns the frames it had already averaged.
         """
         if timeout is None:
             timeout = measurement_timeout_s(self.ncy_requested or 1, self.it_ms or 10.0)
         if not self._meas_done_event.wait(timeout):
             self.error = "OceanDirect measurement timed out after %.1f s" % float(timeout)
             return self.error
->>>>>>> Stashed changes
+        if self._stop_requested:
+            self._stop_requested = False
+            if self.error == "OK":
+                # The cycle loop broke early, so the partial average is not a clean run.
+                self.error = "Measurement stopped by user"
         return self.error
-
-    def request_stop(self):
-        """
-        Stop on behalf of the operator: end the cycle loop after the frame in
-        flight and wake any thread blocked in wait_for_measurement().  A single
-        frame cannot be interrupted on the Flame-S (no acquisition control).
-        """
-        res = self.abort(ignore_errors=True)
-        self._meas_done_event.set()
-        return res
 
     def abort(self, ignore_errors=False):
         """
@@ -961,9 +947,13 @@ class OceanDirect_Spectrometer(object):
 
     def request_stop(self):
         """
-        What the UI Stop button calls: abort the device and wake anyone blocked in
-        wait_for_measurement().  The flag separates a user stop from a clean finish,
-        because a stopped cycle loop still returns the frames it already averaged.
+        What the UI Stop button calls: end the cycle loop after the frame in flight
+        (a single frame cannot be interrupted on the Flame-S) and wake any thread
+        blocked in wait_for_measurement().  The flag separates a user stop from a
+        clean finish, because a stopped cycle loop still returns the frames it
+        already averaged.
         """
         self._stop_requested = True
-        return self.abort(ignore_errors=True)
+        res = self.abort(ignore_errors=True)
+        self._meas_done_event.set()
+        return res

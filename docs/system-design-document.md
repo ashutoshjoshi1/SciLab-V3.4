@@ -146,6 +146,7 @@ Supported spectrometer families:
 - Hama4 (Hamamatsu HiasApi.dll)
 - MiniSpec (Hamamatsu Micro Series Plus, DCamUSB.dll)
 - OcOpt1 (Ocean Insight / Ocean Optics via the OceanDirect SDK, OceanDirect.dll; verified on the Flame-S FLMS17243, see `docs/flame-s-oceandirect-integration-guide.md`)
+- Jeti1 (JETI PE60_2 and other JETI spectrometer electronics via the JETI SDK, jeti_spectro_ex64.dll + jeti_core64.dll; verified on PE60_2 board 2360093, see `docs/jeti-pe60-2-integration-guide.md`). Auto probes it only when a JETI USB device (vendor 0C6C) is attached, because the SDK's search opens every COM port.
 
 The shared contract is now explicit. A backend is expected to expose:
 

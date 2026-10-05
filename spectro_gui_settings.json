@@ -1,7 +1,7 @@
 {
-  "spectrometer_type": "Auto",
-  "last_connected_type": "Ava1",
-  "dll_path": "",
+  "spectrometer_type": "Jeti1",
+  "last_connected_type": "Jeti1",
+  "dll_path": "C:\\Users\\Mini-Pan\\Documents\\GitHub\\SciLab-V3.4\\spectrometers dll files\\jeti_spectro_ex64.dll",
   "com_ports": {
     "OBIS": "COM9",
     "CUBE": "COM2",

@@ -303,7 +303,7 @@ def self_test() -> int:
               critical=False)
 
     for backend in ("ava1", "hama2", "hama3", "hama4", "hama5", "hama6",
-                    "minispec", "oceandirect", "simulated"):
+                    "minispec", "oceandirect", "jeti", "simulated"):
         name = f"spectrometers.{backend}_spectrometer"
         check(f"backend {backend}", lambda m=name: importlib.import_module(m) and "")
 

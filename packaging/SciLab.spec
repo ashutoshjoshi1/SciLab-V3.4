@@ -34,8 +34,9 @@ datas = [
     (str(ROOT / "sciglob_logoRGB.png"), "."),
     (str(ROOT / "sciglob_symbol.ico"), "."),
     (str(ROOT / "packaging" / "scilab.ico"), "packaging"),
-    # Vendor DLLs: Avantes, Hamamatsu DcIcUSB / HiasApi / DCamUSB, and the
-    # C13016 .NET assembly. suggest_default_dll_path() looks here by name.
+    # Vendor DLLs: Avantes, Hamamatsu DcIcUSB / HiasApi / DCamUSB, the C13016
+    # .NET assembly and the JETI SDK (jeti_spectro_ex64 + jeti_core64).
+    # suggest_default_dll_path() looks here by name.
     (str(ROOT / "spectrometers dll files"), "spectrometers dll files"),
     # Reference line-shape files the Measurements tab can load for comparison.
     (str(ROOT / "Pandora Reference LSF"), "Pandora Reference LSF"),
@@ -54,6 +55,7 @@ hiddenimports = [
     "spectrometers.hama6_spectrometer",
     "spectrometers.minispec_spectrometer",
     "spectrometers.oceandirect_spectrometer",
+    "spectrometers.jeti_spectrometer",
     "spectrometers.simulated_spectrometer",
     "spectrometers.spec_hama2",
     "spectrometers.spec_hama2.Hamamatsu_DCAMSDK4_v25056964.dcam",

@@ -18,7 +18,7 @@ set in [`scilab_version.py`](scilab_version.py).
 | Live plot | Full redraw every frame, layout solver on each draw, unbounded frame rate | Blitted trace over a cached background, 25 fps cap, hysteresis on autoscale |
 | Thread safety | Tk called from worker threads (crashes on some builds); no ownership of the spectrometer handle | One main-thread UI pump; single-owner acquisition guard; Stop aborts the device immediately |
 | Bugs fixed | EEPROM tab non-functional (`NameError`); Hg-Ar analysis crashed on every run; Check Resolution blank if opened before Live View; countdown ran 0.2 s per second; lasers not switched off on exit; settings not saved on exit; power values lost on resize | all fixed, with regression tests |
-| Hardware | Ava1, Hama2, Hama3, Hama4, MiniSpec | + **Hama5** (supported Hamamatsu TM/TG/RC mini-spectrometers over USB), **Hama6** (Hamamatsu C13016 / C13985 micro-spectrometer circuit via its .NET DLL), **OcOpt1** (Ocean Insight / Ocean Optics via OceanDirect SDK) and a **Simulated** backend |
+| Hardware | Ava1, Hama2, Hama3, Hama4, MiniSpec | + **Hama5** (supported Hamamatsu TM/TG/RC mini-spectrometers over USB), **Hama6** (Hamamatsu C13016 / C13985 micro-spectrometer circuit via its .NET DLL), **OcOpt1** (Ocean Insight / Ocean Optics via OceanDirect SDK), **Jeti1** (JETI PE60_2 and other JETI spectrometer electronics via the JETI SDK) and a **Simulated** backend |
 | Tests | none shipped | 58 unit/golden/orchestrator tests + 5 GUI smoke tests |
 
 ## Windows setup (operators)
@@ -42,6 +42,11 @@ DCAM runtime; Hama4 uses `HiasApi.dll` with `hias.conf` next to it.
 OcOpt1 drives OceanDirect-supported Ocean Insight spectrometers. `OceanDirect.dll`
 is not redistributed in this repository; install the OceanDirect SDK on the target
 PC (or set `OCEANDIRECT_HOME`) and point Setup's DLL path at that DLL.
+
+Jeti1 drives JETI spectrometer electronics such as the PE60_2 through the JETI
+SDK 4.8.10. Its x64 DLLs, `jeti_spectro_ex64.dll` and `jeti_core64.dll`, are
+bundled; the SDK licence allows that (`spectrometers dll files/JETI_SDK_license.txt`).
+See "Jeti1" below.
 
 ### Hamamatsu C10785: use MiniSpec
 
@@ -205,6 +210,53 @@ capture mode 2 for 3 s. `--free-run` reproduces the mode-1 hang (the script
 exits if `setCaptureMode` does not return; the board is fine for the next
 process).
 
+### Jeti1: JETI PE60_2 line-array readout electronics
+
+The PE60_2 connects as a USB CDC virtual COM port. Windows 10 and 11 bind their
+own `usbser` driver to it, so there is nothing to install: Device Manager shows
+"USB Serial Device (COMx)" under Ports, with USB ID `0C6C:0CDC` and the
+bus-reported name "JETI PE60_2". JETI's SDK, firmware manual and the PE60_2
+documents come from <https://www.jeti.com/support/downloads>.
+
+1. Close JETI VersaSpec or LiVal: only one program can hold the COM port.
+2. Setup → type **Jeti1** → Connect. **Auto** finds it too, but runs the JETI
+   search only when a JETI USB device (vendor `0C6C`) is attached, because that
+   search opens every COM port on the PC, including the laser controllers'.
+
+How SciLab drives it (verified on 2026-10-05 with board 2360093, firmware
+SPECFIRM_PE60 0.66.0, SDK 4.8.10):
+
+* Discovery uses the SDK's own search (`JETI_GetNumSpectroEx`; about 2 s).
+  SciLab files data under the device serial, else the spectrometer serial,
+  else the electronics board serial.
+* Each cycle is one firmware measurement: `JETI_StartLightEx` with the
+  integration time and 1 scan, poll `JETI_SpectroStatusEx`, read the INT32
+  counts with `JETI_LightPixEx`. SciLab averages the cycles in floating point
+  and keeps the per-pixel spread. A frame costs the exposure plus about 6–7 ms
+  (126 spectra/s at the 1.88 ms minimum).
+* The integration time is clamped to the device range (1.88 ms to 60 s on
+  this board). 0 is never sent: the firmware reads it as "adapt automatically".
+* Stop sends `JETI_SpectroBreakEx`. Firmware 0.66.0 does not acknowledge it
+  (the call times out after 0.5 s) and finishes the exposure, so Stop returns
+  in under a second and the next measurement waits until the cancelled
+  exposure has ended. Disconnecting during an exposure waits for it too.
+* Saturation is `2^ADC bits − 1` (65535). The wavelength axis comes from the
+  polynomial stored in the device (`JETI_GetFit`).
+* SciLab writes nothing to the device's stored parameters.
+
+The board on the bench carries JETI's placeholder wavelength fit
+(150 + 0.5 × pixel nm, no spectrometer serial), so its wavelength axis is not a
+calibration.
+
+Bench check, about 15 s:
+
+```powershell
+python tools/jeti_smoke_test.py
+```
+
+The study behind this backend, with the call sequence and every measured
+number, is in `docs/jeti-pe60-2-integration-guide.md`.
+
 ## Files
 
 | Path | Purpose |
@@ -213,7 +265,7 @@ process).
 | `tabs/` | Setup, Live View, Measurements, Check Resolution, Analysis, EEPROM |
 | `services/` | measurement orchestrator, analysis service, acquisition guard, check-spectrometer service |
 | `analysis/` | calculations, plotting, data models |
-| `spectrometers/` | vendor backends (`ava1`, `hama2`, `hama3`, `hama4`, `hama5`, `hama6`, `minispec`) and the simulator |
+| `spectrometers/` | vendor backends (`ava1`, `hama2`, `hama3`, `hama4`, `hama5`, `hama6`, `minispec`, `oceandirect`, `jeti`) and the simulator |
 | `hardware/`, `stage/` | laser / filter-wheel serial controllers, Modbus stage |
 | `results/` | created at runtime: `<serial>_<timestamp>/Measurements_*.csv` + `plots/` (not versioned) |
 | `spectro_gui_settings.json` | operator settings (ports, powers, advanced flags) |

@@ -1,0 +1,62 @@
+----------------------------------------------------------------------
+                 END USER LICENSE AGREEMENT FOR JETI SDK
+----------------------------------------------------------------------
+
+
+This End-User License Agreement ("EULA") is a legal agreement between
+you and JETI Technische Instrumente GmbH ("JETI") for the JETI SDK product  
+which may include associated software components, media, printed 
+materials, and "online" electronic documentation ("SOFTWARE PRODUCT"). 
+
+You agree to be bound by the terms of this EULA by using the SOFTWARE 
+PRODUCT. If you do not agree, do not use it.
+
+1. COPYRIGHT
+
+All rights, title, interests in and to copyrights in the SOFTWARE 
+PRODUCT are owned exclusively (or licensed) by JETI. The SOFTWARE
+PRODUCT is protected by copyright laws and international copyright
+treaties, as well as other intellectual property laws and treaties.
+The SOFTWARE PRODUCT is licensed, not sold.
+
+2. GRANT OF LICENSE
+
+JETI grants Customer the following rights:
+
+a. Customer is granted the non-transferable, non-exclusive, and
+perpetual right to integrate the SOFTWARE PRODUCT in their software
+products, to use these products in their own company and to distribute
+these products under their own trade name.
+
+b. Customer is NOT required to pay any distribution, runtime, royalty,
+per-developer or per-end-user license fees.
+
+c. Customer may make copies of the SOFTWARE PRODUCT as may be 
+necessary for backup and archival purposes.
+
+3. RESTRICTIONS
+
+a. Customer may not disassemble, decomplile, reverse engineer the 
+SOFTWARE PRODUCT.
+ 
+b. Customer may not transfer, modify, sell, lease or sublicense the
+SOFTWARE PRODUCT.
+
+4. TERMINATION
+
+Without prejudice to any other rights, JETI may terminate this EULA
+if Customer fails to comply with the terms and conditions of this EULA.
+In such event, Customer must destroy all copies of the SOFTWARE
+PRODUCT in your possession.
+
+5. NO WARRANTIES
+
+JETI expressly disclaims any warranty for the SOFTWARE PRODUCT.
+JETI SDK is provided "As Is" without any express or implied warranty of
+any kind, including but not limited to any warranties of
+merchantability, noninfringement, or fitness of a particular purpose.
+JETI does not warrant or assume responsibility for the accuracy
+or completeness of any information, text, algorithms, graphics,
+links or other items contained within this SOFTWARE PRODUCT. JETI
+will not be liable for data loss, damages, loss of profits or any
+other kind of loss while using or misusing this library.

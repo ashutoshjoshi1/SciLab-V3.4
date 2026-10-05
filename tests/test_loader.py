@@ -42,18 +42,23 @@ def test_auto_skips_backends_without_their_usb_vendor(monkeypatch, probe_log):
     assert progress == ["Probing Hama4…", "Probing Hama3…"]
 
 
+def _order_without_vendor_gated():
+    """Auto order minus the backends that need positive USB evidence (Jeti1's COM-port search)."""
+    return [c for c in loader.AUTO_PROBE_ORDER if c not in loader.AUTO_REQUIRES_VENDOR_MATCH]
+
+
 def test_auto_probes_everything_when_usb_scan_unavailable(monkeypatch, probe_log):
     monkeypatch.setattr(loader, "present_usb_vendor_ids", lambda: None)
     # Nothing attached and no backend error: an empty list (the Setup tab reports it).
     assert loader.discover_spectrometers("Auto") == []
-    assert probe_log["probed"] == loader.AUTO_PROBE_ORDER
+    assert probe_log["probed"] == _order_without_vendor_gated()
 
 
 def test_empty_usb_scan_is_treated_as_unknown(monkeypatch, probe_log):
     """libusb returning no devices at all means the scan failed, not that the bus is empty."""
     monkeypatch.setattr(loader, "present_usb_vendor_ids", lambda: set())
     assert loader.discover_spectrometers("Auto") == []
-    assert probe_log["probed"] == loader.AUTO_PROBE_ORDER
+    assert probe_log["probed"] == _order_without_vendor_gated()
 
 
 def test_auto_prefers_last_connected_backend(monkeypatch, probe_log):

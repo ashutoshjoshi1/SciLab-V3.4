@@ -437,8 +437,9 @@ class SpectroApp(tk.Tk):
         from tabs.ui_utils import Tooltip
 
         tips = {
-            "dll_entry": "Vendor DLL for DLL-backed backends (Ava1, Hama2/3/4, MiniSpec). Leave empty to use the "
-                         "bundled default; not used by Hama5 (USB) or the Simulated backend.",
+            "dll_entry": "Vendor DLL for DLL-backed backends (Ava1, Hama2/3/4, Hama6, MiniSpec, OcOpt1, Jeti1). "
+                         "Leave empty to use the bundled or installed default; not used by Hama5 (USB) or the "
+                         "Simulated backend.",
             "auto_it_entry": "Starting integration time (ms) for the auto-exposure search. Leave empty to use the "
                              "per-source defaults; the controller then jumps to the target band in a few frames.",
             "spec_type_combo": "Auto probes each hardware backend in turn. Pick Simulated to exercise the whole "

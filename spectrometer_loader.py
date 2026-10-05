@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from domain.spectrometer import assert_spectrometer_backend
 
@@ -37,7 +37,10 @@ HAMA6_VENDOR_INSTALL_DLL = Path(r"C:\Program Files\HamamatsuMinispectrometer for
 # falls back to fake data.
 # "Hama6" = Hamamatsu C13016 evaluation circuit / C13985 module via the vendor .NET
 # assembly MICRO_USB2_CLR.dll (pythonnet).
-SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "Hama5", "Hama6", "MiniSpec", "Simulated", "OcOpt1"]
+# "Jeti1" = JETI PE60_2 readout electronics (and other JETI spectrometers) via the
+# JETI SDK, jeti_spectro_ex64.dll + jeti_core64.dll (bundled; the SDK licence allows it).
+SPECTROMETER_TYPE_OPTIONS = ["Auto", "Ava1", "Hama2", "Hama3", "Hama4", "Hama5", "Hama6", "MiniSpec", "Simulated", "OcOpt1",
+                             "Jeti1"]
 
 
 def normalize_spec_type(spec_type: Optional[str]) -> str:
@@ -66,6 +69,8 @@ def infer_spec_type_from_dll_path(dll_path: Optional[str]) -> Optional[str]:
         return "Hama6"
     if name == "oceandirect.dll":
         return "OcOpt1"
+    if name.startswith("jeti_") and name.endswith(".dll"):
+        return "Jeti1"
     return None
 
 
@@ -77,6 +82,11 @@ def suggest_default_dll_path(spec_type: Optional[str]) -> str:
         from spectrometers.oceandirect_spectrometer import find_oceandirect_dll
 
         return find_oceandirect_dll()
+    if normalized == "Jeti1":
+        # Bundled in DLLS_DIR; JETI_SDK_HOME (an installed SDK) takes precedence.
+        from spectrometers.jeti_spectrometer import find_jeti_dll
+
+        return find_jeti_dll()
     suggestions = {
         "Ava1": DLLS_DIR / "avaspecx64.dll",
         "Hama3": DLLS_DIR / "DcIcUSB.dll",
@@ -117,14 +127,15 @@ def _clean_text(value) -> str:
 
 
 # Default Auto probe order. Hama5 only claims Hamamatsu USB devices that are not
-# DCamUSB units, so it is safe to try last.
-AUTO_PROBE_ORDER = ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5", "Hama6", "OcOpt1"]
+# DCamUSB units, so it is safe to try late.
+AUTO_PROBE_ORDER = ["Ava1", "Hama4", "Hama3", "Hama2", "MiniSpec", "Hama5", "Hama6", "Jeti1", "OcOpt1"]
 
 # USB vendor IDs each backend can possibly talk to. In Auto mode a backend is not
 # even loaded when no device of its vendor is attached: each skipped probe saves a
 # DLL load, a runtime initialisation and a USB enumeration (seconds each).
 AVANTES_VENDOR_ID = 0x1992
 HAMAMATSU_VENDOR_ID = 0x0661
+JETI_VENDOR_ID = 0x0C6C
 BACKEND_USB_VENDORS: Dict[str, frozenset] = {
     "Ava1": frozenset({AVANTES_VENDOR_ID}),
     "Hama2": frozenset({HAMAMATSU_VENDOR_ID}),
@@ -133,7 +144,15 @@ BACKEND_USB_VENDORS: Dict[str, frozenset] = {
     "MiniSpec": frozenset({HAMAMATSU_VENDOR_ID}),
     "Hama5": frozenset({HAMAMATSU_VENDOR_ID}),
     "Hama6": frozenset({HAMAMATSU_VENDOR_ID}),
+    "Jeti1": frozenset({JETI_VENDOR_ID}),
 }
+
+# Backends Auto probes only when one of their USB vendor IDs is positively seen,
+# never on an unknown (failed) USB pre-scan. The JETI SDK's device search opens
+# and queries every COM port on the PC, and SciLab's laser controllers sit on COM
+# ports that are still closed while the spectrometer connects; selecting the type
+# explicitly always searches.
+AUTO_REQUIRES_VENDOR_MATCH = frozenset({"Jeti1"})
 
 
 def present_usb_vendor_ids() -> Optional[set]:
@@ -266,6 +285,9 @@ def _import_backend_class(spec_type: str, dll_path: Optional[str] = None):
     if normalized == "OcOpt1":
         module = importlib.import_module("spectrometers.oceandirect_spectrometer")
         return module.OceanDirect_Spectrometer
+    if normalized == "Jeti1":
+        module = importlib.import_module("spectrometers.jeti_spectrometer")
+        return module.Jeti_Spectrometer
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 
@@ -483,6 +505,11 @@ def _discover_oceandirect(dll_path: Optional[str]) -> List[Dict[str, str]]:
         _release_probe(spec)
 
 
+def _discover_jeti(dll_path: Optional[str]) -> List[Dict[str, str]]:
+    module = importlib.import_module("spectrometers.jeti_spectrometer")
+    return module.enumerate_devices(_resolve_dll_path("Jeti1", dll_path))
+
+
 def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str, str]]:
     normalized = normalize_spec_type(spec_type)
     if normalized == "Ava1":
@@ -503,19 +530,26 @@ def _discover_for_type(spec_type: str, dll_path: Optional[str]) -> List[Dict[str
         return _discover_simulated(dll_path)
     if normalized == "OcOpt1":
         return _discover_oceandirect(dll_path)
+    if normalized == "Jeti1":
+        return _discover_jeti(dll_path)
     raise ValueError(f"Unsupported spectrometer type '{spec_type}'.")
 
 
-def _format_discovery_failure(spec_type: str, errors: List[str], skipped: List[str], vendors: Optional[set]) -> str:
+def _format_discovery_failure(
+    spec_type: str, errors: List[str], skipped: List[str], vendors: Optional[set], unscanned: Sequence[str] = ()
+) -> str:
     lines = [f"No {spec_type} spectrometer detected." if spec_type != "Auto" else "No spectrometer detected."]
     if errors:
         lines.append("Backends that were probed:")
         lines.extend(f"  • {entry}" for entry in errors)
     if skipped:
         lines.append(f"Skipped (no matching USB device attached): {', '.join(skipped)}")
+    if "Jeti1" in skipped or "Jeti1" in unscanned:
+        lines.append("Auto searches for JETI spectrometers only when a JETI USB device (vendor 0C6C) is seen; "
+                     "select Jeti1 to search for a PE60_2.")
     if vendors is not None:
         seen = ", ".join(f"{vendor:04X}" for vendor in sorted(vendors)) or "none"
-        lines.append(f"USB vendor IDs present: {seen}  (Avantes = 1992, Hamamatsu = 0661)")
+        lines.append(f"USB vendor IDs present: {seen}  (Avantes = 1992, Hamamatsu = 0661, JETI = 0C6C)")
     return "\n".join(lines)
 
 
@@ -533,6 +567,8 @@ def discover_spectrometers(
     (``preferred_type``) is probed first; backends whose USB vendor is not
     attached are skipped without loading their DLL; and every probe releases
     its DLL session afterwards. ``progress(text)`` is called before each probe.
+    Backends in ``AUTO_REQUIRES_VENDOR_MATCH`` (Jeti1) are probed in Auto only
+    when their vendor is positively seen, also when the pre-scan is unavailable.
     """
     normalized = normalize_spec_type(spec_type)
     candidates = _candidate_types(spec_type, dll_path, preferred_type)
@@ -546,10 +582,14 @@ def discover_spectrometers(
     errors: List[str] = []
     attempts: List[str] = []
     skipped: List[str] = []
+    unscanned: List[str] = []
     for candidate in candidates:
         wanted = BACKEND_USB_VENDORS.get(candidate)
         if vendors is not None and wanted and not (wanted & vendors):
             skipped.append(candidate)
+            continue
+        if normalized == "Auto" and candidate in AUTO_REQUIRES_VENDOR_MATCH and vendors is None:
+            unscanned.append(candidate)    # no evidence of the device: never scan COM ports blindly
             continue
         if progress is not None:
             try:
@@ -571,7 +611,7 @@ def discover_spectrometers(
         attempts.append(f"{candidate}: no compatible devices returned")
 
     if errors or skipped:
-        raise RuntimeError(_format_discovery_failure(normalized, attempts, skipped, vendors))
+        raise RuntimeError(_format_discovery_failure(normalized, attempts, skipped, vendors, unscanned))
     return []
 
 
@@ -593,6 +633,14 @@ def connect_spectrometer(
     candidates = _candidate_types(spec_type, dll_path, preferred_type=known_types[0] if known_types else None)
     if known_types:
         candidates = [candidate for candidate in candidates if candidate in known_types] or candidates
+    elif normalize_spec_type(spec_type) == "Auto":
+        # Same rule as discover_spectrometers: no blind COM-port search in Auto.
+        vendors = present_usb_vendor_ids()
+        candidates = [
+            candidate for candidate in candidates
+            if candidate not in AUTO_REQUIRES_VENDOR_MATCH
+            or (vendors is not None and BACKEND_USB_VENDORS.get(candidate, frozenset()) & vendors)
+        ]
     last_error = None
 
     for candidate in candidates:

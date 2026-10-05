@@ -12,6 +12,38 @@ the installer. The single source of truth is
 
 Nothing yet.
 
+## [3.4.2.0] — 2026-10-05
+
+### Added
+
+- **Jeti1 backend** — JETI spectrometer electronics, written for and verified
+  on a PE60_2 line-array readout board (board 2360093, firmware SPECFIRM_PE60
+  0.66.0, 2048 px, 16 bit, USB `0C6C:0CDC` as a virtual COM port), through
+  the JETI SDK 4.8.10 (`jeti_spectro_ex64.dll` + `jeti_core64.dll`, bound with
+  ctypes). Both DLLs are bundled in `spectrometers dll files/`, which the SDK
+  licence allows. One firmware scan per cycle with float averaging in SciLab,
+  about 6–7 ms per frame on top of the exposure (126 spectra/s at the 1.88 ms
+  minimum). Stop returns in under a second; the firmware ignores the break and
+  finishes the exposure, so the next measurement waits for it. Auto probes
+  Jeti1 only when a JETI USB device is attached, because the SDK's search
+  opens every COM port, including the laser controllers'. Study and measured
+  numbers in `docs/jeti-pe60-2-integration-guide.md`, a live check in
+  `tools/jeti_smoke_test.py`, and `--self-test` imports the backend.
+  Checked in the app on the bench: Setup → Jeti1 → Connect, Live View, and
+  Auto detection.
+- **JETI SDK DLLs in the installer** — `jeti_spectro_ex64.dll` and
+  `jeti_core64.dll` (SDK 4.8.10) with `JETI_SDK_license.txt`, in
+  `spectrometers dll files/`. They need no Visual C++ runtime, and Windows
+  10/11 needs no extra driver for the PE60_2.
+
+### Fixed
+
+- **OcOpt1 backend did not import**: the last commit left unresolved merge
+  markers in `oceandirect_spectrometer.py` and its tests (a stash pop), a
+  SyntaxError that also failed `--self-test`. Both sides are kept: the wait is
+  bounded by `measurement_timeout_s`, a user stop is reported as "Measurement
+  stopped by user", and one `request_stop` does both.
+
 ## [3.4.1.0] — 2026-09-22
 
 ### Added

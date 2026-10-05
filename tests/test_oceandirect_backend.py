@@ -147,7 +147,6 @@ def test_get_error_ok(code, expected):
     assert spec.get_error(5).startswith("OceanDirect error 5")  # no DLL loaded -> numeric fallback
 
 
-<<<<<<< Updated upstream
 def test_request_stop_breaks_cycle_loop_and_reports_user_stop():
     """The UI Stop button must end the run early and not look like a clean finish."""
     spec = od.OceanDirect_Spectrometer()
@@ -176,7 +175,8 @@ def test_request_stop_breaks_cycle_loop_and_reports_user_stop():
     assert spec.wait_for_measurement() == "OK"
     assert spec.ncy_read == 2
     assert spec.disconnect() == "OK"
-=======
+
+
 def test_request_stop_wakes_waiters_and_ends_cycle_loop():
     spec = od.OceanDirect_Spectrometer()
     spec.simulation_mode = True
@@ -197,4 +197,3 @@ def test_wait_for_measurement_times_out_when_no_measurement_finishes():
     res = spec.wait_for_measurement(timeout=0.05)
     assert "timed out" in res
     spec._meas_done_event.set()
->>>>>>> Stashed changes
