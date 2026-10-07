@@ -10,6 +10,44 @@ the installer. The single source of truth is
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [3.4.3.0] — 2026-10-07
+
+### Changed
+
+- **The window opens maximised and complete.** The main window is now built
+  behind the splash and shown once, maximised, when it is finished; closing
+  the splash first left a bare desktop for the half second the window took
+  to build. Every tab is built, laid out and drawn at its final size before
+  the window appears (Live View, Check Resolution and EEPROM used to be built
+  on the first click, and the Measurements figure on first show), so the
+  first switch to a tab no longer builds it. The splash floor drops from
+  800 ms to 250 ms since the window build now runs behind it.
+- **Type and layout follow the screen.** The base size is 10 pt on a
+  1080p-class screen, 11 pt on 1440p (and 4K at 150 %), 12 pt on 4K at
+  125 %, and 9 pt on a 768 px-tall laptop. Paddings, control sizes,
+  scrollbars, tree rows, plot typography and every layout breakpoint scale
+  with it (`Fonts.SCALE`, `theme.logical_px`), so a form is the same physical
+  size on a 100 % 1080p panel and a 125 % 4K panel instead of a sliver of
+  small text beside a plot that fills the screen. `SCILAB_UI_SCALE=1.0` pins
+  the compact size.
+- **Wide-screen layouts.** The Setup form is capped at a reading width
+  (1560 logical px) and centred in two columns; the EEPROM register listing
+  sits at document width (1240); the Measurements control strip is capped at
+  1720 and centred under the plot, with the source row holding as many
+  sources as fit (one row of nine on a wide screen); Live View and Check
+  Resolution give the controls a quarter of the window (300–400 logical px)
+  with the sources in two columns; Analysis previews use as many columns as
+  fit and are sized to fill them; dialogs are sized to their content and
+  centred over the main window.
+- **Plot titles keep the theme face.** `set_title` alone reset the Live View
+  title to matplotlib's default face and weight on the first frame; titles
+  now go through `theme.plot_title_font`. The canvas device-pixel ratio is
+  pinned to what the Tk backend would compute, so a tab's first appearance
+  costs one draw instead of three and the toolbar icons come out at the
+  right size.
+
 ### Fixed
 
 - **Auto-IT jumped instead of stepping.** On a Hamamatsu head the first
