@@ -14,7 +14,7 @@ import logging
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from .theme import Colors, Fonts, Spacing, style_text
+from .theme import Colors, Fonts, Spacing, logical_px, style_text
 from .ui_utils import ScrollableFrame, bind_debounced_configure
 
 LOGGER = logging.getLogger(__name__)
@@ -23,9 +23,11 @@ LOGGER = logging.getLogger(__name__)
 def build(app):
     """Build the EEPROM tab."""
     main_frame = ttk.Frame(app.eeprom_tab)
-    main_frame.pack(fill="both", expand=True, padx=4, pady=4)
+    main_frame.pack(fill="both", expand=True, padx=Spacing.PAD_LG, pady=Spacing.PAD_MD)
 
-    scrollable = ScrollableFrame(main_frame, x_scroll=True, y_scroll=True, background=Colors.BG_PRIMARY)
+    # A register listing reads best at document width; centred on wide screens.
+    scrollable = ScrollableFrame(main_frame, x_scroll=True, y_scroll=True, background=Colors.BG_PRIMARY,
+                                 max_content_width=logical_px(app, 1240))
     scrollable.pack(fill="both", expand=True)
     frame = scrollable.content
 
@@ -296,10 +298,11 @@ def build(app):
 
     def _layout_eeprom_tab(width=None, _height=None):
         available_width = width or scrollable.canvas.winfo_width() or main_frame.winfo_width()
-        if not available_width:
+        if not available_width or available_width <= 1:
             return
+        available_width = min(available_width, logical_px(app, 1240))
 
-        if available_width < 620:
+        if available_width < logical_px(app, 620):
             header_title.grid_configure(row=0, column=0, sticky="w", pady=(0, 6))
             read_button.grid_configure(row=1, column=0, sticky="w", padx=0)
         else:

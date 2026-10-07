@@ -40,13 +40,13 @@ def _build_empty_state(app, notebook):
 
 def build(app):
     """Build the Analysis tab with a tabbed interface for multiple measurement runs."""
-    from .theme import Colors, Fonts
+    from .theme import Colors, Fonts, Spacing, logical_px
 
     container = ttk.Frame(app.analysis_tab)
-    container.pack(fill="both", expand=True, padx=6, pady=6)
+    container.pack(fill="both", expand=True, padx=Spacing.PAD_SM, pady=Spacing.PAD_SM)
 
     header = ttk.Frame(container, relief="flat")
-    header.pack(fill="x", pady=(0, 6))
+    header.pack(fill="x", pady=(0, Spacing.PAD_SM))
     header.columnconfigure(0, weight=1)
 
     title_frame = ttk.Frame(header)
@@ -144,7 +144,7 @@ def build(app):
         if not available_width:
             return
 
-        if available_width < 760:
+        if available_width < logical_px(app, 760):
             title_frame.grid_configure(row=0, column=0, sticky="w", pady=(0, 6))
             button_frame.grid_configure(row=1, column=0, sticky="w", padx=0)
         else:

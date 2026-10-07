@@ -15,11 +15,11 @@ from services.measurement_orchestrator import (
     MeasurementOrchestratorCallbacks,
     MeasurementOrchestratorConfig,
 )
-from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure
+from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure, center_over
 
-from .theme import (Colors, Fonts, bind_figure_margins, configure_matplotlib_style,
-                    make_run_button, relax_canvas_size, source_style, style_legend,
-                    style_listbox)
+from .theme import (Colors, Fonts, Spacing, bind_figure_margins, configure_matplotlib_style,
+                    logical_px, make_run_button, plot_title_font, relax_canvas_size,
+                    source_style, style_legend, style_listbox)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def build(app):
     def _build_measure_tab():
         # Create main container with minimal padding for maximum space
         main_frame = ttk.Frame(app.measure_tab)
-        main_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        main_frame.pack(fill="both", expand=True, padx=Spacing.PAD_SM, pady=Spacing.PAD_SM)
 
         # Top section - Live measurement plot (maximize space). Packed *after*
         # the control panel below, so that panel keeps its slice of the window:
@@ -171,9 +171,12 @@ def build(app):
         controls_host = ttk.Frame(main_frame, relief="flat", height=300)
         controls_host.pack(side="bottom", fill="x", pady=(0, 0))
         controls_host.pack_propagate(False)
-        plot_frame.pack(side="top", fill="both", expand=True, pady=(0, 6))
+        plot_frame.pack(side="top", fill="both", expand=True, pady=(0, Spacing.PAD_SM))
 
-        controls_scroll = ScrollableFrame(controls_host, y_scroll=True, background=Colors.BG_PRIMARY)
+        # The control strip is capped at a laptop-screen width and centred
+        # under the plot, so its cards keep their proportions on a 4K screen.
+        controls_scroll = ScrollableFrame(controls_host, y_scroll=True, background=Colors.BG_PRIMARY,
+                                          max_content_width=logical_px(app, 1720))
         controls_scroll.pack(fill="both", expand=True)
 
         controls_frame = ttk.Frame(controls_scroll.content)
@@ -472,7 +475,7 @@ def build(app):
             actions_buttons_frame.columnconfigure(col, weight=1)
 
         def _layout_quick_controls(panel_width):
-            if panel_width < 520:
+            if panel_width < logical_px(app, 520):
                 select_all_chk.grid_configure(row=0, column=0, columnspan=3, pady=(0, 4))
                 quick_label.grid_configure(row=1, column=0, padx=(0, 4))
                 quick_scan_btn.grid_configure(row=1, column=1, padx=2)
@@ -484,8 +487,13 @@ def build(app):
                 full_spectrum_btn.grid_configure(row=0, column=3, padx=2)
 
         def _layout_laser_checkbuttons(panel_width):
-            columns = 4 if panel_width >= 700 else 3 if panel_width >= 520 else 2
-            for col in range(4):
+            # As many per row as fit at ~112 logical px each: one row of nine
+            # on a wide screen, two or three rows on a laptop.
+            count = len(measure_checkbuttons)
+            fit = max(2, min(count, panel_width // logical_px(app, 112)))
+            rows = -(-count // fit)          # ceil: how many rows that many per row needs
+            columns = -(-count // rows)      # then spread the sources evenly over them
+            for col in range(max(4, len(measure_checkbuttons))):
                 laser_frame.columnconfigure(col, weight=0)
             for col in range(columns):
                 laser_frame.columnconfigure(col, weight=1)
@@ -496,13 +504,20 @@ def build(app):
             for idx, chk in enumerate(measure_checkbuttons):
                 chk.grid_configure(row=(idx // columns) + 2, column=idx % columns)
 
-        def _layout_measure_controls(width=None, _height=None):
-            available_width = width or controls_host.winfo_width()
-            main_height = main_frame.winfo_height() or controls_host.winfo_height()
-            if not available_width:
+        def _layout_measure_controls(width=None, height=None):
+            # Bound to the tab's own frame, whose size arrives before its
+            # children are arranged: the strip height is then known on the
+            # first geometry pass and the plot canvas is sized (and drawn) once.
+            host_width = width or main_frame.winfo_width()
+            main_height = height or main_frame.winfo_height()
+            if not host_width or host_width <= 1:
                 return
+            # The scroll frame caps and centres the strip; lay out for that width.
+            available_width = min(host_width, logical_px(app, 1720))
+            narrow = available_width < logical_px(app, 900)
 
-            controls_height = max(220, min(430, int(main_height * (0.5 if available_width < 1100 else 0.4))))
+            controls_height = max(logical_px(app, 230),
+                                  min(logical_px(app, 360), int(main_height * (0.5 if narrow else 0.38))))
             controls_host.configure(height=controls_height)
 
             for col in range(4):
@@ -510,7 +525,7 @@ def build(app):
             for row in range(4):
                 controls_frame.rowconfigure(row, weight=0)
 
-            if available_width >= 1450:
+            if available_width >= logical_px(app, 1180):
                 # One row of four cards: stacking Settings over Reference used to
                 # push Reference below the visible strip on a 1500 px window.
                 layouts = (
@@ -519,11 +534,10 @@ def build(app):
                     (reference_frame, 0, 2, {"padx": 6}),
                     (actions_frame, 0, 3, {"padx": (6, 0)}),
                 )
-                controls_frame.columnconfigure(0, weight=3)
-                for col in (1, 2, 3):
-                    controls_frame.columnconfigure(col, weight=1)
-                laser_panel_width = max(420, int(available_width * 0.38))
-            elif available_width >= 1100:
+                for col, weight in enumerate((3, 1, 2, 1)):
+                    controls_frame.columnconfigure(col, weight=weight)
+                laser_panel_width = int(available_width * 3 / 7) - 2 * Spacing.GROUP_PAD
+            elif not narrow:
                 layouts = (
                     (laser_frame, 0, 0, {"columnspan": 2, "padx": 0}),
                     (settings_frame, 1, 0, {"padx": (0, 6)}),
@@ -554,7 +568,7 @@ def build(app):
                     columnspan=options.get("columnspan", 1),
                 )
 
-            if available_width >= 1450:
+            if available_width >= logical_px(app, 1180):
                 # 2x2 block: a single row of four buttons demanded ~580 px, which
                 # is what squeezed the Settings and Reference cards.
                 for col in range(4):
@@ -563,7 +577,7 @@ def build(app):
                     button.grid_configure(row=idx // 2, column=idx % 2, sticky="ew",
                                           padx=(0 if idx % 2 == 0 else 6, 0),
                                           pady=(0 if idx < 2 else 6, 0))
-            elif available_width >= 1100:
+            elif not narrow:
                 for col in range(4):
                     actions_buttons_frame.columnconfigure(col, weight=1)
                 for idx, button in enumerate(action_buttons):
@@ -577,7 +591,7 @@ def build(app):
             _layout_quick_controls(laser_panel_width)
             _layout_laser_checkbuttons(laser_panel_width)
 
-        bind_debounced_configure(controls_host, _layout_measure_controls)
+        bind_debounced_configure(main_frame, _layout_measure_controls)
 
 
 
@@ -656,6 +670,8 @@ def build(app):
             target_mid=app.TARGET_MID,
             it_min=app.IT_MIN,
             it_max=app.IT_MAX,
+            it_step_up=app.IT_STEP_UP,
+            it_step_down=app.IT_STEP_DOWN,
             max_it_adjust_iters=app.MAX_IT_ADJUST_ITERS,
             sat_thresh=app.SAT_THRESH,
             n_sig=app.N_SIG,
@@ -769,11 +785,7 @@ def build(app):
                   anchor="center").pack(fill="x", pady=(0, 14))
         harmonize(top, Colors.BG_SURFACE)
 
-        top.update_idletasks()
-        width, height = max(500, top.winfo_reqwidth()), max(160, top.winfo_reqheight())
-        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - height) // 3
-        top.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+        center_over(top, self, min_width=logical_px(self, 500), min_height=logical_px(self, 160))
 
         state = {"remaining": int(seconds), "after_id": None, "finished": False}
 
@@ -874,8 +886,7 @@ def build(app):
         title = "Live Measurement"
         if any_sat:
             title += "  [SATURATED]"
-        app.meas_ax.set_title(title, fontsize=13, fontweight="bold",
-                              pad=8, color="red" if any_sat else "black")
+        app.meas_ax.set_title(title, **plot_title_font(pad=8, color=Colors.DANGER if any_sat else Colors.TEXT_PRIMARY))
 
 
 

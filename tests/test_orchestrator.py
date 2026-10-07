@@ -25,7 +25,9 @@ APP_CONFIG = dict(
     target_mid=62500,
     it_min=0.2,
     it_max=3000.0,
-    max_it_adjust_iters=12,
+    it_step_up=0.3,
+    it_step_down=0.1,
+    max_it_adjust_iters=1000,
     sat_thresh=65400,
     n_sig=50,
     n_dark=50,
@@ -129,14 +131,40 @@ def test_auto_it_converges_into_target_band(make_orchestrator):
         assert APP_CONFIG["target_low"] - 1500 <= counts.max() <= APP_CONFIG["target_high"] + 1500, tag
 
 
-def test_auto_it_iteration_budget(make_orchestrator):
-    """The proportional controller settles in a handful of frames (v3.3 needed 80-450 per source)."""
+def test_auto_it_steps_additively_without_jumping(make_orchestrator):
+    """Each unsaturated frame raises the IT by at most it_step_up.
+
+    3.4.0.0 to 3.4.2.0 jumped to ``it * target / peak`` instead, which an
+    operator watching the Auto-IT readout rightly rejected as not incrementing.
+    """
     orchestrator, _data, log, _completed = make_orchestrator()
-    result = orchestrator.run(["377", "405", "445", "488", "532", "685", "Hg_Ar"])
+    result = orchestrator.run(["405"])   # 520 counts/ms: the band sits near 120 ms, far from the 2.4 ms start
     assert result.errors == []
-    frames = _frames_per_tag(log)
-    assert frames, "no auto-IT frames recorded"
-    assert max(frames.values()) <= 6, frames
+    its = [it for tag, it, _peak in log if tag == "405"]
+    assert its[0] == pytest.approx(APP_CONFIG["default_start_it"]["default"])
+    steps = np.diff(its)
+    assert len(steps) >= 100 and np.all(steps > 0.0), len(steps)
+    assert np.all(steps <= APP_CONFIG["it_step_up"] + 1e-9), steps.max()
+    assert len(its) <= APP_CONFIG["max_it_adjust_iters"] + 1
+
+
+def test_dim_source_creeps_up_from_the_start_it(make_orchestrator, sim_spec):
+    """The bench case behind the fix: a first frame that is mostly dark offset.
+
+    At 62 counts/ms the 2.4 ms frame peaks near 750 counts, 600 of them dark
+    offset; the proportional jump went straight to about 200 ms from there.
+    The additive stepper must creep up 0.3 ms per frame and, when the frame
+    budget runs out short of the band, say so instead of skipping the source.
+    """
+    sim_spec.lines = tuple(
+        line if line.tag != "405" else line.__class__("405", line.wavelength_nm, 62.0) for line in sim_spec.lines
+    )
+    orchestrator, data, log, completed = make_orchestrator(max_it_adjust_iters=20)
+    result = orchestrator.run(["405"])
+    its = [it for tag, it, _peak in log if tag == "405"]
+    assert its == pytest.approx([2.4 + 0.3 * i for i in range(21)])
+    assert result.errors and "did not reach the target band" in result.errors[0]
+    assert completed == [] and data.rows == []
 
 
 def test_saturated_at_minimum_it_is_reported_not_spun(make_orchestrator, sim_spec):

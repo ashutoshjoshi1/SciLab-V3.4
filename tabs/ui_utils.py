@@ -8,7 +8,13 @@ from .ui_pump import ThrottledRedraw, UiPump  # noqa: F401 - re-exported for the
 
 
 class ScrollableFrame(ttk.Frame):
-    """A ttk frame backed by a canvas with optional x/y scrollbars."""
+    """A ttk frame backed by a canvas with optional x/y scrollbars.
+
+    ``max_content_width`` caps how wide the content may be laid out, in device
+    pixels: a form designed for a laptop screen should not stretch every entry
+    across a 4K monitor. Narrower content is centred (``align="center"``) or
+    kept at the left edge (``align="left"``) in the spare canvas width.
+    """
 
     def __init__(
         self,
@@ -17,11 +23,15 @@ class ScrollableFrame(ttk.Frame):
         x_scroll: bool = False,
         y_scroll: bool = True,
         background: str | None = None,
+        max_content_width: int | None = None,
+        align: str = "center",
     ):
         super().__init__(master)
 
         self._x_scroll = x_scroll
         self._y_scroll = y_scroll
+        self._max_content_width = int(max_content_width) if max_content_width else None
+        self._align = align
         self._window_id = None
         self._wheel_bound = False
 
@@ -74,11 +84,24 @@ class ScrollableFrame(ttk.Frame):
         if self._window_id is None:
             return
         canvas_width = max(1, self.canvas.winfo_width())
-        if self._x_scroll:
-            req_width = self.content.winfo_reqwidth()
-            self.canvas.itemconfigure(self._window_id, width=max(canvas_width, req_width))
-        else:
-            self.canvas.itemconfigure(self._window_id, width=canvas_width)
+        req_width = self.content.winfo_reqwidth()
+        width = max(canvas_width, req_width) if self._x_scroll else canvas_width
+        if self._max_content_width:
+            # Never below what the content asks for when it may scroll
+            # sideways, so a wide table still gets its horizontal scrollbar.
+            floor = req_width if self._x_scroll else 0
+            width = min(width, max(self._max_content_width, floor))
+        x = max(0, (canvas_width - width) // 2) if self._align == "center" else 0
+        self.canvas.coords(self._window_id, x, 0)
+        self.canvas.itemconfigure(self._window_id, width=width)
+
+    @property
+    def content_width(self) -> int:
+        """Width the content is currently laid out at (device pixels)."""
+        try:
+            return int(float(self.canvas.itemcget(self._window_id, "width") or 0)) or self.content.winfo_width()
+        except (tk.TclError, ValueError):
+            return self.content.winfo_width()
 
     def _sync_scrollbars(self):
         """Show each scrollbar only while it has something to scroll.
@@ -406,21 +429,71 @@ class BlitRenderer:
         self.canvas.blit(self.ax.bbox)
 
 
-def bind_debounced_configure(widget, callback, delay_ms: int = 120):
-    """Call callback(width, height) after resize activity settles."""
+def bind_debounced_configure(widget, callback, delay_ms: int = 60):
+    """Call ``callback(width, height)`` when ``widget`` settles at a new size.
 
-    pending = {"after_id": None}
+    The first real size (the widget has just been mapped, or the tab it lives
+    on has just been shown) is laid out at once, so a page never comes up in
+    the arrangement for its previous size and jumps a moment later. Sizes
+    that have not changed are ignored, a widget that has no size yet (1x1,
+    unmapped) is skipped, and a run of resize events is coalesced into one
+    call ``delay_ms`` after the last. Returns a function that forces the
+    layout now.
+    """
+    pending = {"after_id": None, "size": None}
 
-    def _schedule(_event=None):
+    def _fire():
+        pending["after_id"] = None
+        try:
+            size = (widget.winfo_width(), widget.winfo_height())
+        except tk.TclError:
+            return
+        pending["size"] = size
+        if size[0] <= 1 or size[1] <= 1:
+            return
+        callback(*size)
+
+    def _schedule(_event=None, *, immediate=False):
+        try:
+            size = (widget.winfo_width(), widget.winfo_height())
+        except tk.TclError:
+            return
+        if size == pending["size"] and pending["after_id"] is None:
+            return
         if pending["after_id"] is not None:
             try:
                 widget.after_cancel(pending["after_id"])
-            except Exception:
+            except tk.TclError:
                 pass
-        pending["after_id"] = widget.after(
-            delay_ms,
-            lambda: callback(widget.winfo_width(), widget.winfo_height()),
-        )
+            pending["after_id"] = None
+        last = pending["size"]
+        if immediate or last is None or last[0] <= 1 or last[1] <= 1:
+            _fire()
+            return
+        pending["after_id"] = widget.after(delay_ms, _fire)
 
     widget.bind("<Configure>", _schedule, add="+")
+    widget.bind("<Map>", lambda _event: _schedule(immediate=True), add="+")
     widget.after_idle(_schedule)
+    return _fire
+
+
+def center_over(window, parent, *, min_width: int = 0, min_height: int = 0) -> None:
+    """Size a Toplevel to its content and centre it over ``parent``.
+
+    Replaces fixed ``geometry("450x340")`` calls, which clipped their content
+    at 125 % DPI and with the larger type used on 4K screens.
+    """
+    window.update_idletasks()
+    width = max(int(min_width), window.winfo_reqwidth())
+    height = max(int(min_height), window.winfo_reqheight())
+    try:
+        parent_w, parent_h = parent.winfo_width(), parent.winfo_height()
+        if parent_w <= 1 or parent_h <= 1:
+            raise tk.TclError("parent not laid out")
+        x = parent.winfo_rootx() + (parent_w - width) // 2
+        y = parent.winfo_rooty() + (parent_h - height) // 3
+    except tk.TclError:
+        x = (window.winfo_screenwidth() - width) // 2
+        y = (window.winfo_screenheight() - height) // 3
+    window.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")

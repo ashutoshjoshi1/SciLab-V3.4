@@ -20,8 +20,8 @@ from spectrometer_loader import (
     discover_spectrometers,
     suggest_default_dll_path,
 )
-from .theme import Colors, Fonts, Spacing, badge, harmonize, source_color, style_listbox
-from .ui_utils import ScrollableFrame, Tooltip, bind_debounced_configure, run_in_worker
+from .theme import Colors, Fonts, Spacing, badge, harmonize, logical_px, source_color, style_listbox
+from .ui_utils import ScrollableFrame, Tooltip, bind_debounced_configure, center_over, run_in_worker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,24 +43,46 @@ def build(app):
         )
 
     def _build_setup_tab():
-        # Main container with better spacing
         main_frame = ttk.Frame(app.setup_tab)
-        main_frame.pack(fill="both", expand=True, padx=16, pady=16)
+        main_frame.pack(fill="both", expand=True, padx=Spacing.PAD_LG, pady=Spacing.PAD_MD)
 
-        scrollable = ScrollableFrame(main_frame, x_scroll=True, y_scroll=True, background=Colors.BG_PRIMARY)
+        # The form never grows past a comfortable reading width: on a wide
+        # screen it sits centred in two columns instead of stretching every
+        # entry across the whole monitor.
+        scrollable = ScrollableFrame(main_frame, x_scroll=True, y_scroll=True, background=Colors.BG_PRIMARY,
+                                     max_content_width=logical_px(app, 1560))
         scrollable.pack(fill="both", expand=True)
         frame = scrollable.content
 
-        # Add a title header
-        title_frame = ttk.Frame(frame)
-        title_frame.pack(fill="x", padx=10, pady=(0, Spacing.PAD_MD))
+        # Title row, with the page actions on the right.
+        header = ttk.Frame(frame)
+        header.pack(fill="x", pady=(0, Spacing.PAD_MD))
+        header.columnconfigure(0, weight=1)
+        title_frame = ttk.Frame(header)
+        title_frame.grid(row=0, column=0, sticky="w")
         ttk.Label(title_frame, text="System Configuration",
-                 font=Fonts.H1).pack(anchor="w")
+                  font=Fonts.H1).pack(anchor="w")
+        ttk.Label(title_frame, text="Instrument, serial ports, light sources and bench options.",
+                  style="Secondary.TLabel").pack(anchor="w")
+        header_actions = ttk.Frame(header)
+        header_actions.grid(row=0, column=1, sticky="e")
+        ttk.Button(header_actions, text="Load Settings", command=load_settings_into_ui,
+                   style='SetupButton.TButton').pack(side="right")
+        ttk.Button(header_actions, text="Save Settings", command=save_settings,
+                   style='SetupAction.TButton').pack(side="right", padx=(0, Spacing.PAD_SM))
+
+        # Two columns on a wide window, one below the other otherwise
+        # (_layout_setup); every card keeps its column either way.
+        columns = ttk.Frame(frame)
+        columns.pack(fill="both", expand=True)
+        left_col = ttk.Frame(columns)
+        right_col = ttk.Frame(columns)
+        card_pack = dict(fill="x", pady=(0, Spacing.SECTION_GAP))
 
         # ============ SPECTROMETER SECTION ============
-        spec_group = ttk.LabelFrame(frame, text="Spectrometer Configuration",
+        spec_group = ttk.LabelFrame(left_col, text="Spectrometer Configuration",
                                     style='Setup.TLabelframe')
-        spec_group.pack(fill="x", padx=8, pady=8)
+        spec_group.pack(**card_pack)
 
         # Configure grid columns
         spec_group.columnconfigure(1, weight=1)
@@ -128,8 +150,8 @@ def build(app):
                   style='SetupButton.TButton', width=15).pack(side="left")
 
         # ============ TWO-COLUMN LAYOUT FOR COM PORTS AND HEAD SENSOR ============
-        ports_headsensor_row = ttk.Frame(frame)
-        ports_headsensor_row.pack(fill="x", padx=8, pady=8)
+        ports_headsensor_row = ttk.Frame(left_col)
+        ports_headsensor_row.pack(**card_pack)
         ports_headsensor_row.columnconfigure(0, weight=1)
         ports_headsensor_row.columnconfigure(1, weight=1)
 
@@ -205,25 +227,23 @@ def build(app):
                                              style='SetupButton.TButton', width=18)
         app.test_headsensor_btn.pack(side="left")
 
-        def _layout_ports_and_headsensor(width=None, _height=None):
-            available_width = width or scrollable.canvas.winfo_width() or main_frame.winfo_width()
-            if available_width and available_width < 920:
-                ports_group.grid_configure(row=0, column=0, padx=0, pady=(0, 4))
-                headsensor_group.grid_configure(row=1, column=0, padx=0, pady=(4, 0))
+        def _layout_ports_and_headsensor(column_width):
+            gap = Spacing.PAD_SM
+            if column_width < logical_px(app, 700):
+                ports_group.grid_configure(row=0, column=0, padx=0, pady=(0, gap))
+                headsensor_group.grid_configure(row=1, column=0, padx=0, pady=0)
                 ports_headsensor_row.columnconfigure(0, weight=1)
                 ports_headsensor_row.columnconfigure(1, weight=0)
             else:
-                ports_group.grid_configure(row=0, column=0, padx=(0, 4), pady=0)
-                headsensor_group.grid_configure(row=0, column=1, padx=(4, 0), pady=0)
+                ports_group.grid_configure(row=0, column=0, padx=(0, gap // 2), pady=0)
+                headsensor_group.grid_configure(row=0, column=1, padx=(gap - gap // 2, 0), pady=0)
                 ports_headsensor_row.columnconfigure(0, weight=1)
                 ports_headsensor_row.columnconfigure(1, weight=1)
 
-        bind_debounced_configure(scrollable.canvas, _layout_ports_and_headsensor)
-
         # ============ STAGE CONTROLLER SECTION ============
-        stage_group = ttk.LabelFrame(frame, text="Stage Motor Controller",
+        stage_group = ttk.LabelFrame(left_col, text="Stage Motor Controller",
                                      style='Setup.TLabelframe')
-        stage_group.pack(fill="x", padx=8, pady=8)
+        stage_group.pack(**card_pack)
         stage_group.columnconfigure(1, weight=1)
 
         ttk.Label(stage_group, text="Config File:",
@@ -316,9 +336,9 @@ def build(app):
                   style='SetupButton.TButton', width=16).pack(side="left")
 
         # ============ LASER MANAGEMENT SECTION ============
-        laser_mgmt_group = ttk.LabelFrame(frame, text="Laser Management",
+        laser_mgmt_group = ttk.LabelFrame(right_col, text="Laser Management",
                                         style='Setup.TLabelframe')
-        laser_mgmt_group.pack(fill="x", padx=8, pady=8)
+        laser_mgmt_group.pack(**card_pack)
 
         # Info label
         ttk.Label(laser_mgmt_group, text="Manage available lasers in the system:",
@@ -398,8 +418,8 @@ def build(app):
             # Create custom dialog
             dialog = tk.Toplevel(app)
             dialog.title("Add New Laser")
-            dialog.geometry("450x340")
             dialog.transient(app)
+            dialog.resizable(False, False)
             dialog.grab_set()
 
             # Set icon if available
@@ -408,14 +428,8 @@ def build(app):
             except Exception:
                 pass
 
-            # Center dialog on screen
-            dialog.update_idletasks()
-            x = (dialog.winfo_screenwidth() // 2) - (450 // 2)
-            y = (dialog.winfo_screenheight() // 2) - (340 // 2)
-            dialog.geometry(f"+{x}+{y}")
-
             # Configure dialog style
-            dialog_frame = ttk.Frame(dialog, padding=20)
+            dialog_frame = ttk.Frame(dialog, padding=Spacing.PAD_XL)
             dialog_frame.pack(fill="both", expand=True)
 
             # Title
@@ -536,6 +550,9 @@ def build(app):
             dialog.configure(bg=Colors.BG_SURFACE)
             dialog_frame.configure(style="Surface.TFrame")
             harmonize(dialog, Colors.BG_SURFACE)
+
+            # Sized to its content and centred over the main window.
+            center_over(dialog, app, min_width=logical_px(app, 440))
 
             # Focus on wavelength entry
             wl_entry.focus_set()
@@ -683,17 +700,17 @@ def build(app):
                  foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION_ITALIC).pack(anchor="w", padx=8, pady=(6, 4))
 
         # ============ LASER POWER CONFIGURATION ============
-        power_group = ttk.LabelFrame(frame, text="Laser Power Configuration",
+        power_group = ttk.LabelFrame(right_col, text="Laser Power Configuration",
                                     style='Setup.TLabelframe')
-        power_group.pack(fill="x", padx=8, pady=8)
+        power_group.pack(**card_pack)
 
         app.power_entries = {}
         app.power_group_frame = power_group  # Store reference for rebuilding
 
-        def rebuild_power_entries(force=False):
+        def rebuild_power_entries(force=False, width=None):
             """Rebuild power entry widgets based on current laser configurations."""
-            available_width = scrollable.canvas.winfo_width() or main_frame.winfo_width() or app.winfo_width()
-            column_groups = 1 if (available_width and available_width < 980) or len(app.laser_configs) <= 4 else 2
+            available_width = width or power_group.winfo_width() or 0
+            column_groups = 1 if available_width < logical_px(app, 640) or len(app.laser_configs) <= 4 else 2
             if (
                 not force
                 and getattr(app, "_setup_power_column_groups", None) == column_groups
@@ -725,11 +742,12 @@ def build(app):
             lasers_per_group = max(1, (len(sorted_lasers) + column_groups - 1) // column_groups)
             total_columns = column_groups * 4
 
-            for col in range(8):
+            # Groups sit at the left edge and a trailing spacer column takes the
+            # slack; weights on the label columns used to float the groups
+            # towards the middle of the card.
+            for col in range(9):
                 power_group.columnconfigure(col, weight=0)
-            for col in range(total_columns):
-                weight = 1 if col % 4 == 0 else 0
-                power_group.columnconfigure(col, weight=weight)
+            power_group.columnconfigure(total_columns, weight=1)
 
             header_row = 0
             for group_index in range(column_groups):
@@ -783,12 +801,12 @@ def build(app):
             # Add separator line
             separator_row = max_row_used + 1
             ttk.Separator(power_group, orient="horizontal").grid(
-                row=separator_row, column=0, columnspan=total_columns, sticky="ew", padx=8, pady=(12, 8))
+                row=separator_row, column=0, columnspan=total_columns + 1, sticky="ew", padx=8, pady=(12, 8))
 
             # Add info label at bottom after separator
             info_row = separator_row + 1
             info_frame = ttk.Frame(power_group)
-            info_frame.grid(row=info_row, column=0, columnspan=total_columns, sticky="ew", padx=8, pady=(0, 8))
+            info_frame.grid(row=info_row, column=0, columnspan=total_columns + 1, sticky="ew", padx=8, pady=(0, 8))
 
             ttk.Label(info_frame,
                      text="Power values are the laser-control setpoints.",
@@ -799,14 +817,13 @@ def build(app):
             # the pass; otherwise they come back as grey blocks on the card.
             harmonize(power_group, Colors.BG_SURFACE)
 
-        # Initial build of power entries
+        # Initial build of power entries; _layout_setup re-flows them for the column width.
         rebuild_power_entries(force=True)
-        bind_debounced_configure(scrollable.canvas, lambda *_size: rebuild_power_entries())
 
         # ============ ADVANCED (BENCH-VALIDATED) OPTIONS ============
-        advanced_group = ttk.LabelFrame(frame, text="Advanced: speed options (validate on the bench first)",
+        advanced_group = ttk.LabelFrame(left_col, text="Advanced: speed options (validate on the bench first)",
                                         style='Setup.TLabelframe')
-        advanced_group.pack(fill="x", padx=8, pady=8)
+        advanced_group.pack(**card_pack)
         app.measurement_flag_vars = {}
         flag_help = {
             "smart_source_off": ("Turn off only the lit source between lasers",
@@ -834,16 +851,33 @@ def build(app):
                   foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION_ITALIC).grid(
             row=len(flag_help), column=0, sticky="w", padx=12, pady=(4, 6))
 
-        # ============ SAVE/LOAD SECTION ============
-        ttk.Separator(frame, orient="horizontal").pack(fill="x", padx=8, pady=12)
+        # ============ RESPONSIVE COLUMNS ============
+        def _layout_setup(width=None, _height=None):
+            available = width or scrollable.canvas.winfo_width()
+            if not available or available <= 1:
+                return
+            content_width = min(available, logical_px(app, 1560))
+            gap = Spacing.PAD_LG
+            # Side by side only when both columns fit at their natural widths
+            # (with a little slack); otherwise the wider one would push the
+            # page into a horizontal scroll.
+            needed = int((left_col.winfo_reqwidth() + right_col.winfo_reqwidth() + gap) * 1.03)
+            if content_width >= max(needed, logical_px(app, 1100)):
+                left_col.grid(row=0, column=0, sticky="nsew", padx=(0, gap // 2))
+                right_col.grid(row=0, column=1, sticky="nsew", padx=(gap - gap // 2, 0))
+                columns.columnconfigure(0, weight=1)
+                columns.columnconfigure(1, weight=1)
+                column_width = (content_width - gap) // 2
+            else:
+                left_col.grid(row=0, column=0, sticky="ew", padx=0)
+                right_col.grid(row=1, column=0, sticky="ew", padx=0)
+                columns.columnconfigure(0, weight=1)
+                columns.columnconfigure(1, weight=0)
+                column_width = content_width
+            _layout_ports_and_headsensor(column_width)
+            rebuild_power_entries(width=column_width - 2 * Spacing.GROUP_PAD)
 
-        save_group = ttk.Frame(frame)
-        save_group.pack(fill="x", padx=8, pady=(0, 8))
-
-        ttk.Button(save_group, text="Save Settings", command=save_settings,
-                  style='SetupAction.TButton', width=20).pack(side="left", padx=(0, 8))
-        ttk.Button(save_group, text="Load Settings", command=load_settings_into_ui,
-                  style='SetupButton.TButton', width=20).pack(side="left")
+        bind_debounced_configure(scrollable.canvas, _layout_setup)
 
 
     def refresh_ports():
@@ -926,7 +960,6 @@ def build(app):
         # Create custom dialog
         dialog = tk.Toplevel(app)
         dialog.title("Select Spectrometer")
-        dialog.geometry("500x350")
         dialog.transient(app)
         dialog.grab_set()
 
@@ -936,14 +969,8 @@ def build(app):
         except Exception:
             pass
 
-        # Center dialog on screen
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (500 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (350 // 2)
-        dialog.geometry(f"+{x}+{y}")
-
         # Configure dialog style
-        dialog_frame = ttk.Frame(dialog, padding=20)
+        dialog_frame = ttk.Frame(dialog, padding=Spacing.PAD_XL)
         dialog_frame.pack(fill="both", expand=True)
 
         # Title
@@ -1026,6 +1053,8 @@ def build(app):
         dialog.configure(bg=Colors.BG_SURFACE)
         dialog_frame.configure(style="Surface.TFrame")
         harmonize(dialog, Colors.BG_SURFACE)
+
+        center_over(dialog, app, min_width=logical_px(app, 500), min_height=logical_px(app, 340))
 
         # Focus on listbox
         listbox.focus_set()

@@ -18,6 +18,8 @@ Design notes
 
 from __future__ import annotations
 
+import os
+import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -88,6 +90,45 @@ def screen_dpi(root, default: float = 100.0) -> float:
     if not (48.0 <= dpi <= 240.0):
         return default
     return dpi
+
+
+def ui_scale(root) -> float:
+    """Device pixels per 96-dpi logical pixel, including the type scale chosen for this screen."""
+    return screen_dpi(root, 96.0) / 96.0 * Fonts.SCALE
+
+
+def logical_px(root, value: float) -> int:
+    """Device pixels for a length designed in 96-dpi logical pixels at the 10 pt base size.
+
+    Every layout breakpoint and maximum width in the tabs is written in these
+    units, so a form that is 1560 "design pixels" wide is the same physical
+    size on a 100 % 1080p panel and a 125 % 4K panel.
+    """
+    return int(round(value * ui_scale(root)))
+
+
+def scaled_pt(size: float) -> float:
+    """A matplotlib point size that follows the UI type scale."""
+    return size * Fonts.SCALE
+
+
+def plot_title_font(**overrides) -> dict:
+    """Keyword arguments for ``Axes.set_title`` that match ``configure_matplotlib_style``.
+
+    ``set_title(text)`` alone resets the title to matplotlib's default face and
+    weight, which is how the Live View title used to lose its bold on the
+    first frame.
+    """
+    kwargs = dict(fontsize=scaled_pt(12.5), fontweight="bold",
+                  fontfamily=matplotlib_font_family(), pad=_px(12),
+                  color=Colors.TEXT_PRIMARY)
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _px(value: float) -> int:
+    """Pixel padding scaled with the type size (1.0 on a 1080p-class screen)."""
+    return int(round(value * Fonts.SCALE))
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +241,9 @@ class Fonts:
     DISPLAY_FAMILY = DISPLAY_FAMILY
     SMALL_FAMILY = SMALL_FAMILY
     MONO_FAMILY = _MONO_FAMILY
+    # Base size / 10 pt: 1.0 on a 1080p-class screen, 1.1-1.2 on 1440p / 4K
+    # panels. Paddings, plot typography and layout breakpoints follow it.
+    SCALE = 1.0
 
     # Headings -- display cut, tighter letterfit
     H0 = (DISPLAY_FAMILY, 17, "bold")
@@ -244,10 +288,12 @@ def _first_available(candidates, installed, default: str) -> str:
 def resolve_fonts(root) -> None:
     """Pick the best installed families and a base size that suits the screen.
 
-    Point sizes already track DPI through Tk's scaling factor, so the only
-    screen-dependent choice left is *vertical room*: these panels are dense,
-    and on a 768 px-tall laptop one point less keeps them whole without
-    scrolling. Larger screens keep the validated 10 pt base.
+    Point sizes already track DPI through Tk's scaling factor, so what is
+    left to choose is how much *room* the screen has, in logical pixels:
+    these panels are dense, and on a 768 px-tall laptop one point less keeps
+    them whole without scrolling, while on a 4K panel (1728 logical rows at
+    125 %) 10 pt text is a sliver beside a plot that fills the screen, so the
+    base grows to 12 pt and every padding scales with it (``Fonts.SCALE``).
     """
     global FONT_FAMILY, DISPLAY_FAMILY, SMALL_FAMILY, _MONO_FAMILY
 
@@ -271,8 +317,24 @@ def resolve_fonts(root) -> None:
         logical_height = root.winfo_screenheight() / max(1.0, scaling / (96.0 / 72.0))
         if logical_height < 820:
             base = 9
+        elif logical_height >= 1650:
+            base = 12  # 4K at 125 %, 5K: see the docstring
+        elif logical_height >= 1300:
+            base = 11  # 2560x1440 at 100 %, 4K at 150 %
     except Exception:
         pass
+    # SCILAB_UI_SCALE=1.0 pins the type scale: an escape hatch for an operator
+    # who prefers the compact size, and how a 1080p layout is checked on a 4K
+    # development screen.
+    try:
+        override = float(os.environ.get("SCILAB_UI_SCALE", "") or 0.0)
+        if 0.7 <= override <= 1.6:
+            base = int(round(10 * override))
+    except ValueError:
+        pass
+    Fonts.SCALE = base / 10.0
+    for name, value in _SPACING_BASE.items():
+        setattr(Spacing, name, int(round(value * Fonts.SCALE)))
 
     Fonts.FAMILY = FONT_FAMILY
     Fonts.DISPLAY_FAMILY = DISPLAY_FAMILY
@@ -340,6 +402,8 @@ def resolve_fonts(root) -> None:
 # Spacing constants (pixels)
 # ---------------------------------------------------------------------------
 class Spacing:
+    """Rewritten by ``resolve_fonts`` to follow ``Fonts.SCALE``; read at build time."""
+
     PAD_XS = 4
     PAD_SM = 8
     PAD_MD = 12
@@ -349,6 +413,12 @@ class Spacing:
     SECTION_GAP = 10   # between major sections
     GROUP_PAD = 14     # inside LabelFrames
     RADIUS = 6         # nominal corner radius (used by drawn widgets)
+
+
+_SPACING_BASE = {
+    "PAD_XS": 4, "PAD_SM": 8, "PAD_MD": 12, "PAD_LG": 16, "PAD_XL": 20,
+    "SECTION_GAP": 10, "GROUP_PAD": 14, "RADIUS": 6,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +466,9 @@ def apply_theme(root: tk.Tk) -> None:
 
     # Families and sizes first: every style below reads Fonts.*.
     resolve_fonts(root)
+
+    def pp(*values):
+        return tuple(_px(v) for v in values)
 
     style = ttk.Style(root)
 
@@ -505,7 +578,7 @@ def apply_theme(root: tk.Tk) -> None:
                         font=Fonts.H3)
 
     # ---- TEntry ----------------------------------------------------------
-    style.configure("TEntry", font=Fonts.BODY, padding=(6, 4),
+    style.configure("TEntry", font=Fonts.BODY, padding=pp(6, 4),
                     fieldbackground=Colors.BG_INPUT,
                     foreground=Colors.TEXT_PRIMARY,
                     insertcolor=Colors.ACCENT,
@@ -526,12 +599,12 @@ def apply_theme(root: tk.Tk) -> None:
     style.configure("Mono.TEntry", font=Fonts.MONO)
 
     # ---- TCombobox -------------------------------------------------------
-    style.configure("TCombobox", font=Fonts.BODY, padding=(6, 4),
+    style.configure("TCombobox", font=Fonts.BODY, padding=pp(6, 4),
                     fieldbackground=Colors.BG_INPUT,
                     background=Colors.BG_INPUT,
                     foreground=Colors.TEXT_PRIMARY,
                     arrowcolor=Colors.TEXT_SECONDARY,
-                    arrowsize=14,
+                    arrowsize=_px(14),
                     relief="solid", borderwidth=1, **flat_border)
     style.map("TCombobox",
               bordercolor=[("disabled", Colors.BORDER_LIGHT),
@@ -567,9 +640,9 @@ def apply_theme(root: tk.Tk) -> None:
 
     # ---- TSpinbox --------------------------------------------------------
     try:
-        style.configure("TSpinbox", font=Fonts.BODY, padding=(6, 4),
+        style.configure("TSpinbox", font=Fonts.BODY, padding=pp(6, 4),
                         fieldbackground=Colors.BG_INPUT,
-                        arrowcolor=Colors.TEXT_SECONDARY, arrowsize=12,
+                        arrowcolor=Colors.TEXT_SECONDARY, arrowsize=_px(12),
                         relief="solid", borderwidth=1, **flat_border)
         style.map("TSpinbox",
                   bordercolor=[("focus", Colors.ACCENT)],
@@ -581,7 +654,7 @@ def apply_theme(root: tk.Tk) -> None:
     # Secondary / default: white with a real border and a blue-tinted hover.
     style.configure("TButton",
                     font=Fonts.BUTTON,
-                    padding=(13, 7),
+                    padding=pp(13, 7),
                     background=Colors.BG_SURFACE,
                     foreground=Colors.TEXT_PRIMARY,
                     relief="solid",
@@ -606,7 +679,7 @@ def apply_theme(root: tk.Tk) -> None:
 
     def _solid_button(name: str, base: str, hover: str, active: str,
                       *, font=Fonts.BUTTON_BOLD, padding=(15, 8)) -> None:
-        style.configure(name, font=font, padding=padding,
+        style.configure(name, font=font, padding=pp(*padding),
                         background=base, foreground=Colors.TEXT_ON_ACCENT,
                         relief="solid", borderwidth=1, anchor="center",
                         bordercolor=base, lightcolor=base, darkcolor=base)
@@ -632,7 +705,7 @@ def apply_theme(root: tk.Tk) -> None:
 
     # Quiet button: no resting border, accent wash on hover. For toolbars.
     style.configure("Ghost.TButton", font=Fonts.BUTTON,
-                    padding=(11, 6), background=Colors.BG_PRIMARY,
+                    padding=pp(11, 6), background=Colors.BG_PRIMARY,
                     foreground=Colors.TEXT_SECONDARY, relief="flat",
                     borderwidth=1, bordercolor=Colors.BG_PRIMARY,
                     lightcolor=Colors.BG_PRIMARY, darkcolor=Colors.BG_PRIMARY)
@@ -647,7 +720,7 @@ def apply_theme(root: tk.Tk) -> None:
               darkcolor=[("active", Colors.ACCENT_LIGHT)])
 
     # Compact neutral button for dense panels (Add / Remove / Clear).
-    style.configure("Small.TButton", font=Fonts.BUTTON_SMALL, padding=(9, 5),
+    style.configure("Small.TButton", font=Fonts.BUTTON_SMALL, padding=pp(9, 5),
                     background=Colors.BG_SURFACE, foreground=Colors.TEXT_PRIMARY,
                     relief="solid", borderwidth=1, anchor="center", **flat_border)
     style.map("Small.TButton",
@@ -661,7 +734,7 @@ def apply_theme(root: tk.Tk) -> None:
               darkcolor=[("active", Colors.ACCENT)])
 
     # Backward-compatible aliases.
-    style.configure("SetupButton.TButton", font=Fonts.BUTTON, padding=(12, 6),
+    style.configure("SetupButton.TButton", font=Fonts.BUTTON, padding=pp(12, 6),
                     background=Colors.BG_SURFACE, foreground=Colors.TEXT_PRIMARY,
                     relief="solid", borderwidth=1, anchor="center", **flat_border)
     style.map("SetupButton.TButton",
@@ -673,7 +746,7 @@ def apply_theme(root: tk.Tk) -> None:
               bordercolor=[("disabled", Colors.BORDER_LIGHT), ("active", Colors.ACCENT)],
               lightcolor=[("active", Colors.ACCENT)],
               darkcolor=[("active", Colors.ACCENT)])
-    style.configure("EEPROMButton.TButton", font=Fonts.BUTTON, padding=(12, 7),
+    style.configure("EEPROMButton.TButton", font=Fonts.BUTTON, padding=pp(12, 7),
                     background=Colors.BG_SURFACE, foreground=Colors.TEXT_PRIMARY,
                     relief="solid", borderwidth=1, anchor="center", **flat_border)
     style.map("EEPROMButton.TButton",
@@ -690,12 +763,12 @@ def apply_theme(root: tk.Tk) -> None:
     style.configure("TCheckbutton", font=Fonts.BODY,
                     background=Colors.BG_SURFACE,
                     foreground=Colors.TEXT_PRIMARY,
-                    padding=(2, 3),
+                    padding=pp(2, 3),
                     focuscolor=Colors.BG_SURFACE,
                     indicatorbackground=Colors.BG_INPUT,
                     indicatorforeground=Colors.TEXT_ON_ACCENT,
-                    indicatormargin=(0, 0, 6, 0),
-                    indicatorsize=13,
+                    indicatormargin=(0, 0, _px(6), 0),
+                    indicatorsize=_px(13),
                     upperbordercolor=Colors.BORDER,
                     lowerbordercolor=Colors.BORDER)
     style.map("TCheckbutton",
@@ -724,12 +797,12 @@ def apply_theme(root: tk.Tk) -> None:
     style.configure("TRadiobutton", font=Fonts.BODY,
                     background=Colors.BG_SURFACE,
                     foreground=Colors.TEXT_PRIMARY,
-                    padding=(2, 3),
+                    padding=pp(2, 3),
                     focuscolor=Colors.BG_SURFACE,
                     indicatorbackground=Colors.BG_INPUT,
                     indicatorforeground=Colors.ACCENT,
-                    indicatormargin=(0, 0, 6, 0),
-                    indicatorsize=13,
+                    indicatormargin=(0, 0, _px(6), 0),
+                    indicatorsize=_px(13),
                     upperbordercolor=Colors.BORDER,
                     lowerbordercolor=Colors.BORDER)
     style.map("TRadiobutton",
@@ -750,10 +823,10 @@ def apply_theme(root: tk.Tk) -> None:
     style.configure("TNotebook",
                     background=Colors.BG_PRIMARY,
                     borderwidth=0,
-                    tabmargins=(2, 6, 2, 0))
+                    tabmargins=(2, _px(6), 2, 0))
     style.configure("TNotebook.Tab",
                     font=Fonts.BODY_BOLD,
-                    padding=(20, 9),
+                    padding=pp(20, 9),
                     background=Colors.TAB_BG,
                     foreground=Colors.TAB_TEXT,
                     borderwidth=1,
@@ -772,12 +845,12 @@ def apply_theme(root: tk.Tk) -> None:
                           ("active", Colors.TAB_HOVER)],
               darkcolor=[("selected", Colors.TAB_ACTIVE),
                          ("active", Colors.TAB_HOVER)],
-              expand=[("selected", (0, 3, 0, 0))])
+              expand=[("selected", (0, _px(3), 0, 0))])
     # Inner notebook (Analysis run tabs): lighter, smaller.
     style.configure("Inner.TNotebook", background=Colors.BG_PRIMARY,
-                    borderwidth=0, tabmargins=(0, 4, 0, 0))
+                    borderwidth=0, tabmargins=(0, _px(4), 0, 0))
     style.configure("Inner.TNotebook.Tab", font=Fonts.BODY_SMALL_BOLD,
-                    padding=(14, 6))
+                    padding=pp(14, 6))
 
     # ---- TSeparator ------------------------------------------------------
     style.configure("TSeparator", background=Colors.BORDER_LIGHT)
@@ -791,7 +864,7 @@ def apply_theme(root: tk.Tk) -> None:
                         lightcolor=Colors.ACCENT,
                         darkcolor=Colors.ACCENT,
                         borderwidth=0,
-                        thickness=8)
+                        thickness=_px(8))
 
     # ---- TScrollbar: thumb only, no arrows -------------------------------
     for orient, side in (("Vertical", "ns"), ("Horizontal", "ew")):
@@ -815,8 +888,8 @@ def apply_theme(root: tk.Tk) -> None:
                     darkcolor=Colors.BORDER,
                     borderwidth=0,
                     relief="flat",
-                    arrowsize=12,
-                    width=11)
+                    arrowsize=_px(12),
+                    width=_px(11))
     style.map("TScrollbar",
               background=[("pressed", Colors.ACCENT), ("active", Colors.BORDER_STRONG)],
               lightcolor=[("pressed", Colors.ACCENT), ("active", Colors.BORDER_STRONG)],
@@ -829,7 +902,7 @@ def apply_theme(root: tk.Tk) -> None:
                     lightcolor=Colors.ACCENT, darkcolor=Colors.ACCENT)
 
     # ---- Treeview --------------------------------------------------------
-    style.configure("Treeview", font=Fonts.BODY, rowheight=28,
+    style.configure("Treeview", font=Fonts.BODY, rowheight=_px(28),
                     background=Colors.BG_SURFACE,
                     fieldbackground=Colors.BG_SURFACE,
                     foreground=Colors.TEXT_PRIMARY,
@@ -843,7 +916,7 @@ def apply_theme(root: tk.Tk) -> None:
     style.configure("Treeview.Heading", font=Fonts.BODY_SMALL_BOLD,
                     background=Colors.BG_HEADER,
                     foreground=Colors.TEXT_SECONDARY,
-                    relief="flat", padding=(8, 6))
+                    relief="flat", padding=pp(8, 6))
     style.map("Treeview.Heading",
               background=[("active", Colors.ACCENT_LIGHT)])
 
@@ -925,8 +998,8 @@ def _tk_button(parent, text, command, *, bg, hover_bg, fg=Colors.TEXT_ON_ACCENT,
         "cursor": "hand2",
         "bd": 0,
         "highlightthickness": 0,
-        "padx": padx,
-        "pady": pady,
+        "padx": _px(padx),
+        "pady": _px(pady),
     }
     if width is not None:
         kwargs["width"] = width
@@ -1221,7 +1294,7 @@ def badge(parent, text: str, *, kind: str = "info", background: str | None = Non
     fg, bg = palette.get(kind, palette["info"])
     return tk.Label(parent, text=f" {text} ", font=Fonts.CAPTION_BOLD,
                     bg=bg, fg=fg, bd=0, highlightthickness=0,
-                    padx=4, pady=1)
+                    padx=_px(4), pady=_px(1))
 
 
 def hairline(parent, *, horizontal: bool = True, color: str | None = None):
@@ -1307,7 +1380,7 @@ def bind_figure_margins(canvas, fig, *, left: int = 72, right: int = 16,
             if width <= 1 or height <= 1:
                 width = max(1.0, float(fig.get_figwidth()) * dpi)
                 height = max(1.0, float(fig.get_figheight()) * dpi)
-            scale = dpi / 96.0
+            scale = dpi / 96.0 * Fonts.SCALE
             l = min(0.45, left * scale / width)
             r = max(0.55, 1.0 - right * scale / width)
             t = max(0.55, 1.0 - top * scale / height)
@@ -1324,6 +1397,15 @@ def bind_figure_margins(canvas, fig, *, left: int = 72, right: int = 16,
     except tk.TclError:
         pass
     return _apply
+
+
+def _backend_pixel_ratio(widget) -> float:
+    """The device-pixel ratio matplotlib's Tk backend derives for this screen."""
+    if sys.platform == "win32":
+        return round(float(widget.tk.call("tk", "scaling")) / (96 / 72), 2)
+    if sys.platform.startswith("linux"):
+        return float(widget.winfo_fpixels("1i")) / 96
+    return 1.0
 
 
 def relax_canvas_size(canvas, width: int = 560, height: int = 320, *, dpi=None):
@@ -1349,6 +1431,17 @@ def relax_canvas_size(canvas, width: int = 560, height: int = 320, *, dpi=None):
         widget.configure(width=width, height=height)
     except tk.TclError:
         return widget
+
+    # The backend multiplies the figure dpi by the Windows scale factor the
+    # first time the canvas is mapped, resizes, and redraws; the sync below
+    # then puts the dpi back and redraws again. Pinning the ratio the backend
+    # would compute makes its map handler a no-op, so a tab's first appearance
+    # costs one draw instead of three (and the toolbar icons come out at the
+    # right size for the screen).
+    try:
+        canvas._device_pixel_ratio = _backend_pixel_ratio(widget)
+    except Exception:
+        pass
 
     target_dpi = float(dpi) if dpi else float(canvas.figure.dpi)
     state = {"busy": False}
@@ -1400,30 +1493,27 @@ def configure_matplotlib_style(fig, ax, *, title: str = "",
     family = matplotlib_font_family()
 
     if title:
-        ax.set_title(title, fontsize=12.5, fontweight="bold",
-                     fontfamily=family, pad=12,
-                     color=Colors.TEXT_PRIMARY)
+        ax.set_title(title, **plot_title_font())
     if xlabel:
-        ax.set_xlabel(xlabel, fontsize=9.5, fontweight="medium",
-                      fontfamily=family, labelpad=6,
+        ax.set_xlabel(xlabel, fontsize=scaled_pt(9.5), fontweight="medium",
+                      fontfamily=family, labelpad=_px(6),
                       color=Colors.TEXT_SECONDARY)
     if ylabel:
-        ax.set_ylabel(ylabel, fontsize=9.5, fontweight="medium",
-                      fontfamily=family, labelpad=6,
+        ax.set_ylabel(ylabel, fontsize=scaled_pt(9.5), fontweight="medium",
+                      fontfamily=family, labelpad=_px(6),
                       color=Colors.TEXT_SECONDARY)
 
+    # Major grid only: the minor grid was a third of every full draw at 4K
+    # (a hundred extra hairlines per frame) for a texture nobody could see.
     ax.grid(True, which="major", linestyle="-", linewidth=0.5,
             alpha=0.22, color=Colors.PLOT_GRID)
-    ax.grid(True, which="minor", linestyle=":", linewidth=0.3,
-            alpha=0.12, color=Colors.PLOT_GRID)
-    ax.minorticks_on()
+    ax.grid(False, which="minor")
+    ax.minorticks_off()
     ax.set_axisbelow(True)
 
-    ax.tick_params(axis="both", which="major", labelsize=8.5, length=4,
-                   width=0.8, colors=Colors.TEXT_SECONDARY,
+    ax.tick_params(axis="both", which="major", labelsize=scaled_pt(8.5),
+                   length=_px(4), width=0.8, colors=Colors.TEXT_SECONDARY,
                    direction="out")
-    ax.tick_params(axis="both", which="minor", length=2, width=0.6,
-                   colors=Colors.TEXT_MUTED)
     for label in (*ax.get_xticklabels(), *ax.get_yticklabels()):
         label.set_fontfamily(family)
 
@@ -1441,7 +1531,7 @@ def style_legend(ax, **kwargs):
     defaults = dict(
         loc="upper right", frameon=True, framealpha=0.94,
         facecolor=Colors.BG_SURFACE, edgecolor=Colors.BORDER_LIGHT,
-        fontsize=8.5, borderpad=0.6, labelspacing=0.4, handlelength=1.8,
+        fontsize=scaled_pt(8.5), borderpad=0.6, labelspacing=0.4, handlelength=1.8,
     )
     defaults.update(kwargs)
     legend = ax.legend(**defaults)

@@ -12,7 +12,7 @@ set in [`scilab_version.py`](scilab_version.py).
 | Area | v3.3 | v3.4 |
 | --- | --- | --- |
 | Startup | ~2.5 s of imports with a blank screen, then a fixed 2.5 s splash, then the build | Logo within ~100 ms; heavy imports load behind it; window follows in ~1.5 s |
-| Auto-exposure | Additive stepping, up to 1000 single-frame captures per source (typically 80–450) | Proportional controller, settles in ≤ 6 frames |
+| Auto-exposure | Additive stepping, up to 1000 single-frame captures per source (typically 80–450) | Same additive stepping (3.4.0–3.4.2 jumped to `it × target ÷ peak`, which overshoots when the first frame is mostly dark offset); a source saturated at the minimum IT or left outside the band is reported instead of silently skipped |
 | Analysis | ~4.7 s render, 12 PNGs (2 blank) at 300 dpi, numbers never saved | ~1.4 s, 8 informative PNGs at 150 dpi, plus `metrics_<sn>_<ts>.json` |
 | Analysis maths | ~0.3 s (Python loops over a 2048² matrix) | ~0.04 s (vectorized) |
 | Live plot | Full redraw every frame, layout solver on each draw, unbounded frame rate | Blitted trace over a cached background, 25 fps cap, hysteresis on autoscale |

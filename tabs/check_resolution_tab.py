@@ -19,11 +19,11 @@ from matplotlib.figure import Figure
 
 from services.check_spectrometer_service import _fit_peak, _mgauss
 
-from .ui_utils import ScrollableFrame, ThrottledRedraw
+from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure
 
-from .theme import (Colors, bind_figure_margins, configure_matplotlib_style,
-                    make_action_button, mount_toolbar, relax_canvas_size, screen_dpi,
-                    source_style, style_legend)
+from .theme import (Colors, Spacing, bind_figure_margins, configure_matplotlib_style,
+                    logical_px, make_action_button, mount_toolbar, plot_title_font,
+                    relax_canvas_size, scaled_pt, screen_dpi, source_style, style_legend)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,16 +42,27 @@ def build(app):
     main_frame.columnconfigure(0, weight=1)
     main_frame.rowconfigure(0, weight=1)
 
+    gutter = Spacing.PAD_SM
     plot_container = ttk.Frame(main_frame)
-    plot_container.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+    plot_container.grid(row=0, column=0, sticky="nsew", padx=gutter, pady=gutter)
     # See live_view_tab: keep the canvas from ratcheting the column wider than
     # the window and pushing the control column off-screen.
     plot_container.pack_propagate(False)
 
-    controls_host = ttk.Frame(main_frame, width=340)
-    controls_host.grid(row=0, column=1, sticky="nsew", padx=(0, 4), pady=4)
+    controls_host = ttk.Frame(main_frame, width=logical_px(app, 340))
+    controls_host.grid(row=0, column=1, sticky="nsew", padx=(0, gutter), pady=gutter)
     controls_host.grid_propagate(False)
     controls_host.pack_propagate(False)
+
+    def _layout_check_res(width=None, _height=None):
+        available_width = width or main_frame.winfo_width()
+        if not available_width or available_width <= 1:
+            return
+        # Same rule as Live View: a quarter of the window, clamped.
+        controls_host.configure(width=max(logical_px(app, 300),
+                                          min(logical_px(app, 400), int(available_width * 0.24))))
+
+    bind_debounced_configure(main_frame, _layout_check_res)
     # Scrollable, so the Fit Readout stays reachable on a short window instead
     # of being cut off at the bottom edge.
     controls_scroll = ScrollableFrame(controls_host, y_scroll=True,
@@ -107,7 +118,7 @@ def build(app):
     # ---------------- Controls ----------------
     spectrum_frame = ttk.LabelFrame(controls_column, text="Acquisition",
                                     padding=8)
-    spectrum_frame.pack(fill="x", padx=4, pady=(4, 6))
+    spectrum_frame.pack(fill="x", pady=(0, Spacing.SECTION_GAP))
 
     ttk.Label(spectrum_frame, text="Integration Time (ms):").pack(anchor="w")
     it_entry = ttk.Entry(spectrum_frame, width=15)
@@ -126,7 +137,7 @@ def build(app):
 
     control_frame = ttk.LabelFrame(controls_column, text="Live Fit",
                                    padding=8)
-    control_frame.pack(fill="x", padx=4, pady=6)
+    control_frame.pack(fill="x", pady=(0, Spacing.SECTION_GAP))
 
     start_btn = make_action_button(control_frame, text="Start",
                                    command=lambda: _start(), width=18)
@@ -142,10 +153,11 @@ def build(app):
     # toggling here also reflects in the Live View tab.
     laser_frame = ttk.LabelFrame(controls_column, text="Laser Controls",
                                  padding=8)
-    laser_frame.pack(fill="x", padx=4, pady=6)
+    laser_frame.pack(fill="x", pady=(0, Spacing.SECTION_GAP))
 
-    laser_tags = app.laser_tags()
-    for tag in laser_tags:
+    laser_frame.columnconfigure(0, weight=1)
+    laser_frame.columnconfigure(1, weight=1)
+    for index, tag in enumerate(app.laser_tags()):
         var = app.laser_var(tag)
         text = "Hg_Ar" if tag == "Hg_Ar" else f"{tag} nm"
         chk = ttk.Checkbutton(
@@ -153,12 +165,12 @@ def build(app):
             style=source_style(laser_frame, tag, "Bold.TCheckbutton"),
             command=lambda t=tag, v=var: app.toggle_laser(t, v.get()),
         )
-        chk.pack(anchor="w", pady=1)
+        chk.grid(row=index // 2, column=index % 2, sticky="w", padx=(0, Spacing.PAD_SM), pady=2)
 
     # Readout
     readout_frame = ttk.LabelFrame(controls_column, text="Fit Readout",
                                    padding=8)
-    readout_frame.pack(fill="x", padx=4, pady=6)
+    readout_frame.pack(fill="x", pady=(0, Spacing.SECTION_GAP))
 
     def _row(label_text):
         row = ttk.Frame(readout_frame)
@@ -344,11 +356,11 @@ def build(app):
 
             except Exception as exc:
                 LOGGER.exception("Check Resolution loop error")
-                app.pump.post(val_status.config, {"text": f"Error: {exc}", "foreground": "red"})
+                app.pump.post(val_status.config, {"text": f"Error: {exc}", "foreground": Colors.DANGER})
                 break
             time.sleep(_FRAME_PAUSE_S)
 
-        app.pump.post(val_status.config, {"text": "Stopped", "foreground": "gray"})
+        app.pump.post(val_status.config, {"text": "Stopped", "foreground": Colors.TEXT_MUTED})
 
     _title_cache = {"text": None}
 
@@ -383,7 +395,7 @@ def build(app):
             f"rms={snap['rms']:.4f}{err_tag}"
         )
         if title != _title_cache["text"]:
-            ax.set_title(title, fontsize=11)
+            ax.set_title(title, **plot_title_font(fontsize=scaled_pt(11)))
             _title_cache["text"] = title
 
         val_cen.config(text=f"{snap['xcen']:.3f}")

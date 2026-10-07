@@ -9,6 +9,14 @@ import numpy as np
 from domain.measurement import MeasurementData, MeasurementRunResult
 from domain.spectrometer import SpectrometerBackend, assert_spectrometer_backend
 
+# Additive auto-IT stepping (the v3.3 rule): an unsaturated frame moves the
+# integration time by |target_mid - peak| / IT_STEP_COUNTS_PER_MS milliseconds,
+# never less than IT_STEP_FLOOR_MS and never more than the configured
+# it_step_up / it_step_down, so the exposure creeps toward the band frame by
+# frame and slows down as the peak gets close.
+IT_STEP_FLOOR_MS = 0.05
+IT_STEP_COUNTS_PER_MS = 5000.0
+
 
 @dataclass(frozen=True)
 class MeasurementOrchestratorConfig:
@@ -24,6 +32,10 @@ class MeasurementOrchestratorConfig:
     n_dark: int
     n_sig_640: int
     n_dark_640: int
+    # Largest auto-IT change per unsaturated frame, in ms, when raising / lowering
+    # the integration time (SpectroApp.IT_STEP_UP / IT_STEP_DOWN).
+    it_step_up: float = 0.3
+    it_step_down: float = 0.1
     relay_channel_map: Mapping[str, int] = field(
         default_factory=lambda: {"517": 2, "532": 1, "Hg_Ar": 4}
     )
@@ -32,11 +44,9 @@ class MeasurementOrchestratorConfig:
     cube_stabilize_delay_s: float = 3.0
     dark_delay_s: float = 0.3
     nm640_warmup_delay_s: float = 1.0
-    # Auto-IT controller: back off by this factor while the detector is saturated
-    # (a clipped frame carries no amplitude information), and stop iterating once a
-    # proposed change is smaller than this relative amount.
+    # Auto-IT: back off by this factor while the detector is saturated (a clipped
+    # frame carries no amplitude information).
     saturation_backoff: float = 0.7
-    it_convergence_rel: float = 0.005
     max_nonfinite_frames: int = 3
     # --- Bench-validated speed options (default = v3.3 behaviour) ---------------
     # Turn off only the source that is lit instead of sending all_off() before
@@ -256,17 +266,37 @@ class MeasurementOrchestrator:
     def _clamp_it(self, it_ms: float) -> float:
         return max(self.config.it_min, min(self.config.it_max, float(it_ms)))
 
-    def _auto_adjust_it(self, start_it: float, tag: str, should_continue: Callable[[], bool]) -> tuple[float, float]:
-        """Find the integration time that puts the peak inside the target band.
+    def _it_step_ms(self, peak: float) -> float:
+        """Signed additive step toward the target band for an unsaturated frame (see IT_STEP_*)."""
+        cfg = self.config
+        error = cfg.target_mid - peak
+        magnitude = max(IT_STEP_FLOOR_MS, abs(error) / IT_STEP_COUNTS_PER_MS)
+        if error > 0:
+            return min(cfg.it_step_up, magnitude)
+        return -min(cfg.it_step_down, magnitude)
 
-        Detector counts scale linearly with integration time, so each unsaturated
-        frame lets us jump straight to ``it * target / peak``; a saturated frame
-        (which carries no amplitude information) backs off geometrically. This
-        converges in a handful of frames where the previous additive stepper
-        (+0.3 ms / -0.1 ms per frame) needed hundreds.
+    def _auto_adjust_it(self, start_it: float, tag: str, should_continue: Callable[[], bool]) -> tuple[float, float]:
+        """Step the integration time until the peak sits inside the target band.
+
+        Additive stepping, as in v3.3: every unsaturated frame moves the
+        integration time by at most ``it_step_up`` up or ``it_step_down`` down
+        (``_it_step_ms``), so the operator watches the exposure creep toward the
+        band one frame at a time. A saturated frame, which carries no amplitude
+        information, backs off by ``saturation_backoff``.
+
+        Versions 3.4.0.0 to 3.4.2.0 jumped straight to ``it * target_mid / peak``
+        instead. That assumes counts scale through zero; on a detector with a
+        dark offset the first frame can be mostly offset (about 750 counts at
+        2.4 ms on a Hamamatsu head) and the jump sent the exposure to about
+        200 ms in one step.
+
+        Returns the integration time of the last frame and its peak. The caller
+        checks the band: the frame budget, ``it_min`` or ``it_max`` can end the
+        walk short of it.
         """
         cfg = self.config
         it_ms = self._clamp_it(start_it)
+        measured_it = it_ms
         peak = float("nan")
         self.it_history.clear()
         nonfinite_frames = 0
@@ -274,37 +304,36 @@ class MeasurementOrchestrator:
         for _ in range(max(1, cfg.max_it_adjust_iters) + 1):
             if not should_continue():
                 break
+            measured_it = it_ms
             counts = self._capture_counts(it_ms, 1)
             peak = float(np.nanmax(counts))
             if not np.isfinite(peak):
                 nonfinite_frames += 1
                 if nonfinite_frames >= cfg.max_nonfinite_frames:
-                    raise RuntimeError(f"{tag}: spectrometer returned {nonfinite_frames} non-finite frames during auto-IT")
+                    raise RuntimeError(f"spectrometer returned {nonfinite_frames} non-finite frames during auto-IT")
                 continue
             nonfinite_frames = 0
 
             self.it_history.append((it_ms, peak))
             self.callbacks.auto_it_update(tag, counts, it_ms, peak)
 
-            if cfg.target_low <= peak <= cfg.target_high:
-                return it_ms, peak
-
             if peak >= cfg.sat_thresh:
                 if it_ms <= cfg.it_min * (1.0 + 1e-9):
                     raise RuntimeError(
-                        f"{tag}: detector saturates even at the minimum integration time ({cfg.it_min} ms); reduce the source power"
+                        f"detector saturates even at the minimum integration time ({cfg.it_min} ms); reduce the source power"
                     )
-                proposed = it_ms * cfg.saturation_backoff
+                proposed = self._clamp_it(it_ms * cfg.saturation_backoff)
+            elif cfg.target_low <= peak <= cfg.target_high:
+                return it_ms, peak
             else:
-                proposed = it_ms * (cfg.target_mid / max(peak, 1.0))
+                proposed = self._clamp_it(it_ms + self._it_step_ms(peak))
 
-            proposed = self._clamp_it(proposed)
-            if abs(proposed - it_ms) <= cfg.it_convergence_rel * max(it_ms, 1e-9):
+            if proposed == it_ms:
                 # Pinned against it_min/it_max: no further progress is possible.
-                return proposed, peak
+                return it_ms, peak
             it_ms = proposed
 
-        return it_ms, peak
+        return measured_it, peak
 
     def _run_single_measurement(
         self,
@@ -326,7 +355,13 @@ class MeasurementOrchestrator:
 
         if not (self.config.target_low <= peak <= self.config.target_high):
             self._ensure_source_state(tag, False)
-            return False
+            if not should_continue():
+                return False
+            raise RuntimeError(
+                f"auto-IT did not reach the target band ({self.config.target_low:g}-{self.config.target_high:g} counts) "
+                f"within {len(self.it_history)} frames; the last frame at {it_ms:.2f} ms peaked at {peak:.0f}. "
+                "Enter a start integration time closer to the band or adjust the source power."
+            )
 
         signal = self._capture_counts(it_ms, self.config.n_sig)
         self._ensure_source_state(tag, False)

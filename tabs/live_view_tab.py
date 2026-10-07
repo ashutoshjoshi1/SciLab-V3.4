@@ -10,9 +10,10 @@ from tkinter import ttk, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from .theme import (Colors, Fonts, attach_hover, bind_figure_margins,
-                    configure_matplotlib_style, make_action_button, mount_toolbar,
-                    relax_canvas_size, screen_dpi, source_style, style_legend)
+from .theme import (Colors, Fonts, Spacing, attach_hover, bind_figure_margins,
+                    configure_matplotlib_style, logical_px, make_action_button,
+                    mount_toolbar, plot_title_font, relax_canvas_size, screen_dpi,
+                    source_style, style_legend)
 from .ui_utils import BlitRenderer, ScrollableFrame, ThrottledRedraw, Tooltip, bind_debounced_configure, run_in_worker
 
 LOGGER = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ def build(app):
         main_frame.rowconfigure(0, weight=1)
 
         plot_container = ttk.Frame(main_frame)
-        plot_container.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        plot_container.grid(row=0, column=0, sticky="nsew", padx=Spacing.PAD_SM, pady=Spacing.PAD_SM)
         # A Tk-Agg canvas re-requests its full pixel size after every resize
         # (figsize * dpi, ~1200x950 px here), which otherwise starves the
         # control panel beside it. Propagation is per *inner* geometry manager,
@@ -40,7 +41,7 @@ def build(app):
         plot_container.pack_propagate(False)
 
         controls_host = ttk.Frame(main_frame)
-        controls_host.grid(row=0, column=1, sticky="nsew", padx=(0, 4), pady=4)
+        controls_host.grid(row=0, column=1, sticky="nsew", padx=(0, Spacing.PAD_SM), pady=Spacing.PAD_SM)
         controls_host.grid_propagate(False)
         controls_host.pack_propagate(False)
 
@@ -122,20 +123,25 @@ def build(app):
         laser_frame = ttk.LabelFrame(controls_grid, text="Laser Controls", padding=8)
         laser_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
 
-        # All sources in ascending order; variables are shared app-wide.
-        for tag in app.laser_tags():
+        # All sources in ascending order; variables are shared app-wide. Two
+        # columns: the list is half as tall and the column stays scroll-free.
+        laser_grid = ttk.Frame(laser_frame)
+        laser_grid.pack(fill="x")
+        laser_grid.columnconfigure(0, weight=1)
+        laser_grid.columnconfigure(1, weight=1)
+        for index, tag in enumerate(app.laser_tags()):
             var = app.laser_var(tag)
             label_text = "Hg_Ar" if tag == "Hg_Ar" else f"{tag} nm"
             btn = ttk.Checkbutton(
-                laser_frame,
+                laser_grid,
                 text=label_text,
                 variable=var,
-                style=source_style(laser_frame, tag, "Bold.TCheckbutton"),
+                style=source_style(laser_grid, tag, "Bold.TCheckbutton"),
                 command=lambda t=tag, v=var: app.toggle_laser(t, v.get())
             )
-            btn.pack(anchor="w", pady=1)
+            btn.grid(row=index // 2, column=index % 2, sticky="w", padx=(0, Spacing.PAD_SM), pady=2)
 
-        ttk.Separator(laser_frame, orient="horizontal").pack(fill="x", pady=(6, 4))
+        ttk.Separator(laser_frame, orient="horizontal").pack(fill="x", pady=(Spacing.PAD_SM, Spacing.PAD_XS))
         app.check_spec_btn = ttk.Button(
             laser_frame,
             text="Check Spectrometer",
@@ -364,64 +370,33 @@ def build(app):
 
         app._refresh_stage_slots_ui = _refresh_stage_slots_ui
 
+        def _column_width(available_width):
+            # A quarter of the window, within the range that keeps the controls
+            # readable and still leaves the plot the lion's share.
+            return max(logical_px(app, 300), min(logical_px(app, 400), int(available_width * 0.24)))
+
         def _layout_live_tab(width=None, height=None):
             available_width = width or main_frame.winfo_width()
             available_height = height or main_frame.winfo_height()
-            if not available_width or not available_height:
+            if not available_width or not available_height or available_width <= 1:
                 return
+            gutter = Spacing.PAD_SM
 
             for row in range(5):
                 controls_grid.rowconfigure(row, weight=0)
             for col in range(3):
-                controls_grid.columnconfigure(col, weight=0)
+                controls_grid.columnconfigure(col, weight=0, uniform="")
 
-            if available_width < 1420 or available_height < 860:
-                plot_container.grid_configure(row=0, column=0, sticky="nsew", padx=4, pady=(4, 6))
-                controls_host.grid_configure(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
+            if available_width >= logical_px(app, 1240) and available_height >= logical_px(app, 560):
+                # Plot on the left, one column of cards on the right.
+                plot_container.grid_configure(row=0, column=0, sticky="nsew", padx=(gutter, gutter), pady=gutter)
+                controls_host.grid_configure(row=0, column=1, sticky="nsew", padx=(0, gutter), pady=gutter)
                 main_frame.columnconfigure(0, weight=1)
                 main_frame.columnconfigure(1, weight=0)
                 main_frame.rowconfigure(0, weight=1)
                 main_frame.rowconfigure(1, weight=0)
-                controls_host.configure(
-                    width=max(320, available_width - 16),
-                    height=max(240, min(400, int(available_height * 0.40))),
-                )
-
-                if available_width < 780:
-                    layouts = (
-                        (spectrum_frame, 0, 0),
-                        (live_control_frame, 1, 0),
-                        (laser_frame, 2, 0),
-                        (headsensor_frame, 3, 0),
-                        (stage_frame, 4, 0),
-                    )
-                    controls_grid.columnconfigure(0, weight=1)
-                    for row in range(5):
-                        controls_grid.rowconfigure(row, weight=1)
-                else:
-                    layouts = (
-                        (spectrum_frame, 0, 0),
-                        (live_control_frame, 0, 1),
-                        (laser_frame, 1, 0),
-                        (headsensor_frame, 1, 1),
-                        (stage_frame, 2, 0),
-                    )
-                    controls_grid.columnconfigure(0, weight=1)
-                    controls_grid.columnconfigure(1, weight=1)
-                    controls_grid.rowconfigure(0, weight=1)
-                    controls_grid.rowconfigure(1, weight=1)
-                    controls_grid.rowconfigure(2, weight=1)
-            else:
-                plot_container.grid_configure(row=0, column=0, sticky="nsew", padx=4, pady=4)
-                controls_host.grid_configure(row=0, column=1, sticky="nsew", padx=(0, 4), pady=4)
-                main_frame.columnconfigure(0, weight=1)
-                main_frame.columnconfigure(1, weight=0)
-                main_frame.rowconfigure(0, weight=1)
-                main_frame.rowconfigure(1, weight=0)
-                controls_host.configure(
-                    width=max(340, min(420, int(available_width * 0.27))),
-                    height=max(280, available_height - 8),
-                )
+                controls_host.configure(width=_column_width(available_width),
+                                        height=max(logical_px(app, 240), available_height - 2 * gutter))
                 layouts = (
                     (spectrum_frame, 0, 0),
                     (live_control_frame, 1, 0),
@@ -430,11 +405,44 @@ def build(app):
                     (stage_frame, 4, 0),
                 )
                 controls_grid.columnconfigure(0, weight=1)
-                for row in range(5):
-                    controls_grid.rowconfigure(row, weight=1)
+                two_columns = False
+            else:
+                # Plot on top, the cards in a strip below it.
+                plot_container.grid_configure(row=0, column=0, sticky="nsew", padx=gutter, pady=(gutter, gutter // 2))
+                controls_host.grid_configure(row=1, column=0, sticky="nsew", padx=gutter, pady=(0, gutter))
+                main_frame.columnconfigure(0, weight=1)
+                main_frame.columnconfigure(1, weight=0)
+                main_frame.rowconfigure(0, weight=1)
+                main_frame.rowconfigure(1, weight=0)
+                controls_host.configure(
+                    width=max(logical_px(app, 320), available_width - 2 * gutter),
+                    height=max(logical_px(app, 220), min(logical_px(app, 380), int(available_height * 0.40))),
+                )
+                two_columns = available_width >= logical_px(app, 700)
+                if two_columns:
+                    layouts = (
+                        (spectrum_frame, 0, 0),
+                        (live_control_frame, 0, 1),
+                        (laser_frame, 1, 0),
+                        (headsensor_frame, 1, 1),
+                        (stage_frame, 2, 0),
+                    )
+                    controls_grid.columnconfigure(0, weight=1, uniform="live")
+                    controls_grid.columnconfigure(1, weight=1, uniform="live")
+                else:
+                    layouts = (
+                        (spectrum_frame, 0, 0),
+                        (live_control_frame, 1, 0),
+                        (laser_frame, 2, 0),
+                        (headsensor_frame, 3, 0),
+                        (stage_frame, 4, 0),
+                    )
+                    controls_grid.columnconfigure(0, weight=1)
 
             for widget, row, column in layouts:
-                widget.grid_configure(row=row, column=column, sticky="nsew", padx=4, pady=4)
+                widget.grid_configure(row=row, column=column, sticky="nsew",
+                                      padx=(0, gutter) if two_columns and column == 0 else 0,
+                                      pady=(0, Spacing.SECTION_GAP))
 
         bind_debounced_configure(main_frame, _layout_live_tab)
 
@@ -699,7 +707,7 @@ def build(app):
             title += "  [SATURATED]"
         if title != _live_view_state["title"]:
             # set_title() invalidates the layout; only pay for it when the text changes.
-            app.live_ax.set_title(title, color=Colors.DANGER if saturated else Colors.TEXT_PRIMARY)
+            app.live_ax.set_title(title, **plot_title_font(color=Colors.DANGER if saturated else Colors.TEXT_PRIMARY))
             _live_view_state["title"] = title
             app._live_blit.request_full()
 

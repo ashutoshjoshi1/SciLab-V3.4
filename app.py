@@ -146,8 +146,11 @@ class SpectroApp(tk.Tk):
 
     IT_MIN = 0.2
     IT_MAX = 3000.0
-    # Proportional auto-IT converges in 2-5 frames; 12 leaves room for a noisy source.
-    MAX_IT_ADJUST_ITERS = 12
+    # Auto-IT walks toward the target band in additive steps of at most these
+    # amounts per single-frame capture, so a dim source can take hundreds of frames.
+    IT_STEP_UP = 0.3
+    IT_STEP_DOWN = 0.1
+    MAX_IT_ADJUST_ITERS = 1000
     SAT_THRESH = 65400
     # Bench-validated speed options, persisted in the settings file (see setup tab).
     DEFAULT_MEASUREMENT_FLAGS = {"smart_source_off": False, "cube_prearm": False, "framed_serial_reads": False}
@@ -173,9 +176,54 @@ class SpectroApp(tk.Tk):
         offset_y = max(0, (screen_height - target_height) // 2)
         self.geometry(f"{target_width}x{target_height}+{offset_x}+{offset_y}")
 
+    def _adopt_default_root(self) -> None:
+        """Make this window Tkinter's default root while the splash still exists.
+
+        main.py keeps the splash (its own ``tk.Tk``) on screen until this
+        window is ready. Tkinter binds master-less variables, images and the
+        standard dialogs to the *first* root, which would be the splash, and
+        they would die with it. Pointing the default at this window keeps
+        them here.
+        """
+        if getattr(tk, "_support_default_root", True):
+            tk._default_root = self
+
+    def _show_window(self) -> None:
+        """Map the finished window, maximised.
+
+        The zoomed state is applied while the window is still withdrawn so it
+        maps straight into it; deiconifying first and zooming afterwards shows
+        the restore-size window for a frame. The restore size itself comes
+        from ``_configure_initial_geometry``, for when the operator
+        un-maximises.
+        """
+        self.update_idletasks()
+        self.maximize()
+        self.deiconify()
+        try:
+            if self.state() != "zoomed":  # X11: the zoomed attribute needs a mapped window
+                self.maximize()
+        except tk.TclError:
+            pass
+
+    def maximize(self) -> None:
+        try:
+            self.state("zoomed")
+            return
+        except tk.TclError:
+            pass
+        try:
+            self.attributes("-zoomed", True)
+        except tk.TclError:
+            self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+
     def __init__(self):
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
         super().__init__()
+        # Built out of sight and shown once, maximised and complete (see
+        # _show_window): nobody watches the window assemble itself.
+        self.withdraw()
+        self._adopt_default_root()
 
         if self.SETTINGS_FILE is None:
             self.SETTINGS_FILE = get_writable_path("spectro_gui_settings.json")
@@ -260,8 +308,11 @@ class SpectroApp(tk.Tk):
         self.status = StatusBar(self)
         self.status.pack(fill="x", side="bottom")
 
+        from tabs.theme import logical_px
+
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=10, pady=(4, 6))
+        self.nb.pack(fill="both", expand=True, padx=logical_px(self, 10),
+                     pady=(logical_px(self, 4), logical_px(self, 6)))
 
         self.setup_tab = ttk.Frame(self.nb)
         self.live_tab = ttk.Frame(self.nb)
@@ -315,6 +366,9 @@ class SpectroApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.status.set("Ready. Connect a spectrometer in Setup (Ctrl+1) to begin.")
 
+        self._warm_up_tabs()
+        self._show_window()
+
     # ------------------------------------------------------------------
     # Application title strip
     # ------------------------------------------------------------------
@@ -323,16 +377,16 @@ class SpectroApp(tk.Tk):
 
     def _build_app_bar(self) -> None:
         """White title strip: SciGlob mark, product name, live instrument chip."""
-        from tabs.theme import Colors, Fonts, gradient_rail, screen_dpi
+        from tabs.theme import Colors, Fonts, gradient_rail, logical_px
 
         bar = ttk.Frame(self, style="Surface.TFrame")
         bar.pack(fill="x", side="top")
         inner = ttk.Frame(bar, style="Surface.TFrame")
-        inner.pack(fill="x", padx=14, pady=(9, 9))
+        inner.pack(fill="x", padx=logical_px(self, 14), pady=(logical_px(self, 9), logical_px(self, 9)))
 
         # -- Left: logo + product name ---------------------------------
         self._logo_image = None
-        logo_height = max(24, int(26 * screen_dpi(self, 96.0) / 96.0))
+        logo_height = max(24, logical_px(self, 26))
         try:
             from PIL import Image, ImageTk
 
@@ -472,6 +526,46 @@ class SpectroApp(tk.Tk):
         from tabs import eeprom_tab
         eeprom_tab.build(self)
 
+    def _build_tab(self, tab_id: str) -> None:
+        """Build a lazily created tab (once) and run its one-shot show hook."""
+        if tab_id not in self._built_tabs:
+            builder = self._tab_builders.get(tab_id)
+            if builder is not None:
+                try:
+                    builder()
+                except Exception:
+                    LOGGER.exception("Failed to build tab %s", tab_id)
+            self._built_tabs.add(tab_id)
+        hook = self._tab_show_hooks.pop(tab_id, None)
+        if hook is not None:
+            try:
+                hook()
+            except Exception:
+                LOGGER.exception("Tab show hook failed for %s", tab_id)
+
+    def _warm_up_tabs(self) -> None:
+        """Build, lay out and draw every tab at its final size before the window is shown.
+
+        The window is still withdrawn but already zoomed, so each tab can be
+        selected in turn without anything reaching the screen: its layout
+        settles at the real pane size and its matplotlib figure is rendered
+        once, into the canvas it will be shown in. Live View, Check Resolution
+        and EEPROM used to be built on the first click, and the Measurements
+        figure on first show, which cost a figure, a canvas and a full-size
+        draw (0.3-1 s at 4K) at the moment the operator wanted the page. Now
+        a tab switch is only the switch.
+        """
+        try:
+            current = self.nb.select()
+            for tab_id in self.nb.tabs():
+                self._build_tab(tab_id)
+                self.nb.select(tab_id)
+                self.update()          # geometry passes, map/configure bindings, idle draws
+            self.nb.select(current)
+            self.update()
+        except tk.TclError:
+            LOGGER.exception("Tab warm-up interrupted")
+
     def _on_tab_changed(self, _event=None) -> None:
         try:
             selected = self.nb.select()
@@ -479,20 +573,7 @@ class SpectroApp(tk.Tk):
             return
         if not selected:
             return
-        if selected not in self._built_tabs:
-            builder = self._tab_builders.get(selected)
-            if builder is not None:
-                try:
-                    builder()
-                except Exception:
-                    LOGGER.exception("Failed to build tab %s", selected)
-                self._built_tabs.add(selected)
-        hook = self._tab_show_hooks.pop(selected, None)
-        if hook is not None:
-            try:
-                hook()
-            except Exception:
-                LOGGER.exception("Tab show hook failed for %s", selected)
+        self._build_tab(selected)
         self._current_tab_id = selected
         self._harmonize_tab(selected)
 
@@ -933,7 +1014,7 @@ class SpectroApp(tk.Tk):
         if notebook is None:
             return
 
-        from tabs.theme import Colors, style_text
+        from tabs.theme import Colors, logical_px, style_text
         from tabs.ui_utils import ScrollableFrame
 
         self.analysis_measurement_counter += 1
@@ -961,9 +1042,12 @@ class SpectroApp(tk.Tk):
         scroll.pack(fill="both", expand=True)
         scrollable_frame = scroll.content
 
-        # Arrange plots in a 2-column grid
+        # Preview grid: as many columns as the width allows, previews sized to fill them.
         num_plots = len(self.analysis_artifacts)
-        cols = 2 if num_plots > 1 else 1
+        notebook_width = max(600, notebook.winfo_width() or self.winfo_width() or 0)
+        cols = 1 if num_plots == 1 else min(num_plots, max(2, notebook_width // logical_px(self, 760)))
+        preview_width = max(420, min(1400, notebook_width // cols - logical_px(self, 70)))
+        preview_size = (preview_width, int(preview_width * PREVIEW_MAX_SIZE[1] / PREVIEW_MAX_SIZE[0]))
         preview_targets = []
 
         for idx, artifact in enumerate(self.analysis_artifacts):
@@ -1021,7 +1105,7 @@ class SpectroApp(tk.Tk):
         }
         self.analysis_measurement_tabs[tab_name] = record
         # Decode + thumbnail the PNGs on a worker; only the PhotoImage creation touches Tk.
-        self._load_analysis_previews_async(preview_targets, record)
+        self._load_analysis_previews_async(preview_targets, record, preview_size)
 
         if hasattr(self, "export_plots_btn"):
             self.export_plots_btn.state(["!disabled"])
@@ -1100,7 +1184,7 @@ class SpectroApp(tk.Tk):
                     pass
             LOGGER.info("Released analysis tab %s to bound memory use", oldest_name)
 
-    def _load_analysis_previews_async(self, targets, record) -> None:
+    def _load_analysis_previews_async(self, targets, record, size=PREVIEW_MAX_SIZE) -> None:
         """Decode and thumbnail plot PNGs off the Tk thread, then attach them via the pump."""
         if not targets:
             return
@@ -1117,7 +1201,7 @@ class SpectroApp(tk.Tk):
                 try:
                     with Image.open(path) as raw_image:
                         preview = raw_image.convert("RGB")
-                    preview.thumbnail(PREVIEW_MAX_SIZE, resampling)
+                    preview.thumbnail(size, resampling)
                     decoded.append((label, path, preview))
                 except Exception:
                     LOGGER.exception("Unable to build analysis preview for %s", path)
@@ -1168,9 +1252,11 @@ class SpectroApp(tk.Tk):
         self.meas_sig_line.set_data(xs, plot_spectrum)
         self.meas_ax.set_xlim(0, max(10, len(plot_spectrum) - 1))
         self.meas_ax.set_ylim(0, 65000)
+        from tabs.theme import plot_title_font
+
         self.meas_ax.set_title(
             f"Auto-IT: {plot_tag} nm | IT={plot_it_ms:.2f} ms | Peak={plot_peak:.0f}",
-            fontsize=13, fontweight="bold", pad=8,
+            **plot_title_font(pad=8),
         )
 
     def _update_auto_it_plot(self, tag, spectrum, it_ms, peak):

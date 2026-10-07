@@ -10,7 +10,18 @@ the installer. The single source of truth is
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Auto-IT jumped instead of stepping.** On a Hamamatsu head the first
+  auto-IT frame at the 2.4 ms start is mostly dark offset (about 750 counts),
+  and the proportional controller introduced in 3.4.0.0 (`it × target ÷ peak`,
+  which assumes counts scale through zero) sent the integration time straight
+  to about 200 ms. The v3.3 additive stepping is back: each unsaturated frame
+  moves the integration time by at most `IT_STEP_UP` (0.3 ms) up or
+  `IT_STEP_DOWN` (0.1 ms) down, shrinking to 0.05 ms near the band, for up to
+  `MAX_IT_ADJUST_ITERS` (1000) frames per source; a saturated frame still backs
+  off by 30 %. A source that does not reach the band within that budget is now
+  reported in the run summary instead of being skipped silently.
 
 ## [3.4.2.0] — 2026-10-05
 

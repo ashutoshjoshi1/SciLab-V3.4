@@ -5,7 +5,8 @@ Startup order matters for perceived speed:
 1. A tiny Tk root with the SciGlob logo appears within ~100 ms.
 2. The heavy scientific stack (numpy, matplotlib, scipy, pandas) and the tab
    modules are imported *while the logo is visible*.
-3. The splash is closed and the main window is built (~0.4 s of widgets).
+3. The main window is built *behind the splash* (~0.4 s of widgets) and
+   appears maximised and complete; only then is the splash closed.
 
 4. pandas, scipy and the analysis modules are imported on a worker thread a
    couple of seconds after the window is up; nothing visible needs them first.
@@ -26,7 +27,9 @@ from scilab_version import APP_NAME, DISPLAY_VERSION, PRODUCT_NAME
 
 LOGGER = logging.getLogger(__name__)
 
-MIN_SPLASH_MS = 800
+# The splash stays up for as long as the imports and the window build take;
+# this floor only stops it blinking on a very fast machine.
+MIN_SPLASH_MS = 250
 # The SciGlob mark is deep blue on transparent, so it belongs on a light card:
 # on the old near-black splash the "Glob" half almost disappeared.
 SPLASH_BG = "#ffffff"
@@ -392,14 +395,17 @@ def main() -> None:
     from app import SpectroApp  # already imported above; cheap
 
     report("Starting…")
+    # Built while the splash is still up; the window appears maximised and
+    # complete, and only then does the splash go. Destroying the splash first
+    # left a bare desktop for the half second the window took to build.
+    app = SpectroApp()
     remaining_ms = MIN_SPLASH_MS - int((time.perf_counter() - started) * 1000)
     if remaining_ms > 0:
         splash.after(remaining_ms, splash.quit)
         splash.mainloop()
     splash.destroy()
-    LOGGER.info("Startup preload finished in %.2f s", time.perf_counter() - started)
+    LOGGER.info("Window ready in %.2f s", time.perf_counter() - started)
 
-    app = SpectroApp()
     preload_analysis_stack_later(app)
     app.mainloop()
 
