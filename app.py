@@ -316,6 +316,13 @@ class SpectroApp(tk.Tk):
         self.status = StatusBar(self)
         self.status.pack(fill="x", side="bottom")
 
+        # Event log drawer above the status bar, toggled from the bar or F12.
+        # Every logger's records reach it through the pump, from any thread.
+        from tabs.log_drawer import LogDrawer, install_log_handler
+
+        self.log_drawer = LogDrawer(self, toggle_host=self.status.actions)
+        self._log_handler = install_log_handler(self.pump.post, self.log_drawer.append)
+
         from tabs.theme import logical_px
 
         self.nb = ttk.Notebook(self)
@@ -574,6 +581,7 @@ class SpectroApp(tk.Tk):
         self.bind_all("<F5>", lambda _event: self._shortcut(getattr(self, "refresh_ports", None)))
         self.bind_all("<Control-s>", lambda _event: self._shortcut(self._save_settings_quietly))
         self.bind_all("<Control-l>", lambda _event: self._shortcut(self._toggle_live))
+        self.bind_all("<F12>", lambda _event: self._shortcut(self.log_drawer.toggle))
 
     def _shortcut(self, action) -> str:
         if callable(action):
@@ -867,8 +875,7 @@ class SpectroApp(tk.Tk):
             self._post_error(f"Laser {tag}", exc)
 
         def _done(_result):
-            self.status.progress_end(f"{tag} nm {'on' if turn_on else 'off'}" if tag != "Hg_Ar" else f"Hg-Ar lamp {'on' if turn_on else 'off'}",
-                                     kind="success")
+            self.status.progress_end(f"{source_label(tag)} {'on' if turn_on else 'off'}", kind="success")
 
         self.status.progress_begin(f"Switching {tag} {'on' if turn_on else 'off'}…")
         run_in_worker(self, lambda: self.set_source_state(tag, turn_on), on_done=_done, on_error=_revert, name=f"laser-{tag}")
@@ -1000,7 +1007,7 @@ class SpectroApp(tk.Tk):
 
         # This runs on the measurement worker; widget state changes go through the pump.
         button_state = ["!disabled"] if self.analysis_artifacts else ["disabled"]
-        for name in ("export_plots_btn", "open_folder_btn"):
+        for name in ("export_plots_btn", "open_folder_btn", "clear_all_btn"):
             button = getattr(self, name, None)
             if button is not None:
                 self.pump.post(button.state, button_state)
@@ -1219,10 +1226,10 @@ class SpectroApp(tk.Tk):
         # Decode + thumbnail the PNGs on a worker; only the PhotoImage creation touches Tk.
         self._load_analysis_previews_async(preview_targets, record, preview_size)
 
-        if hasattr(self, "export_plots_btn"):
-            self.export_plots_btn.state(["!disabled"])
-        if hasattr(self, "open_folder_btn"):
-            self.open_folder_btn.state(["!disabled"])
+        for name in ("export_plots_btn", "open_folder_btn", "clear_all_btn"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.state(["!disabled"])
 
         # Switch to the new tab and the Analysis page
         notebook.select(measurement_tab)
@@ -1360,6 +1367,9 @@ class SpectroApp(tk.Tk):
     def _render_auto_it_plot(self, payload) -> None:
         """Main thread: draw the latest Auto-IT frame on the Measurements plot."""
         plot_tag, plot_spectrum, plot_it_ms, plot_peak = payload
+        hint = getattr(self, "meas_empty_text", None)
+        if hint is not None and hint.get_visible():
+            hint.set_visible(False)
         xs = np.arange(len(plot_spectrum))
         self.meas_sig_line.set_data(xs, plot_spectrum)
         self.meas_ax.set_xlim(0, max(10, len(plot_spectrum) - 1))

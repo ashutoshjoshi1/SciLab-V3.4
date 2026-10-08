@@ -244,7 +244,7 @@ class StatusBar(ttk.Frame):
         # Hairline instead of a bevel: the strip reads as part of the window
         # chrome rather than as a sunken widget.
         tk.Frame(self, bg=Colors.BORDER_LIGHT, height=1, bd=0,
-                 highlightthickness=0).grid(row=0, column=0, columnspan=4, sticky="ew")
+                 highlightthickness=0).grid(row=0, column=0, columnspan=5, sticky="ew")
 
         self.indicator = ttk.Label(self, text="●", font=Fonts.BODY_SMALL,
                                    background=Colors.BG_HEADER,
@@ -257,6 +257,9 @@ class StatusBar(ttk.Frame):
         self.detail = ttk.Label(self, text="", anchor="e", font=Fonts.BODY_SMALL,
                                 background=Colors.BG_HEADER, foreground=Colors.TEXT_MUTED)
         self.detail.grid(row=1, column=3, sticky="e", padx=(6, 12), pady=5)
+        # Right-hand slot for small persistent controls (the event-log toggle).
+        self.actions = ttk.Frame(self, style="Header.TFrame")
+        self.actions.grid(row=1, column=4, sticky="e", padx=(0, 8), pady=2)
         self._toast_id = None
         self._sticky_text = "Ready"
 

@@ -1319,6 +1319,34 @@ def make_flat_button(parent, text: str, command, *, fg: str, bg: str) -> tk.Butt
                       font=Fonts.CAPTION_BOLD, padx=8, pady=3)
 
 
+def set_action_enabled(button: tk.Button, enabled: bool) -> None:
+    """Grey out a ``make_action_button`` or bring it back in its own colour.
+
+    A Start/Stop pair reads wrong when both look live: Stop is greyed while
+    nothing runs and Start while something does.
+    """
+    try:
+        if enabled:
+            bg = getattr(button, "_enabled_bg", None) or button.cget("bg")
+            button.configure(state="normal", bg=bg, fg=Colors.TEXT_ON_ACCENT, cursor="hand2")
+            return
+        if str(button.cget("state")) == "disabled":
+            return
+        # Drop any hover shade first, so the resting colour is what is remembered.
+        button.event_generate("<Leave>")
+        button._enabled_bg = button.cget("bg")
+        button.configure(state="disabled", bg=Colors.BG_SUBTLE, cursor="arrow")
+    except tk.TclError:
+        pass
+
+
+def empty_state_text(ax, text: str):
+    """A muted, centred hint drawn on an axes until the first data arrives."""
+    return ax.text(0.5, 0.5, text, transform=ax.transAxes, ha="center", va="center",
+                   fontsize=scaled_pt(11.5), color=Colors.TEXT_MUTED,
+                   fontfamily=matplotlib_font_family(), zorder=0)
+
+
 def hairline(parent, *, horizontal: bool = True, color: str | None = None):
     """A 1 px rule -- crisper than ttk.Separator's 2 px bevel."""
     frame = tk.Frame(parent, bg=color or Colors.BORDER_LIGHT,
