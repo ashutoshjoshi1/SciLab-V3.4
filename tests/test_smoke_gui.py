@@ -119,12 +119,20 @@ def test_simulated_backend_streams_live_frames(tk_app):
     # Single-frame shot noise can move the argmax by a pixel either side of the line centre.
     assert abs(int(tk_app.live_line.get_ydata().argmax()) - tk_app.spec.pixel_of(445.0)) <= 1.5
 
+    # The readout card beside the plot follows the frames and the stream state.
+    assert pump_until(tk_app, lambda: tk_app.live_readout["peak"].cget("text") not in ("", "—"), timeout=5.0)
+    assert tk_app.live_readout["status"].cget("text") == "Streaming"
+    assert tk_app.live_readout["sat"].cget("text") == "OK"
+    assert tk_app.live_readout["it"].cget("text").endswith(" ms")
+    assert tk_app.live_readout["scale"].cget("text").endswith(" %")
+
     # A second acquisition must be refused while Live View owns the spectrometer.
     tk_app.run_all_selected()
     assert any("Live View is running" in d[2] for d in tk_app.dialogs if d[0] == "showwarning")
 
     tk_app.stop_live()
     assert pump_until(tk_app, lambda: not tk_app.live_running.is_set() and tk_app.acq.owner is None, timeout=5.0)
+    assert pump_until(tk_app, lambda: tk_app.live_readout["status"].cget("text") == "Stopped", timeout=5.0)
     assert not errors(tk_app), tk_app.dialogs
 
 
@@ -149,4 +157,53 @@ def test_disconnect_restores_hardware_lasers(tk_app):
     tk_app.update()
     assert tk_app.spec is None
     assert isinstance(tk_app.lasers, LaserController)
+    assert not errors(tk_app), tk_app.dialogs
+
+
+def test_laser_chip_tracks_sources(tk_app):
+    tk_app.note_source_state("532", True)
+    tk_app.update()
+    assert tk_app._laser_chip.text.cget("text") == "532 nm on"
+    assert tk_app.laser_vars["532"].get() is True
+    assert tk_app._laser_all_off_btn.winfo_manager() == "pack"
+
+    tk_app.note_source_state("Hg_Ar", True)
+    tk_app.update()
+    assert tk_app._laser_chip.text.cget("text") == "532 nm, Hg-Ar on"
+
+    tk_app.note_all_sources_off()
+    tk_app.update()
+    assert tk_app._laser_chip.text.cget("text") == "Sources off"
+    assert not tk_app.laser_vars["532"].get() and not tk_app.laser_vars["Hg_Ar"].get()
+    assert tk_app._laser_all_off_btn.winfo_manager() == ""
+    assert not errors(tk_app), tk_app.dialogs
+
+
+def test_run_progress_panel_and_chip_follow_the_model(tk_app):
+    model = tk_app.run_progress
+    panel = tk_app.run_progress_panel
+    chip = tk_app._run_chip.chip
+
+    model.start(["640", "405", "532"])
+    model.set_sequence(["405", "532", "640"])      # as the orchestrator reorders it
+    model.source_started("405")
+    model.frame("405", 2.7, 1200.0)
+    assert pump_until(tk_app, lambda: "Measuring 405 nm" in panel.status_label.cget("text"), timeout=5.0)
+    assert [row["name"].cget("text") for row in panel._rows.values()] == ["405 nm", "532 nm", "640 nm"]
+    assert chip.winfo_manager() == "pack"
+    assert pump_until(tk_app, lambda: "2.70 ms" in chip.text.cget("text"), timeout=5.0)
+    assert "1,200 cts" in panel._rows["405"]["value"].cget("text")
+
+    model.source_completed("405")
+    model.source_started("532")
+    model.source_failed("532", "auto-IT did not reach the target band")
+    model.finish(stopped_early=True)
+    assert pump_until(tk_app, lambda: panel.status_label.cget("text").startswith("Stopped"), timeout=5.0)
+    rows = panel._rows
+    assert rows["405"]["glyph"].cget("text") == "✓"
+    assert rows["532"]["glyph"].cget("text") == "✕" and "failed" in rows["532"]["value"].cget("text")
+    assert rows["532"]["tip"].text == "auto-IT did not reach the target band"
+    assert rows["640"]["value"].cget("text") == "not run"
+    assert chip.text.cget("text").startswith("Stopped")
+    tk_app._run_chip.hide()
     assert not errors(tk_app), tk_app.dialogs

@@ -30,6 +30,8 @@ except ImportError:
     StageController = None
 
 
+from services.run_progress import RunProgress, source_label
+
 LOGGER = logging.getLogger(__name__)
 
 # Analysis-tab previews retained before the oldest run tab is destroyed. Each run
@@ -280,6 +282,12 @@ class SpectroApp(tk.Tk):
         # tab) so Live View, Check Resolution and Measurements can all bind to
         # the same variables regardless of which tab is opened first.
         self.laser_vars: Dict[str, tk.BooleanVar] = {}
+        # Sources currently emitting, as reported by every switching path (the
+        # checkboxes, the measurement run, All off): drives the app-bar chip.
+        self.lit_sources: set = set()
+        # Progress of the measurement run: written by the orchestrator's
+        # callbacks, read by the Measurements card and the app-bar chip.
+        self.run_progress = RunProgress()
 
         self.live_running = threading.Event()
         self.measure_running = threading.Event()
@@ -377,7 +385,9 @@ class SpectroApp(tk.Tk):
 
     def _build_app_bar(self) -> None:
         """White title strip: SciGlob mark, product name, live instrument chip."""
-        from tabs.theme import Colors, Fonts, gradient_rail, logical_px
+        from tabs.run_progress import RunChip
+        from tabs.theme import Colors, Fonts, gradient_rail, logical_px, make_chip, make_flat_button
+        from tabs.ui_utils import Tooltip
 
         bar = ttk.Frame(self, style="Surface.TFrame")
         bar.pack(fill="x", side="top")
@@ -414,20 +424,27 @@ class SpectroApp(tk.Tk):
                   background=Colors.BG_SURFACE,
                   foreground=Colors.TEXT_MUTED).pack(anchor="w")
 
-        # -- Right: instrument chip ------------------------------------
-        chip = tk.Frame(inner, bg=Colors.BG_SUBTLE, bd=0, highlightthickness=1,
-                        highlightbackground=Colors.BORDER_LIGHT,
-                        highlightcolor=Colors.BORDER_LIGHT)
-        chip.pack(side="right", padx=(12, 0))
-        self._chip_dot = tk.Label(chip, text="●", font=Fonts.DOT,
-                                  bg=Colors.BG_SUBTLE, fg=Colors.IDLE,
-                                  bd=0, highlightthickness=0)
-        self._chip_dot.pack(side="left", padx=(10, 6), pady=6)
-        self._chip_text = tk.Label(chip, text="No spectrometer",
-                                   font=Fonts.BODY_SMALL_BOLD,
-                                   bg=Colors.BG_SUBTLE, fg=Colors.TEXT_SECONDARY,
-                                   bd=0, highlightthickness=0)
-        self._chip_text.pack(side="left", padx=(0, 12), pady=6)
+        # -- Right: instrument, lit-source and run chips ------------------
+        chip_pad = (logical_px(self, 12), 0)
+        chip = make_chip(inner, "No spectrometer")
+        chip.pack(side="right", padx=chip_pad)
+        self._chip_dot, self._chip_text = chip.dot, chip.text
+
+        # A laser left on is the state an operator most needs to see from any
+        # tab, and this is the one place that switches everything off.
+        self._laser_chip = make_chip(inner, "Sources off")
+        self._laser_chip.pack(side="right", padx=chip_pad)
+        self._laser_all_off_btn = make_flat_button(self._laser_chip, "All off", self.all_sources_off,
+                                                   fg=Colors.DANGER, bg=Colors.BG_SUBTLE)
+        self._laser_all_off_shown = False
+        Tooltip(self._laser_all_off_btn,
+                "Switch every laser and the lamp off. A running measurement is stopped first.")
+        self._refresh_laser_chip()
+
+        # The measurement run: hidden until one starts; a click opens Measurements.
+        self._run_chip = RunChip(make_chip(inner), self.run_progress, post=self.pump.post,
+                                 on_click=lambda: self.nb.select(self.measure_tab),
+                                 pack_kwargs={"side": "right", "padx": chip_pad})
 
         gradient_rail(self, height=3, start=Colors.ACCENT_DEEP, end="#22d3ee",
                       background=Colors.BG_SURFACE).pack(fill="x", side="top")
@@ -451,6 +468,100 @@ class SpectroApp(tk.Tk):
             text.configure(text=label)
         except tk.TclError:
             pass
+
+    # ------------------------------------------------------------------
+    # Lit sources. Every path that switches a laser or the lamp reports here
+    # (set_source_state for the checkboxes, the orchestrator's callbacks for a
+    # run, All off), so the chip is right no matter which tab did the switching.
+    # ------------------------------------------------------------------
+
+    def _refresh_laser_chip(self) -> None:
+        from tabs.theme import Colors
+
+        chip = getattr(self, "_laser_chip", None)
+        if chip is None:
+            return
+        ordered = [tag for tag in self.laser_tags() if tag in self.lit_sources]
+        ordered += sorted(tag for tag in self.lit_sources if tag not in ordered)
+        button = self._laser_all_off_btn
+        try:
+            if ordered:
+                chip.dot.configure(fg=Colors.WARNING)
+                chip.text.configure(text=f"{', '.join(source_label(tag) for tag in ordered)} on",
+                                    fg=Colors.TEXT_PRIMARY)
+                if not self._laser_all_off_shown:
+                    button.pack(side="left", padx=(0, 6), pady=3)
+                    self._laser_all_off_shown = True
+            else:
+                chip.dot.configure(fg=Colors.IDLE)
+                chip.text.configure(text="Sources off", fg=Colors.TEXT_SECONDARY)
+                if self._laser_all_off_shown:
+                    button.pack_forget()
+                    self._laser_all_off_shown = False
+        except tk.TclError:
+            pass
+
+    def note_source_state(self, tag: str, is_on: bool) -> None:
+        """Record that a source was switched. Safe from any thread."""
+        if threading.current_thread() is not threading.main_thread():
+            self.pump.post(self.note_source_state, tag, is_on)
+            return
+        tag = str(tag)
+        if is_on:
+            self.lit_sources.add(tag)
+        else:
+            self.lit_sources.discard(tag)
+        try:
+            # The Live View / Check Resolution checkboxes mirror the real state,
+            # including the switching a measurement run does behind them.
+            self.laser_var(tag).set(bool(is_on))
+        except tk.TclError:
+            pass
+        self._refresh_laser_chip()
+
+    def note_all_sources_off(self) -> None:
+        """Record that every source was switched off. Safe from any thread."""
+        if threading.current_thread() is not threading.main_thread():
+            self.pump.post(self.note_all_sources_off)
+            return
+        self.lit_sources.clear()
+        for var in self.laser_vars.values():
+            try:
+                var.set(False)
+            except tk.TclError:
+                pass
+        self._refresh_laser_chip()
+
+    def all_sources_off(self) -> None:
+        """App-bar 'All off': stop a running measurement, then switch every source off."""
+        from tabs.ui_utils import run_in_worker
+
+        if self.measure_running.is_set():
+            self.stop_measure()
+
+        def _work():
+            worker = getattr(self, "measure_thread", None)
+            if worker is not None and worker.is_alive():
+                worker.join(timeout=10.0)   # it switches its own source off on the way out
+            if hasattr(self.lasers, "all_off"):
+                return list(self.lasers.all_off() or [])
+            for tag in list(self.lit_sources):
+                self.set_source_state(tag, False)
+            return []
+
+        def _done(failed):
+            self.note_all_sources_off()
+            if failed:
+                self.status.progress_end(f"All off: no reply from {', '.join(failed)}", kind="warning")
+            else:
+                self.status.progress_end("All sources off", kind="success")
+
+        def _failed(exc):
+            self.status.progress_end("All off failed", kind="error")
+            self._post_error("All off", exc)
+
+        self.status.progress_begin("Switching every source off…")
+        run_in_worker(self, _work, on_done=_done, on_error=_failed, name="all-off")
 
     # ------------------------------------------------------------------
     # Keyboard shortcuts / tooltips
@@ -731,6 +842,7 @@ class SpectroApp(tk.Tk):
                 self.lasers.relay_off(relay)
         else:
             raise RuntimeError(f"Unsupported source '{tag}'.")
+        self.note_source_state(tag, turn_on)
 
     def toggle_laser(self, tag: str, turn_on: bool) -> None:
         """Checkbox handler shared by Live View and Check Resolution.

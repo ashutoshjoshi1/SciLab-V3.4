@@ -10,7 +10,34 @@ the installer. The single source of truth is
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Run progress on the Measurements tab and in the title strip.** The
+  Actions card lists every source in the run with its state (waiting,
+  measuring, done, failed, stopped), the integration time, peak and auto-IT
+  frame count while it is being measured, its duration once done, and the
+  failure reason as a tooltip; the header names the source in progress, how
+  many are done and the elapsed time. A chip in the title strip mirrors the
+  run from any tab (click it to open Measurements) and keeps the outcome up
+  for a while after the run ends. The orchestrator gained `run_started`,
+  `source_failed`, `source_state_changed` and `all_sources_off` callbacks to
+  drive it.
+- **Lit-source chip with All off.** The title strip shows which lasers or
+  the lamp are emitting, whichever path switched them (the Live View and
+  Check Resolution checkboxes or a measurement run), and an **All off**
+  button beside it switches everything off, stopping a running measurement
+  first. The shared checkboxes now follow the real state too, so a source a
+  run switched off no longer shows as checked.
+- **Live View readout card.** Integration time, peak counts, peak pixel,
+  percent of full scale, display frame rate, a saturation flag and the
+  stream state beside the plot, refreshed up to ten times a second.
+
+### Fixed
+
+- Check Resolution's Fit Readout rows painted the canvas grey behind their
+  labels on the white card: the `FieldLabel`, `Metric`, `MetricSmall` and
+  `Strong` label styles are now re-tinted with their container like the
+  other typography-only styles.
 
 ## [3.4.3.0] — 2026-10-07
 

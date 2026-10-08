@@ -1065,6 +1065,7 @@ _RETINTABLE_LABELS = {
     "", "TLabel", "Secondary.TLabel", "Muted.TLabel", "Hint.TLabel",
     "Heading.TLabel", "Title.TLabel", "Display.TLabel", "Status.TLabel",
     "StatusIcon.TLabel", "Mono.TLabel", "Value.TLabel",
+    "Strong.TLabel", "Metric.TLabel", "MetricSmall.TLabel", "FieldLabel.TLabel",
     "SetupLabel.TLabel", "SetupStatus.TLabel",
     "EEPROMLabel.TLabel", "EEPROMValue.TLabel",
 }
@@ -1295,6 +1296,27 @@ def badge(parent, text: str, *, kind: str = "info", background: str | None = Non
     return tk.Label(parent, text=f" {text} ", font=Fonts.CAPTION_BOLD,
                     bg=bg, fg=fg, bd=0, highlightthickness=0,
                     padx=_px(4), pady=_px(1))
+
+
+def make_chip(parent, text: str = "", *, background: str | None = None):
+    """App-bar pill: a status dot and a short label. Returns the frame with ``.dot`` and ``.text``."""
+    bg = background or Colors.BG_SUBTLE
+    chip = tk.Frame(parent, bg=bg, bd=0, highlightthickness=1,
+                    highlightbackground=Colors.BORDER_LIGHT,
+                    highlightcolor=Colors.BORDER_LIGHT)
+    chip.dot = tk.Label(chip, text="●", font=Fonts.DOT, bg=bg, fg=Colors.IDLE,
+                        bd=0, highlightthickness=0)
+    chip.dot.pack(side="left", padx=(_px(10), _px(6)), pady=_px(6))
+    chip.text = tk.Label(chip, text=text, font=Fonts.BODY_SMALL_BOLD, bg=bg,
+                         fg=Colors.TEXT_SECONDARY, bd=0, highlightthickness=0)
+    chip.text.pack(side="left", padx=(0, _px(12)), pady=_px(6))
+    return chip
+
+
+def make_flat_button(parent, text: str, command, *, fg: str, bg: str) -> tk.Button:
+    """A quiet text button for the inside of chips and strips: no border, a hover wash."""
+    return _tk_button(parent, text, command, bg=bg, hover_bg=shade(bg, 0.9), fg=fg,
+                      font=Fonts.CAPTION_BOLD, padx=8, pady=3)
 
 
 def hairline(parent, *, horizontal: bool = True, color: str | None = None):

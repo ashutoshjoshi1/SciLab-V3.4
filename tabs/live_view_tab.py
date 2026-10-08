@@ -20,6 +20,8 @@ LOGGER = logging.getLogger(__name__)
 
 _LIVE_CLAMP = 65000        # counts ceiling for display
 _LIVE_MIN_FRAME_S = 0.04   # cap the acquisition loop at ~25 frames/s
+_FULL_SCALE = 65535.0      # 16-bit detector full scale, for the readout's percentage
+_READOUT_MIN_S = 0.1       # the numeric readout refreshes at most 10x per second
 
 
 def build(app):
@@ -162,6 +164,33 @@ def build(app):
         app.live_stop_btn = make_action_button(live_control_frame, text="Stop Live",
                                                command=app.stop_live, danger=True, width=18)
         app.live_stop_btn.pack(fill="x")
+
+        # === Readout Section ===
+        # The numbers an operator otherwise reads off the plot while tuning
+        # the exposure; same styling as Check Resolution's Fit Readout, in
+        # two columns so the control column still fits a 1080p screen.
+        readout_frame = ttk.LabelFrame(controls_grid, text="Readout", padding=8)
+        readout_frame.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
+        readout_frame.columnconfigure(1, weight=1)
+        readout_frame.columnconfigure(3, weight=1)
+
+        def _readout_cell(row, column, label_text):
+            ttk.Label(readout_frame, text=label_text, anchor="w", style="FieldLabel.TLabel").grid(
+                row=row, column=column * 2, sticky="w", padx=(0, 4), pady=1)
+            value = ttk.Label(readout_frame, text="—", anchor="w", style="MetricSmall.TLabel")
+            value.grid(row=row, column=column * 2 + 1, sticky="ew", padx=(0, Spacing.PAD_SM), pady=1)
+            return value
+
+        app.live_readout = {
+            "peak": _readout_cell(0, 0, "Peak:"),
+            "pixel": _readout_cell(0, 1, "Pixel:"),
+            "scale": _readout_cell(1, 0, "Full scale:"),
+            "sat": _readout_cell(1, 1, "Saturation:"),
+            "it": _readout_cell(2, 0, "Integration:"),
+            "fps": _readout_cell(2, 1, "Frame rate:"),
+            "status": _readout_cell(3, 0, "Status:"),
+        }
+        app.live_readout["status"].configure(text="Idle", foreground=Colors.TEXT_MUTED)
 
         # === Head Sensor Section ===
         headsensor_frame = ttk.LabelFrame(controls_grid, text="Head Sensor", padding=8)
@@ -382,7 +411,7 @@ def build(app):
                 return
             gutter = Spacing.PAD_SM
 
-            for row in range(5):
+            for row in range(6):
                 controls_grid.rowconfigure(row, weight=0)
             for col in range(3):
                 controls_grid.columnconfigure(col, weight=0, uniform="")
@@ -400,9 +429,10 @@ def build(app):
                 layouts = (
                     (spectrum_frame, 0, 0),
                     (live_control_frame, 1, 0),
-                    (laser_frame, 2, 0),
-                    (headsensor_frame, 3, 0),
-                    (stage_frame, 4, 0),
+                    (readout_frame, 2, 0),
+                    (laser_frame, 3, 0),
+                    (headsensor_frame, 4, 0),
+                    (stage_frame, 5, 0),
                 )
                 controls_grid.columnconfigure(0, weight=1)
                 two_columns = False
@@ -423,9 +453,10 @@ def build(app):
                     layouts = (
                         (spectrum_frame, 0, 0),
                         (live_control_frame, 0, 1),
-                        (laser_frame, 1, 0),
-                        (headsensor_frame, 1, 1),
-                        (stage_frame, 2, 0),
+                        (readout_frame, 1, 0),
+                        (laser_frame, 1, 1),
+                        (headsensor_frame, 2, 0),
+                        (stage_frame, 2, 1),
                     )
                     controls_grid.columnconfigure(0, weight=1, uniform="live")
                     controls_grid.columnconfigure(1, weight=1, uniform="live")
@@ -433,9 +464,10 @@ def build(app):
                     layouts = (
                         (spectrum_frame, 0, 0),
                         (live_control_frame, 1, 0),
-                        (laser_frame, 2, 0),
-                        (headsensor_frame, 3, 0),
-                        (stage_frame, 4, 0),
+                        (readout_frame, 2, 0),
+                        (laser_frame, 3, 0),
+                        (headsensor_frame, 4, 0),
+                        (stage_frame, 5, 0),
                     )
                     controls_grid.columnconfigure(0, weight=1)
 
@@ -602,6 +634,8 @@ def build(app):
                 res = app.spec.set_it(it)
                 if isinstance(res, str) and res not in ("", "OK"):
                     raise RuntimeError(res)
+                _live_stats["it"] = it
+                _refresh_live_it()
                 app.status.toast(f"Integration time set to {it:.3f} ms")
             except Exception as e:
                 messagebox.showerror("Apply IT", str(e))
@@ -618,6 +652,17 @@ def build(app):
             return
         if not app.claim_spectrometer("Live View"):
             return
+        if _live_stats["it"] is None:
+            # Nothing applied yet this session: the entry is the best statement
+            # of the exposure in force (apply_it keeps it current from here on).
+            try:
+                _live_stats["it"] = max(IT_MIN, min(IT_MAX, float(app.it_entry.get())))
+            except (ValueError, tk.TclError):
+                pass
+        _live_stats["fps"] = None
+        _live_stats["last_frame"] = None
+        _set_live_status("Streaming", Colors.SUCCESS)
+        _refresh_live_it()
         app.live_running.set()
         app.live_thread = threading.Thread(target=app._live_loop, daemon=True, name="live-view")
         app.live_thread.start()
@@ -636,6 +681,7 @@ def build(app):
                     app.spec.wait_for_measurement()
                     if not app.live_running.is_set():
                         break
+                    _note_live_frame_time(time.perf_counter())
 
                     # Apply any deferred IT safely after the completed frame
                     if app._pending_it is not None:
@@ -647,6 +693,7 @@ def build(app):
                             if isinstance(res, str) and res not in ("", "OK"):
                                 raise RuntimeError(res)
                             LOGGER.info("Applied IT=%.3f ms between live frames", it_to_apply)
+                            _live_stats["it"] = it_to_apply
                         except Exception as e:
                             app._post_error("Apply IT (deferred)", e)
                         finally:
@@ -679,6 +726,9 @@ def build(app):
         finally:
             app.live_running.clear()
             app.release_spectrometer("Live View")
+            _live_stats["fps"] = None
+            app.pump.post(_set_live_status, "Stopped", Colors.TEXT_MUTED)
+            app.pump.post(_refresh_live_fps)
 
     def _reenable_apply_it():
         try:
@@ -687,6 +737,55 @@ def build(app):
             pass
 
     _live_view_state = {"title": None, "xmax": None, "ymax": None}
+    # Readout state. ``it`` is the last exposure applied (ms); ``fps`` is a
+    # smoothed display frame rate maintained by the acquisition thread.
+    _live_stats = {"it": None, "fps": None, "last_frame": None, "last_readout": 0.0}
+
+    def _note_live_frame_time(now):
+        """Acquisition thread: fold one frame period into the smoothed frame rate."""
+        last = _live_stats["last_frame"]
+        _live_stats["last_frame"] = now
+        if last is None:
+            return
+        rate = 1.0 / max(1e-4, now - last)
+        previous = _live_stats["fps"]
+        _live_stats["fps"] = rate if previous is None else 0.8 * previous + 0.2 * rate
+
+    def _readout():
+        return getattr(app, "live_readout", None)
+
+    def _set_live_status(text, color):
+        readout = _readout()
+        if readout is not None:
+            readout["status"].configure(text=text, foreground=color)
+
+    def _refresh_live_it():
+        readout = _readout()
+        if readout is not None:
+            it = _live_stats["it"]
+            readout["it"].configure(text=f"{it:.2f} ms" if it is not None else "—")
+
+    def _refresh_live_fps():
+        readout = _readout()
+        if readout is not None:
+            fps = _live_stats["fps"]
+            readout["fps"].configure(text=f"{fps:.1f} fps" if fps else "—")
+
+    def _update_live_readout(y_values, saturated, now):
+        """Main thread, at most every _READOUT_MIN_S: the numbers beside the plot."""
+        readout = _readout()
+        if readout is None or now - _live_stats["last_readout"] < _READOUT_MIN_S:
+            return
+        _live_stats["last_readout"] = now
+        if y_values.size:
+            peak = float(np.nanmax(y_values))
+            readout["peak"].configure(text=f"{peak:,.0f}")
+            readout["pixel"].configure(text=str(int(np.nanargmax(y_values))))
+            readout["scale"].configure(text=f"{100.0 * peak / _FULL_SCALE:.1f} %")
+        readout["sat"].configure(text="SATURATED" if saturated else "OK",
+                                 foreground=Colors.DANGER if saturated else Colors.SUCCESS)
+        _refresh_live_fps()
+        _refresh_live_it()
 
     def _render_live_frame(payload):
         """Main thread: push the newest frame into the existing artists."""
@@ -727,6 +826,8 @@ def build(app):
                 app.live_ax.set_ylim(0, ymax)
                 _live_view_state["ymax"] = ymax
                 app._live_blit.request_full()
+
+        _update_live_readout(y_values, saturated, time.perf_counter())
 
     def _update_live_plot(self, x, y):
         app._live_redraw.submit((np.asarray(x, dtype=float), np.asarray(y, dtype=float)))

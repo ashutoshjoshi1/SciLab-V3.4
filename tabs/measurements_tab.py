@@ -15,6 +15,8 @@ from services.measurement_orchestrator import (
     MeasurementOrchestratorCallbacks,
     MeasurementOrchestratorConfig,
 )
+from services.run_progress import source_label
+from .run_progress import RunProgressPanel
 from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure, center_over
 
 from .theme import (Colors, Fonts, Spacing, bind_figure_margins, configure_matplotlib_style,
@@ -474,6 +476,10 @@ def build(app):
         for col in range(4):
             actions_buttons_frame.columnconfigure(col, weight=1)
 
+        # The run in flight, one row per source: state, IT, peak, timing, failures.
+        app.run_progress_panel = RunProgressPanel(actions_frame, app.run_progress, post=app.pump.post)
+        app.run_progress_panel.pack(fill="both", expand=True, pady=(Spacing.PAD_SM, 0))
+
         def _layout_quick_controls(panel_width):
             if panel_width < logical_px(app, 520):
                 select_all_chk.grid_configure(row=0, column=0, columnspan=3, pady=(0, 4))
@@ -534,9 +540,10 @@ def build(app):
                     (reference_frame, 0, 2, {"padx": 6}),
                     (actions_frame, 0, 3, {"padx": (6, 0)}),
                 )
-                for col, weight in enumerate((3, 1, 2, 1)):
+                # Actions holds the progress checklist, so it gets as much as Reference.
+                for col, weight in enumerate((3, 1, 2, 2)):
                     controls_frame.columnconfigure(col, weight=weight)
-                laser_panel_width = int(available_width * 3 / 7) - 2 * Spacing.GROUP_PAD
+                laser_panel_width = int(available_width * 3 / 8) - 2 * Spacing.GROUP_PAD
             elif not narrow:
                 layouts = (
                     (laser_frame, 0, 0, {"columnspan": 2, "padx": 0}),
@@ -626,6 +633,7 @@ def build(app):
         app.run_all_btn.configure(bg=Colors.WARNING, activebackground=Colors.WARNING)
 
         app.status.progress_begin("Measurement starting…", total=len(tags))
+        app.run_progress.start(tags)
         app.measure_running.set()
         app.measure_thread = threading.Thread(
             target=run_measurement_with_analysis,
@@ -681,16 +689,33 @@ def build(app):
             smart_source_off=bool(app.measurement_flags.get("smart_source_off", False)),
             cube_prearm=bool(app.measurement_flags.get("cube_prearm", False)),
         )
+        progress = app.run_progress
+
+        def _auto_it_update(tag, spectrum, it_ms, peak):
+            progress.frame(tag, it_ms, peak)
+            app._update_auto_it_plot(tag, spectrum, it_ms, peak)
+
+        def _measurement_completed(tag):
+            progress.source_completed(tag)
+            app._update_last_plots(tag)
+
+        def _source_started(tag, index, total):
+            progress.source_started(tag)
+            app.pump.post(app.status.progress_update, index - 1,
+                          f"Measuring {source_label(tag)}…", f"{index}/{total}")
+
         callbacks = MeasurementOrchestratorCallbacks(
             prepare_devices=lambda: None,
             power_lookup=lambda tag: power_snapshot.get(tag, 0.0),
-            auto_it_update=lambda tag, spectrum, it_ms, peak: app._update_auto_it_plot(tag, spectrum, it_ms, peak),
-            measurement_completed=lambda tag: app._update_last_plots(tag),
+            auto_it_update=_auto_it_update,
+            measurement_completed=_measurement_completed,
             countdown=_show_countdown_modal_threadsafe,
             error_handler=app._post_error,
-            source_started=lambda tag, index, total: app.pump.post(
-                app.status.progress_update, index - 1, f"Measuring {tag} nm…", f"{index}/{total}"
-            ),
+            source_started=_source_started,
+            run_started=progress.set_sequence,
+            source_failed=progress.source_failed,
+            source_state_changed=app.note_source_state,
+            all_sources_off=app.note_all_sources_off,
         )
         return MeasurementOrchestrator(
             spectrometer=app.spec,
@@ -704,6 +729,7 @@ def build(app):
     def run_measurement_with_analysis(tags, start_it_override, power_snapshot):
         """Run measurement sequence and automatically generate analysis."""
         end_text, end_kind = "Measurement finished", "success"
+        run_result = None
         try:
             orchestrator = _build_measurement_orchestrator(power_snapshot)
             run_result = orchestrator.run(
@@ -744,6 +770,7 @@ def build(app):
             end_text, end_kind = "Measurement failed", "error"
             app._post_error("Measurement", e)
         finally:
+            app.run_progress.finish(stopped_early=run_result is None or run_result.stopped_early)
             app.measure_running.clear()
             app.release_spectrometer("Measurement")
             app.pump.post(app.status.progress_end, end_text, end_kind)

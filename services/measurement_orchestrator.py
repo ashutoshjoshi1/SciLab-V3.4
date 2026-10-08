@@ -67,6 +67,14 @@ class MeasurementOrchestratorCallbacks:
     error_handler: Callable[[str, Exception], None] = lambda *_args, **_kwargs: None
     # (tag, index, total) just before a source is measured: drives the progress bar.
     source_started: Callable[[str, int, int], None] = lambda *_args, **_kwargs: None
+    # The ordered sequence the run will follow (640 nm last), before the first source.
+    run_started: Callable[[Sequence[str]], None] = lambda *_args, **_kwargs: None
+    # (tag, message) when a source's measurement raised; the run goes on with the next.
+    source_failed: Callable[[str, str], None] = lambda *_args, **_kwargs: None
+    # (tag, is_on) after a source was switched, and once everything was switched off:
+    # the application mirrors them into its lit-source indicator.
+    source_state_changed: Callable[[str, bool], None] = lambda *_args, **_kwargs: None
+    all_sources_off: Callable[[], None] = lambda *_args, **_kwargs: None
 
 
 class MeasurementOrchestrator:
@@ -115,6 +123,7 @@ class MeasurementOrchestrator:
                 trailing_640 = []
 
             sequence = [str(tag) for tag in [*main_tags, *trailing_640]]
+            self.callbacks.run_started(list(sequence))
             for index, tag in enumerate(sequence):
                 if not continue_run():
                     result.stopped_early = True
@@ -136,6 +145,7 @@ class MeasurementOrchestrator:
                         result.stopped_early = True
                         break
                     result.errors.append(f"{tag}: {exc}")
+                    self.callbacks.source_failed(str(tag), str(exc))
                     self.callbacks.error_handler(f"Measurement {tag}", exc)
         finally:
             self._turn_all_sources_off()
@@ -158,25 +168,28 @@ class MeasurementOrchestrator:
 
     def _turn_all_sources_off(self) -> None:
         self._lit_source = None
-        if hasattr(self.lasers, "all_off"):
-            self.lasers.all_off()
-            return
-
-        obis_map = getattr(self.lasers, "OBIS_MAP", {})
-        for channel in obis_map.values():
-            try:
-                self.lasers.obis_off(channel)
-            except Exception:
-                pass
-        for relay_number in self.config.relay_channel_map.values():
-            try:
-                self.lasers.relay_off(relay_number)
-            except Exception:
-                pass
         try:
-            self.lasers.cube_off()
-        except Exception:
-            pass
+            if hasattr(self.lasers, "all_off"):
+                self.lasers.all_off()
+                return
+
+            obis_map = getattr(self.lasers, "OBIS_MAP", {})
+            for channel in obis_map.values():
+                try:
+                    self.lasers.obis_off(channel)
+                except Exception:
+                    pass
+            for relay_number in self.config.relay_channel_map.values():
+                try:
+                    self.lasers.relay_off(relay_number)
+                except Exception:
+                    pass
+            try:
+                self.lasers.cube_off()
+            except Exception:
+                pass
+        finally:
+            self.callbacks.all_sources_off()
 
     def _cube_power_mw(self) -> float:
         value = float(self.callbacks.power_lookup("377"))
@@ -221,6 +234,7 @@ class MeasurementOrchestrator:
             self._lit_source = tag
         elif self._lit_source == tag:
             self._lit_source = None
+        self.callbacks.source_state_changed(tag, bool(turn_on))
 
     def _prearm_cube_if_next(self, next_tag: Optional[str]) -> None:
         """Bench option: send the CUBE's EXT/CW/P setup (no emission) during a dark capture."""

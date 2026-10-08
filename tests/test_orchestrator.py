@@ -57,7 +57,7 @@ def sim_lasers(bench) -> SimulatedLaserController:
 
 @pytest.fixture
 def make_orchestrator(sim_spec, sim_lasers):
-    def _factory(**overrides):
+    def _factory(_callbacks=None, **overrides):
         config = MeasurementOrchestratorConfig(**{**APP_CONFIG, **overrides})
         data = MeasurementData(npix=sim_spec.npix_active, serial_number=sim_spec.sn)
         auto_it_log: List[Tuple[str, float, float]] = []
@@ -69,6 +69,7 @@ def make_orchestrator(sim_spec, sim_lasers):
             measurement_completed=lambda tag: completed.append(tag),
             countdown=lambda *_args: None,
             error_handler=lambda *_args: None,
+            **(_callbacks or {}),
         )
         orchestrator = MeasurementOrchestrator(
             spectrometer=sim_spec,
@@ -242,3 +243,31 @@ def test_set_it_is_skipped_when_unchanged(make_orchestrator, sim_spec):
     frames = _frames_per_tag(log)["517"]
     # Expected DLL round trips: one set_it per auto-IT frame that changed IT, none for signal/dark reuse.
     assert sim_spec.set_it_calls <= frames + 1, (sim_spec.set_it_calls, frames)
+
+
+def test_progress_callbacks_report_sequence_failures_and_source_switching(make_orchestrator, sim_spec):
+    """The Measurements progress card and the lit-source chip are driven by these callbacks."""
+    events = []
+    hooks = dict(
+        run_started=lambda sequence: events.append(("run", list(sequence))),
+        source_failed=lambda tag, message: events.append(("failed", tag, message)),
+        source_state_changed=lambda tag, is_on: events.append(("source", tag, is_on)),
+        all_sources_off=lambda: events.append(("all_off",)),
+    )
+    # 405 nm too dim to reach the band even with the full frame budget (62 counts/ms
+    # x 302 ms is ~19,000 counts); 532 nm and 640 nm measure normally.
+    sim_spec.lines = tuple(
+        line if line.tag != "405" else line.__class__("405", line.wavelength_nm, 62.0) for line in sim_spec.lines
+    )
+    orchestrator, _data, _log, _completed = make_orchestrator(_callbacks=hooks)
+    result = orchestrator.run(["640", "405", "532"])
+
+    assert events[0] == ("all_off",)                              # everything off before the first source
+    assert events[1] == ("run", ["405", "532", "640"])            # 640 nm is moved last
+    assert events[-1] == ("all_off",)                             # and again in the finally block
+    assert ("source", "405", True) in events and ("source", "405", False) in events
+    assert ("source", "532", True) in events and ("source", "640", True) in events
+    failed = [event for event in events if event[0] == "failed"]
+    assert [event[1] for event in failed] == ["405"]
+    assert "did not reach the target band" in failed[0][2]
+    assert result.completed_tags == ["532", "640"]
