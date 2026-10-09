@@ -10,6 +10,8 @@ the installer. The single source of truth is
 
 ## [Unreleased]
 
+## [3.4.4.0] — 2026-10-09
+
 ### Added
 
 - **Run progress on the Measurements tab and in the title strip.** The
@@ -71,7 +73,6 @@ the installer. The single source of truth is
 
 - Bench speed options saved in the settings file loaded into the
   measurement but not into the Setup checkboxes, which stayed unticked.
-
 - Check Resolution's Fit Readout rows painted the canvas grey behind their
   labels on the white card: the `FieldLabel`, `Metric`, `MetricSmall` and
   `Strong` label styles are now re-tinted with their container like the

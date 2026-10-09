@@ -13,7 +13,7 @@ from __future__ import annotations
 
 # Windows file/product versions are four numeric fields, so the app uses the
 # same shape everywhere rather than carrying two different version strings.
-VERSION_TUPLE = (3, 4, 3, 0)
+VERSION_TUPLE = (3, 4, 4, 0)
 VERSION = ".".join(str(part) for part in VERSION_TUPLE)
 DISPLAY_VERSION = f"v{VERSION}"
 
