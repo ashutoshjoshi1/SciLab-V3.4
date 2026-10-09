@@ -20,6 +20,7 @@ from spectrometer_loader import (
     discover_spectrometers,
     suggest_default_dll_path,
 )
+from services.run_progress import source_label
 from .theme import Colors, Fonts, Spacing, badge, harmonize, logical_px, source_color, style_listbox
 from .ui_utils import ScrollableFrame, Tooltip, bind_debounced_configure, center_over, run_in_worker
 
@@ -41,6 +42,27 @@ def build(app):
             candidate == (suggest_default_dll_path(option) or "").strip().lower()
             for option in SPECTROMETER_TYPE_OPTIONS
         )
+
+    # A word beside the dot: a bare red dot said nothing about what was wrong.
+    _PORT_STATES = {
+        "untested": ("● not tested", Colors.TEXT_MUTED, "Press Test Connect to open the port."),
+        "testing": ("● testing…", Colors.INFO, "Opening the port…"),
+        "open": ("● open", Colors.SUCCESS, "The port opened and was released again."),
+        "failed": ("● not found", Colors.DANGER,
+                   "The port could not be opened: not present, or in use by another program."),
+        "unset": ("● no port", Colors.TEXT_MUTED, "No COM port entered."),
+    }
+    _port_tips = {}
+
+    def _set_port_status(label, state, detail=None):
+        text, color, hint = _PORT_STATES[state]
+        label.config(text=text, foreground=color)
+        tip = _port_tips.get(label)
+        if tip is None:
+            tip = _port_tips[label] = Tooltip(label, hint)
+        tip.text = detail or hint
+
+    app.set_port_status = _set_port_status
 
     def _build_setup_tab():
         main_frame = ttk.Frame(app.setup_tab)
@@ -118,14 +140,38 @@ def build(app):
                 app.dll_entry.delete(0, "end")
                 app.dll_entry.insert(0, suggested)
 
-        app.spec_type_combo.bind("<<ComboboxSelected>>", on_spec_type_change)
+        app.spec_type_combo.bind("<<ComboboxSelected>>",
+                                 lambda event: (on_spec_type_change(event), app._update_dll_row_visibility()))
 
-        ttk.Label(spec_group, text="Driver DLL / Runtime Path:",
-                 style='SetupLabel.TLabel').grid(row=1, column=0, sticky="w", padx=8, pady=8)
+        dll_label = ttk.Label(spec_group, text="Driver DLL / Runtime Path:", style='SetupLabel.TLabel')
+        dll_label.grid(row=1, column=0, sticky="w", padx=8, pady=8)
         app.dll_entry = ttk.Entry(spec_group, width=40, font=Fonts.BODY)
         app.dll_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=8)
-        ttk.Button(spec_group, text="Browse...", command=browse_dll,
-                  style='SetupButton.TButton').grid(row=1, column=2, padx=8, pady=8)
+        dll_browse_btn = ttk.Button(spec_group, text="Browse…", command=browse_dll, style='SetupButton.TButton')
+        dll_browse_btn.grid(row=1, column=2, padx=8, pady=8)
+        dll_hint = ttk.Label(spec_group, text="Driver: located automatically for the selected type.",
+                             foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION_ITALIC)
+        dll_hint.grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 6))
+
+        def _update_dll_row_visibility(*_args):
+            """Only OcOpt1 needs a path typed in; the other backends ship their DLL,
+            and Auto / Simulated never need one, unless the operator typed an override."""
+            selected = app.spec_type_var.get().strip()
+            typed = app.dll_entry.get().strip()
+            custom = bool(typed) and not _is_suggested_path(typed)
+            show = selected not in ("Auto", "Simulated") or custom
+            for widget in (dll_label, app.dll_entry, dll_browse_btn):
+                if show:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+            if show:
+                dll_hint.grid_remove()
+            else:
+                dll_hint.grid()
+
+        app._update_dll_row_visibility = _update_dll_row_visibility
+        _update_dll_row_visibility()
 
         # Status indicator frame
         status_frame = ttk.Frame(spec_group)
@@ -177,23 +223,22 @@ def build(app):
         app.cube_entry.grid(row=1, column=1, padx=8, pady=6, sticky="w")
         app.relay_entry.grid(row=2, column=1, padx=8, pady=6, sticky="w")
 
-        # Status indicators
-        app.obis_status = ttk.Label(ports_group, text="●", foreground=Colors.DANGER,
-                                    font=Fonts.STATUS_ICON)
-        app.cube_status = ttk.Label(ports_group, text="●", foreground=Colors.DANGER,
-                                    font=Fonts.STATUS_ICON)
-        app.relay_status = ttk.Label(ports_group, text="●", foreground=Colors.DANGER,
-                                     font=Fonts.STATUS_ICON)
-        app.obis_status.grid(row=0, column=2, padx=8)
-        app.cube_status.grid(row=1, column=2, padx=8)
-        app.relay_status.grid(row=2, column=2, padx=8)
+        # Status words (see _set_port_status)
+        app.obis_status = ttk.Label(ports_group, font=Fonts.BODY_SMALL_BOLD)
+        app.cube_status = ttk.Label(ports_group, font=Fonts.BODY_SMALL_BOLD)
+        app.relay_status = ttk.Label(ports_group, font=Fonts.BODY_SMALL_BOLD)
+        app.obis_status.grid(row=0, column=2, padx=8, sticky="w")
+        app.cube_status.grid(row=1, column=2, padx=8, sticky="w")
+        app.relay_status.grid(row=2, column=2, padx=8, sticky="w")
+        for label in (app.obis_status, app.cube_status, app.relay_status):
+            _set_port_status(label, "untested")
 
         # Action buttons
         ports_button_frame = ttk.Frame(ports_group)
         ports_button_frame.grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 8))
 
         refresh_btn = ttk.Button(ports_button_frame, text="Refresh Ports", command=refresh_ports,
-                                 style='SetupAction.TButton', width=18)
+                                 style='SetupButton.TButton', width=18)
         refresh_btn.pack(side="left", padx=(0, 8))
         Tooltip(refresh_btn, "List the serial ports Windows currently sees and fill the first four in (F5).")
         app.test_com_btn = ttk.Button(ports_button_frame, text="Test Connect", command=test_com_connect,
@@ -214,9 +259,9 @@ def build(app):
         app.headsensor_entry = ttk.Entry(headsensor_group, width=15, font=Fonts.BODY)
         app.headsensor_entry.grid(row=0, column=1, padx=8, pady=8, sticky="w")
 
-        app.headsensor_status = ttk.Label(headsensor_group, text="●", foreground=Colors.DANGER,
-                                         font=Fonts.STATUS_ICON)
-        app.headsensor_status.grid(row=0, column=2, padx=8)
+        app.headsensor_status = ttk.Label(headsensor_group, font=Fonts.BODY_SMALL_BOLD)
+        app.headsensor_status.grid(row=0, column=2, padx=8, sticky="w")
+        _set_port_status(app.headsensor_status, "untested")
 
         # Test button
         headsensor_button_frame = ttk.Frame(headsensor_group)
@@ -268,9 +313,9 @@ def build(app):
         app.stage_com_entry = ttk.Entry(stage_group, width=15, font=Fonts.BODY)
         app.stage_com_entry.grid(row=1, column=1, sticky="w", padx=8, pady=6)
 
-        app.stage_status = ttk.Label(stage_group, text="●", foreground=Colors.DANGER,
-                                     font=Fonts.STATUS_ICON)
-        app.stage_status.grid(row=1, column=2, padx=8)
+        app.stage_status = ttk.Label(stage_group, font=Fonts.BODY_SMALL_BOLD)
+        app.stage_status.grid(row=1, column=2, padx=8, sticky="w")
+        _set_port_status(app.stage_status, "untested")
 
         stage_btn_frame = ttk.Frame(stage_group)
         stage_btn_frame.grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
@@ -307,7 +352,7 @@ def build(app):
             if not port:
                 messagebox.showwarning("Stage", "Enter a Stage COM port first.")
                 return
-            app.stage_status.config(foreground=Colors.INFO)
+            _set_port_status(app.stage_status, "testing")
 
             def _probe():
                 if not app.stage.connect(port):
@@ -319,7 +364,7 @@ def build(app):
 
             def _done(positions):
                 ok = positions is not None
-                app.stage_status.config(foreground=Colors.SUCCESS if ok else Colors.DANGER)
+                _set_port_status(app.stage_status, "open" if ok else "failed")
                 if not ok:
                     messagebox.showerror("Stage", f"Could not connect to stage on {port}")
                     return
@@ -331,7 +376,7 @@ def build(app):
             run_in_worker(app, _probe, on_done=_done, name="stage-test")
 
         ttk.Button(stage_btn_frame, text="Load Config", command=load_stage_config,
-                  style='SetupAction.TButton', width=16).pack(side="left", padx=(0, 8))
+                  style='SetupButton.TButton', width=16).pack(side="left", padx=(0, 8))
         ttk.Button(stage_btn_frame, text="Test Connect", command=test_stage_connect,
                   style='SetupButton.TButton', width=16).pack(side="left")
 
@@ -398,7 +443,7 @@ def build(app):
             laser_type = config.get("type", "OBIS")
             power = config.get("power", 0.01)
             # Fixed-width formatting for alignment
-            wl_str = f"{wavelength:>6} nm"
+            wl_str = f"{source_label(wavelength):>9}"
             type_str = f"{laser_type:<6}"
             power_str = f"{power:>8.2f} mW"
             return f"{wl_str}  │  {type_str}  │  {power_str}"
@@ -692,7 +737,7 @@ def build(app):
             rebuild_power_entries()
 
         ttk.Button(laser_button_frame, text="+ Add Laser", command=add_laser,
-                  style='SetupAction.TButton', width=16).pack(side="left", padx=(0, 6))
+                  style='SetupButton.TButton', width=16).pack(side="left", padx=(0, 6))
         ttk.Button(laser_button_frame, text="- Remove Laser", command=remove_laser,
                   style='SetupButton.TButton', width=16).pack(side="left")
 
@@ -773,7 +818,7 @@ def build(app):
                 max_row_used = max(max_row_used, row)
 
                 # Wavelength label
-                label_text = f"{wavelength} nm" if wavelength != "Hg_Ar" else "Hg-Ar lamp"
+                label_text = source_label(wavelength)
                 label = ttk.Label(power_group, text=label_text,
                                  style='SetupLabel.TLabel',
                                  font=Fonts.BODY_BOLD,
@@ -821,9 +866,30 @@ def build(app):
         rebuild_power_entries(force=True)
 
         # ============ ADVANCED (BENCH-VALIDATED) OPTIONS ============
-        advanced_group = ttk.LabelFrame(left_col, text="Advanced: speed options (validate on the bench first)",
-                                        style='Setup.TLabelframe')
-        advanced_group.pack(**card_pack)
+        # Collapsed by default: three bench-only options took a card's worth of
+        # the page and pushed the form into a scroll on a 1080p screen. It opens
+        # on its own when any option is enabled.
+        advanced_card = ttk.LabelFrame(left_col, text="Advanced", style='Setup.TLabelframe')
+        advanced_card.pack(**card_pack)
+        advanced_toggle = tk.Label(advanced_card, bg=Colors.BG_SURFACE, fg=Colors.ACCENT_DEEP,
+                                   font=Fonts.BODY_BOLD, cursor="hand2", anchor="w")
+        advanced_toggle.pack(fill="x", padx=12, pady=(2, 4))
+        advanced_group = ttk.Frame(advanced_card)
+        app.advanced_open = tk.BooleanVar(value=False)
+
+        def _show_advanced(open_):
+            app.advanced_open.set(bool(open_))
+            advanced_toggle.configure(text=("▾" if open_ else "▸") +
+                                      "   Speed options (validate on the bench first)")
+            if open_:
+                advanced_group.pack(fill="x", pady=(0, 4))
+            else:
+                advanced_group.pack_forget()
+
+        advanced_toggle.bind("<Button-1>", lambda _event: _show_advanced(not app.advanced_open.get()))
+        app.advanced_group = advanced_group
+        app._show_advanced = _show_advanced
+        _show_advanced(any(bool(value) for value in app.measurement_flags.values()))
         app.measurement_flag_vars = {}
         flag_help = {
             "smart_source_off": ("Turn off only the lit source between lasers",
@@ -900,21 +966,28 @@ def build(app):
         """Open/close the three laser ports on a worker; the dots update when it finishes."""
         app._update_ports_from_ui()
         for dot in (app.obis_status, app.cube_status, app.relay_status):
-            dot.config(foreground=Colors.INFO)
+            _set_port_status(dot, "testing")
 
         def _probe():
             results = {}
             for key, device in (("OBIS", app.lasers.obis), ("CUBE", app.lasers.cube), ("RELAY", app.lasers.relay)):
-                ok = bool(device.port) and device.open()
-                results[key] = ok
+                if not device.port:
+                    results[key] = (False, "unset", None)
+                    continue
+                ok = bool(device.open())
                 if ok:
                     device.close()  # free the port again
+                    detail = f"{device.port} opened and was released again."
+                else:
+                    detail = f"{device.port} could not be opened: not present, or in use by another program."
+                results[key] = (ok, "open" if ok else "failed", detail)
             return results
 
         def _done(results):
             for key, dot in (("OBIS", app.obis_status), ("CUBE", app.cube_status), ("RELAY", app.relay_status)):
-                dot.config(foreground=Colors.SUCCESS if results.get(key) else Colors.DANGER)
-            failed = [key for key, ok in results.items() if not ok]
+                ok, state, detail = results.get(key, (False, "failed", None))
+                _set_port_status(dot, state, detail)
+            failed = [key for key, (ok, _state, _detail) in results.items() if not ok]
             if failed:
                 app.status.toast(f"Serial test: could not open {', '.join(failed)}", kind="warning")
             else:
@@ -925,7 +998,7 @@ def build(app):
 
     def test_headsensor_connect():
         app._update_ports_from_ui()
-        app.headsensor_status.config(foreground=Colors.INFO)
+        _set_port_status(app.headsensor_status, "testing")
 
         def _probe():
             ok = bool(app.filterwheel.device.port) and app.filterwheel.open()
@@ -934,7 +1007,7 @@ def build(app):
             return ok
 
         def _done(ok):
-            app.headsensor_status.config(foreground=Colors.SUCCESS if ok else Colors.DANGER)
+            _set_port_status(app.headsensor_status, "open" if ok else "failed")
             app.status.toast("Head sensor port opened" if ok else "Head sensor port could not be opened",
                              kind="success" if ok else "warning")
 
@@ -1259,6 +1332,7 @@ def build(app):
             app.spec_type_var.set(getattr(app.hw, "spectrometer_type", "Auto"))
             app.dll_entry.delete(0, "end")
             app.dll_entry.insert(0, app.hw.dll_path)
+            app._update_dll_row_visibility()
             app.obis_entry.delete(0, "end"); app.obis_entry.insert(0, DEFAULT_COM_PORTS["OBIS"])
             app.cube_entry.delete(0, "end"); app.cube_entry.insert(0, DEFAULT_COM_PORTS["CUBE"])
             app.relay_entry.delete(0, "end"); app.relay_entry.insert(0, DEFAULT_COM_PORTS["RELAY"])
@@ -1303,6 +1377,7 @@ def build(app):
                 app.hw.dll_path = ""
             app.dll_entry.delete(0, "end")
             app.dll_entry.insert(0, app.hw.dll_path)
+            app._update_dll_row_visibility()
 
             # Load COM ports
             cp = obj.get("com_ports", DEFAULT_COM_PORTS)
@@ -1348,6 +1423,13 @@ def build(app):
                     if key in flags:
                         app.measurement_flags[key] = bool(flags[key])
             app.apply_measurement_flags()
+            # The checkboxes were built with the defaults before the file was
+            # read: show the saved state, and open the card when an option is
+            # on so it cannot be missed.
+            for key, var in getattr(app, "measurement_flag_vars", {}).items():
+                var.set(bool(app.measurement_flags.get(key, False)))
+            if hasattr(app, "_show_advanced"):
+                app._show_advanced(any(app.measurement_flags.values()))
 
             # Load stage configuration path and COM port
             stage_cfg = obj.get("stage_config_path", "")

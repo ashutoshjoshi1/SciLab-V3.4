@@ -38,6 +38,11 @@ class TkLogHandler(logging.Handler):
                                             datefmt="%H:%M:%S"))
 
     def emit(self, record: logging.LogRecord) -> None:
+        # matplotlib's font-manager grumbles at every start ("Failed to find
+        # font weight medium"); that is not a bench event, so it stays out of
+        # the drawer and off the warning count unless it is an outright error.
+        if record.name.startswith("matplotlib") and record.levelno < logging.ERROR:
+            return
         try:
             self._post(self._sink, record.levelno, self.format(record))
         except Exception:  # noqa: BLE001 - logging must never raise into the app

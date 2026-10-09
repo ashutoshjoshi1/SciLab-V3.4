@@ -21,9 +21,11 @@ from services.check_spectrometer_service import _fit_peak, _mgauss
 
 from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure
 
+from services.run_progress import source_label
 from .theme import (Colors, Spacing, bind_figure_margins, configure_matplotlib_style,
-                    logical_px, make_action_button, mount_toolbar, plot_title_font,
-                    relax_canvas_size, scaled_pt, screen_dpi, source_style, style_legend)
+                    empty_state_text, logical_px, make_action_button, mount_toolbar,
+                    plot_title_font, relax_canvas_size, scaled_pt, screen_dpi,
+                    set_action_enabled, source_style, style_legend)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -91,6 +93,9 @@ def build(app):
                               label="Fit", zorder=4)
 
     style_legend(ax, loc="upper left", labelspacing=0.3)
+    ax.set_xlim(0, 2048)
+    ax.set_ylim(-0.05, 1.15)
+    app.check_res_empty_text = empty_state_text(ax, "Switch one source on, then press Start to fit its line")
 
     canvas = FigureCanvasTkAgg(fig, master=plot_container)
     canvas.draw()
@@ -121,9 +126,12 @@ def build(app):
     spectrum_frame.pack(fill="x", pady=(0, Spacing.SECTION_GAP))
 
     ttk.Label(spectrum_frame, text="Integration Time (ms):").pack(anchor="w")
-    it_entry = ttk.Entry(spectrum_frame, width=15)
+    # Spinbox: Up/Down steps 1 ms and applies at once while connected; Enter applies a typed value.
+    it_entry = ttk.Spinbox(spectrum_frame, width=12, from_=_IT_MIN, to=_IT_MAX, increment=1.0,
+                           format="%.1f", command=lambda: _apply_it(quiet=True))
     it_entry.insert(0, "100")
     it_entry.pack(anchor="w", pady=(2, 6))
+    it_entry.bind("<Return>", lambda _event: _apply_it())
     app.check_res_it_entry = it_entry
 
     btn_row = ttk.Frame(spectrum_frame)
@@ -148,6 +156,7 @@ def build(app):
     stop_btn.pack(fill="x")
     app.check_res_start_btn = start_btn
     app.check_res_stop_btn = stop_btn
+    set_action_enabled(stop_btn, False)
 
     # Laser controls — share the BooleanVars created by live_view_tab so
     # toggling here also reflects in the Live View tab.
@@ -159,7 +168,7 @@ def build(app):
     laser_frame.columnconfigure(1, weight=1)
     for index, tag in enumerate(app.laser_tags()):
         var = app.laser_var(tag)
-        text = "Hg_Ar" if tag == "Hg_Ar" else f"{tag} nm"
+        text = source_label(tag)
         chk = ttk.Checkbutton(
             laser_frame, text=text, variable=var,
             style=source_style(laser_frame, tag, "Bold.TCheckbutton"),
@@ -201,9 +210,10 @@ def build(app):
             raise ValueError("Invalid IT value")
         return max(_IT_MIN, min(_IT_MAX, it))
 
-    def _apply_it():
+    def _apply_it(quiet=False):
         if not app.spec:
-            messagebox.showwarning("Spectrometer", "Not connected.")
+            if not quiet:
+                messagebox.showwarning("Spectrometer", "Not connected.")
             return
         try:
             it = _read_it_entry()
@@ -244,6 +254,8 @@ def build(app):
             return
 
         app.check_res_running.set()
+        set_action_enabled(start_btn, False)
+        set_action_enabled(stop_btn, True)
         val_status.config(text="Running…", foreground=Colors.SUCCESS)
         threading.Thread(target=_loop, daemon=True, name="check-resolution").start()
 
@@ -267,12 +279,17 @@ def build(app):
             unc = unc[n_blind_l:] if unc.size >= sig.size + n_blind_l else unc
         return sig, unc
 
+    def _buttons_idle():
+        set_action_enabled(start_btn, True)
+        set_action_enabled(stop_btn, False)
+
     def _loop():
         try:
             _loop_body()
         finally:
             app.check_res_running.clear()
             app.release_spectrometer("Check Resolution")
+            app.pump.post(_buttons_idle)
 
     def _loop_body():
         last_t = time.time()
@@ -366,6 +383,9 @@ def build(app):
 
     def _render_snapshot(snap):
         """Main thread: push the newest fit snapshot into the existing artists."""
+        hint = getattr(app, "check_res_empty_text", None)
+        if hint is not None and hint.get_visible():
+            hint.set_visible(False)
         line_signal.set_data(snap["pix"], snap["norm"])
         line_bg.set_data(snap["x_bg"], snap["y_bg"])
         line_fitpts.set_data(snap["x_fitpts"], snap["y_fitpts"])

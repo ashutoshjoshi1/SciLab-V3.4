@@ -17,11 +17,11 @@ from services.measurement_orchestrator import (
 )
 from services.run_progress import source_label
 from .run_progress import RunProgressPanel
-from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure, center_over
+from .ui_utils import ScrollableFrame, ThrottledRedraw, Tooltip, bind_debounced_configure, center_over
 
 from .theme import (Colors, Fonts, Spacing, bind_figure_margins, configure_matplotlib_style,
                     logical_px, make_run_button, plot_title_font, relax_canvas_size,
-                    source_style, style_legend, style_listbox)
+                    source_style, style_legend, style_listbox, empty_state_text)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -147,6 +147,7 @@ def build(app):
             app.meas_sig_sat_line.set_visible(False)
             app.meas_dark_sat_line.set_visible(False)
             style_legend(app.measure_ax, loc='upper right')
+            app.meas_empty_text = empty_state_text(app.measure_ax, "Select sources and press Run Selected")
 
             canvas = FigureCanvasTkAgg(app.measure_fig, plot_frame)
             relax_canvas_size(canvas, 640, 340, dpi=screen_dpi(app))
@@ -261,7 +262,7 @@ def build(app):
         # Create horizontal layout for laser checkboxes (2 rows) - starting from row 2
         for i, tag in enumerate(all_lasers):
             v = tk.BooleanVar(value=True)  # Default all selected
-            label_text = f"{tag} nm" if tag != "Hg_Ar" else "Hg_Ar"
+            label_text = source_label(tag)
             chk = ttk.Checkbutton(laser_frame, text=label_text, variable=v,
                                  style=source_style(laser_frame, tag,
                                                     'Large.TCheckbutton'))
@@ -460,12 +461,14 @@ def build(app):
 
         app.stop_all_btn = ttk.Button(actions_buttons_frame, text="Stop",
                                     command=app.stop_measure, **button_style)
+        app.stop_all_btn.state(["disabled"])
 
         app.save_csv_btn = ttk.Button(actions_buttons_frame, text="Save CSV",
                                     command=app.save_csv, **button_style)
 
-        app.start_analysis_btn = ttk.Button(actions_buttons_frame, text="Analysis",
+        app.start_analysis_btn = ttk.Button(actions_buttons_frame, text="Analyse last run",
                                           command=app.refresh_analysis_view, **button_style)
+        Tooltip(app.start_analysis_btn, "Analyse the last measurement (or re-open its plots) in the Analysis tab.")
 
         action_buttons = [
             app.run_all_btn,
@@ -634,6 +637,7 @@ def build(app):
 
         app.status.progress_begin("Measurement starting…", total=len(tags))
         app.run_progress.start(tags)
+        app.stop_all_btn.state(["!disabled"])
         app.measure_running.set()
         app.measure_thread = threading.Thread(
             target=run_measurement_with_analysis,
@@ -776,10 +780,12 @@ def build(app):
             app.pump.post(app.status.progress_end, end_text, end_kind)
             # Change button back to green (idle state)
             app.pump.post(app.run_all_btn.configure, {"bg": Colors.SUCCESS, "activebackground": "#15803d"})
+            app.pump.post(app.stop_all_btn.state, ["disabled"])
 
     def stop_measure():
         app.measure_running.clear()
         app.request_spectrometer_stop()
+        app.stop_all_btn.state(["disabled"])
         # Change button back to green (idle state)
         app.run_all_btn.configure(bg=Colors.SUCCESS, activebackground='#15803d')
 
@@ -870,6 +876,9 @@ def build(app):
         CLAMP = 65000  # counts ceiling for display
 
         sig_pending, dark_pending = pending
+        hint = getattr(app, "meas_empty_text", None)
+        if hint is not None and hint.get_visible():
+            hint.set_visible(False)
         # main overlay
         xmax = 10
         any_sat = False

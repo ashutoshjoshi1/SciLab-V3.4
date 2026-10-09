@@ -113,9 +113,13 @@ def test_simulated_backend_streams_live_frames(tk_app):
     tk_app.nb.select(tk_app.live_tab)
     tk_app.update()
     tk_app.spec.set_active_source("445")
+    assert tk_app.live_empty_text.get_visible()
     tk_app.start_live()
     assert tk_app.acq.owner == "Live View"
+    assert str(tk_app.live_start_btn.cget("state")) == "disabled"
+    assert str(tk_app.live_stop_btn.cget("state")) == "normal"
     assert pump_until(tk_app, lambda: len(tk_app.live_line.get_xdata()) == tk_app.npix, timeout=8.0)
+    assert not tk_app.live_empty_text.get_visible()
     # Single-frame shot noise can move the argmax by a pixel either side of the line centre.
     assert abs(int(tk_app.live_line.get_ydata().argmax()) - tk_app.spec.pixel_of(445.0)) <= 1.5
 
@@ -133,6 +137,8 @@ def test_simulated_backend_streams_live_frames(tk_app):
     tk_app.stop_live()
     assert pump_until(tk_app, lambda: not tk_app.live_running.is_set() and tk_app.acq.owner is None, timeout=5.0)
     assert pump_until(tk_app, lambda: tk_app.live_readout["status"].cget("text") == "Stopped", timeout=5.0)
+    assert pump_until(tk_app, lambda: str(tk_app.live_stop_btn.cget("state")) == "disabled", timeout=5.0)
+    assert str(tk_app.live_start_btn.cget("state")) == "normal"
     assert not errors(tk_app), tk_app.dialogs
 
 
@@ -142,11 +148,15 @@ def test_check_resolution_fits_simulated_line(tk_app):
     tk_app.spec.set_active_source("532")
     tk_app.check_res_it_entry.delete(0, "end")
     tk_app.check_res_it_entry.insert(0, "30")
+    assert tk_app.check_res_empty_text.get_visible()
     tk_app.check_res_start_btn.invoke()
     assert tk_app.acq.owner == "Check Resolution"
+    assert str(tk_app.check_res_start_btn.cget("state")) == "disabled"
     assert pump_until(tk_app, lambda: len(tk_app.check_res_ax.lines[3].get_xdata()) > 0, timeout=8.0)
+    assert not tk_app.check_res_empty_text.get_visible()
     tk_app.check_res_stop_btn.invoke()
     assert pump_until(tk_app, lambda: tk_app.acq.owner is None, timeout=5.0)
+    assert pump_until(tk_app, lambda: str(tk_app.check_res_stop_btn.cget("state")) == "disabled", timeout=5.0)
     assert not errors(tk_app), tk_app.dialogs
 
 
@@ -206,4 +216,62 @@ def test_run_progress_panel_and_chip_follow_the_model(tk_app):
     assert rows["640"]["value"].cget("text") == "not run"
     assert chip.text.cget("text").startswith("Stopped")
     tk_app._run_chip.hide()
+    assert not errors(tk_app), tk_app.dialogs
+
+
+def test_idle_buttons_spinboxes_and_measure_empty_state(tk_app):
+    """Stop buttons are greyed while nothing runs; IT fields step; the plot hint goes with the first frame."""
+    import numpy as np
+    from tkinter import ttk
+
+    assert isinstance(tk_app.it_entry, ttk.Spinbox) and isinstance(tk_app.check_res_it_entry, ttk.Spinbox)
+    assert float(tk_app.it_entry.get()) == 2.4
+    assert str(tk_app.live_stop_btn.cget("state")) == "disabled"
+    assert str(tk_app.check_res_stop_btn.cget("state")) == "disabled"
+    assert tk_app.stop_all_btn.instate(["disabled"])
+    assert tk_app.clear_all_btn.instate(["disabled"])
+
+    tk_app._ensure_measure_figure()
+    assert tk_app.meas_empty_text.get_visible()
+    tk_app._render_auto_it_plot(("405", np.zeros(64), 2.4, 100.0))
+    assert not tk_app.meas_empty_text.get_visible()
+    assert not errors(tk_app), tk_app.dialogs
+
+
+def test_setup_status_words_dll_row_and_advanced_card(tk_app):
+    assert tk_app.obis_status.cget("text").endswith("not tested")
+    tk_app.set_port_status(tk_app.obis_status, "failed", "COM10 could not be opened")
+    assert tk_app.obis_status.cget("text").endswith("not found")
+    tk_app.set_port_status(tk_app.obis_status, "open")
+    assert tk_app.obis_status.cget("text").endswith("open")
+
+    tk_app.dll_entry.delete(0, "end")
+    tk_app.spec_type_var.set("Auto")
+    tk_app._update_dll_row_visibility()
+    assert tk_app.dll_entry.winfo_manager() == ""
+    tk_app.spec_type_var.set("OcOpt1")
+    tk_app._update_dll_row_visibility()
+    assert tk_app.dll_entry.winfo_manager() == "grid"
+    tk_app.spec_type_var.set("Auto")
+    tk_app._update_dll_row_visibility()
+
+    assert tk_app.advanced_group.winfo_manager() == ""       # collapsed: no bench option is on
+    tk_app._show_advanced(True)
+    assert tk_app.advanced_group.winfo_manager() == "pack"
+    tk_app._show_advanced(False)
+    assert not errors(tk_app), tk_app.dialogs
+
+
+def test_log_drawer_collects_records(tk_app):
+    import logging
+
+    assert not tk_app.log_drawer.shown
+    logging.getLogger("tests.drawer").warning("drawer smoke warning")
+    assert pump_until(tk_app, lambda: "drawer smoke warning" in tk_app.log_drawer.contents(), timeout=5.0)
+    assert "\u26a0" in tk_app.log_drawer.toggle_btn.cget("text")     # counted while closed
+    tk_app.log_drawer.toggle()
+    assert tk_app.log_drawer.shown and tk_app.log_drawer.winfo_manager() == "pack"
+    assert tk_app.log_drawer.toggle_btn.cget("text") == "Log"
+    tk_app.log_drawer.toggle()
+    assert not tk_app.log_drawer.shown
     assert not errors(tk_app), tk_app.dialogs

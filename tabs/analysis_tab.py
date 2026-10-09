@@ -94,17 +94,15 @@ def build(app):
                 app.export_plots_btn.state(["disabled"])
             if hasattr(app, 'open_folder_btn'):
                 app.open_folder_btn.state(["disabled"])
+            app.clear_all_btn.state(["disabled"])
 
             LOGGER.info("All measurement tabs cleared")
         except Exception as e:
             LOGGER.warning("Error clearing measurements: %s", e)
 
-    ttk.Button(
-        button_frame,
-        text="Clear All",
-        command=clear_all_measurements,
-        width=12
-    ).pack(side="left", padx=2)
+    app.clear_all_btn = ttk.Button(button_frame, text="Clear All", command=clear_all_measurements,
+                                   state="disabled", width=12)
+    app.clear_all_btn.pack(side="left", padx=2)
 
     app.export_plots_btn = ttk.Button(
         button_frame,

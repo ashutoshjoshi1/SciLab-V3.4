@@ -151,7 +151,7 @@ def build(app):
     gain_offset_group.columnconfigure(1, weight=0)
     gain_offset_group.columnconfigure(2, weight=1)
 
-    ttk.Label(gain_offset_group, text="Edit values below and click 'Save' to write to EEPROM:",
+    ttk.Label(gain_offset_group, text="Edit the values below, then press Write to store them in the EEPROM:",
              font=Fonts.CAPTION_ITALIC,
              foreground=Colors.TEXT_MUTED).grid(row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(4, 8))
 
@@ -205,9 +205,10 @@ def build(app):
     save_gain_button_frame.grid(row=row, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 8))
     save_gain_button_frame.columnconfigure(0, weight=1)
 
-    ttk.Button(save_gain_button_frame, text="Save Gain/Offset to EEPROM",
+    # Danger style: these write to the device, unlike every other button on the page.
+    ttk.Button(save_gain_button_frame, text="Write Gain/Offset to EEPROM",
               command=lambda: save_gain_offset_to_eeprom(app),
-              style='EEPROMButton.TButton').grid(row=0, column=0, sticky="w", padx=(0, 8))
+              style='Danger.TButton').grid(row=0, column=0, sticky="w", padx=(0, 8))
 
     save_gain_warning_label = ttk.Label(save_gain_button_frame,
                                         text="Warning: This will permanently modify EEPROM data!",
@@ -247,9 +248,9 @@ def build(app):
     save_button_frame.pack(fill="x", padx=12, pady=(0, 8))
     save_button_frame.columnconfigure(0, weight=1)
 
-    ttk.Button(save_button_frame, text="Save Defective Pixels to EEPROM",
+    ttk.Button(save_button_frame, text="Write Defective Pixels to EEPROM",
               command=lambda: save_defective_pixels_to_eeprom(app),
-              style='EEPROMButton.TButton').grid(row=0, column=0, sticky="w", padx=(0, 8))
+              style='Danger.TButton').grid(row=0, column=0, sticky="w", padx=(0, 8))
 
     save_defect_warning_label = ttk.Label(save_button_frame,
                                           text="Warning: This will permanently modify EEPROM data!",

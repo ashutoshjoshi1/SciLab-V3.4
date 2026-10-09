@@ -10,10 +10,11 @@ from tkinter import ttk, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
+from services.run_progress import source_label
 from .theme import (Colors, Fonts, Spacing, attach_hover, bind_figure_margins,
-                    configure_matplotlib_style, logical_px, make_action_button,
+                    configure_matplotlib_style, empty_state_text, logical_px, make_action_button,
                     mount_toolbar, plot_title_font, relax_canvas_size, screen_dpi,
-                    source_style, style_legend)
+                    set_action_enabled, source_style, style_legend)
 from .ui_utils import BlitRenderer, ScrollableFrame, ThrottledRedraw, Tooltip, bind_debounced_configure, run_in_worker
 
 LOGGER = logging.getLogger(__name__)
@@ -66,6 +67,10 @@ def build(app):
         app.live_sat_line.set_visible(False)
 
         style_legend(app.live_ax, loc="upper right")
+        app.live_empty_text = empty_state_text(app.live_ax, "Connect a spectrometer in Setup, then press Start Live")
+        # Sensible idle axes; the first frame sets its own limits.
+        app.live_ax.set_xlim(0, 2048)
+        app.live_ax.set_ylim(0, 65535)
 
         app.live_canvas = FigureCanvasTkAgg(app.live_fig, master=plot_container)
         relax_canvas_size(app.live_canvas, 620, 340, dpi=screen_dpi(app))
@@ -109,16 +114,21 @@ def build(app):
         spectrum_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
         ttk.Label(spectrum_frame, text="Integration Time (ms):").pack(anchor="w")
-        app.it_entry = ttk.Entry(spectrum_frame, width=15)
+        # A spinbox: Up/Down and the arrows step 0.1 ms and apply at once while
+        # a spectrometer is connected; Enter applies a typed value.
+        app.it_entry = ttk.Spinbox(spectrum_frame, width=12, from_=IT_MIN, to=IT_MAX, increment=0.1,
+                                   format="%.2f", command=lambda: app.apply_it(quiet=True))
         app.it_entry.insert(0, "2.4")
         app.it_entry.pack(anchor="w", pady=(2, 6))
+        app.it_entry.bind("<Return>", lambda _event: app.apply_it())
 
         btn_frame = ttk.Frame(spectrum_frame)
         btn_frame.pack(anchor="w", fill="x")
         app.apply_it_btn = ttk.Button(btn_frame, text="Apply IT", command=app.apply_it)
         app.apply_it_btn.pack(side="left", padx=(0, 4))
-        Tooltip(app.it_entry, "Detector integration (exposure) time in milliseconds. "
-                              "While Live View runs the new value is applied between frames.")
+        Tooltip(app.it_entry, "Detector integration (exposure) time in milliseconds. Up/Down steps 0.1 ms "
+                              "and applies at once; Enter applies a typed value. While Live View runs the "
+                              "change is applied between frames.")
         ttk.Button(btn_frame, text="Reset Zoom", command=app._live_reset_view).pack(side="left")
 
         # === Laser Controls Section ===
@@ -133,7 +143,7 @@ def build(app):
         laser_grid.columnconfigure(1, weight=1)
         for index, tag in enumerate(app.laser_tags()):
             var = app.laser_var(tag)
-            label_text = "Hg_Ar" if tag == "Hg_Ar" else f"{tag} nm"
+            label_text = source_label(tag)
             btn = ttk.Checkbutton(
                 laser_grid,
                 text=label_text,
@@ -142,16 +152,6 @@ def build(app):
                 command=lambda t=tag, v=var: app.toggle_laser(t, v.get())
             )
             btn.grid(row=index // 2, column=index % 2, sticky="w", padx=(0, Spacing.PAD_SM), pady=2)
-
-        ttk.Separator(laser_frame, orient="horizontal").pack(fill="x", pady=(Spacing.PAD_SM, Spacing.PAD_XS))
-        app.check_spec_btn = ttk.Button(
-            laser_frame,
-            text="Check Spectrometer",
-            command=app.run_check_spectrometer,
-        )
-        app.check_spec_btn.pack(anchor="w", fill="x", pady=(2, 0))
-        Tooltip(app.check_spec_btn, "Auto-exposes on the brightest line, fits a super-Gaussian and reports "
-                                    "centre, width and shape. Saves a CSV, a plot and a .ddf next to the results.")
 
         # === Live Control Section ===
         live_control_frame = ttk.LabelFrame(controls_grid, text="Live View Control", padding=8)
@@ -164,6 +164,17 @@ def build(app):
         app.live_stop_btn = make_action_button(live_control_frame, text="Stop Live",
                                                command=app.stop_live, danger=True, width=18)
         app.live_stop_btn.pack(fill="x")
+        set_action_enabled(app.live_stop_btn, False)
+
+        # Lives with the acquisitions, not the laser switches: it claims the
+        # spectrometer like Start Live does and its result lands in Analysis.
+        ttk.Separator(live_control_frame, orient="horizontal").pack(fill="x", pady=(Spacing.PAD_SM, Spacing.PAD_XS))
+        app.check_spec_btn = ttk.Button(live_control_frame, text="Check spectrometer (line fit)",
+                                        command=app.run_check_spectrometer)
+        app.check_spec_btn.pack(fill="x", pady=(2, 0))
+        Tooltip(app.check_spec_btn, "Switch one source on first. Auto-exposes on the brightest line, fits a "
+                                    "super-Gaussian and reports centre, width and shape in the Analysis tab; "
+                                    "saves a CSV, a plot and a .ddf next to the results.")
 
         # === Readout Section ===
         # The numbers an operator otherwise reads off the plot while tuning
@@ -598,9 +609,11 @@ def build(app):
 
             run_in_worker(app, _probe, on_done=_done, on_error=_error, busy=(app.headsensor_toggle,), name="head-sensor")
 
-    def apply_it():
+    def apply_it(quiet=False):
+        """Apply the spinbox value. ``quiet``: an arrow step, so no dialog when nothing is connected."""
         if not app.spec:
-            messagebox.showwarning("Spectrometer", "Not connected.")
+            if not quiet:
+                messagebox.showwarning("Spectrometer", "Not connected.")
             return
         # Parse & clamp
         try:
@@ -663,6 +676,8 @@ def build(app):
         _live_stats["last_frame"] = None
         _set_live_status("Streaming", Colors.SUCCESS)
         _refresh_live_it()
+        set_action_enabled(app.live_start_btn, False)
+        set_action_enabled(app.live_stop_btn, True)
         app.live_running.set()
         app.live_thread = threading.Thread(target=app._live_loop, daemon=True, name="live-view")
         app.live_thread.start()
@@ -729,6 +744,11 @@ def build(app):
             _live_stats["fps"] = None
             app.pump.post(_set_live_status, "Stopped", Colors.TEXT_MUTED)
             app.pump.post(_refresh_live_fps)
+            app.pump.post(_live_buttons_idle)
+
+    def _live_buttons_idle():
+        set_action_enabled(app.live_start_btn, True)
+        set_action_enabled(app.live_stop_btn, False)
 
     def _reenable_apply_it():
         try:
@@ -790,6 +810,10 @@ def build(app):
     def _render_live_frame(payload):
         """Main thread: push the newest frame into the existing artists."""
         x_values, y_values = payload
+        hint = getattr(app, "live_empty_text", None)
+        if hint is not None and hint.get_visible():
+            hint.set_visible(False)
+            app._live_blit.request_full()
         saturated = bool(np.any(y_values > _LIVE_CLAMP))
         y_display = np.clip(y_values, None, _LIVE_CLAMP)
         app.live_line.set_data(x_values, y_display)

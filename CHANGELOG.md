@@ -28,11 +28,49 @@ the installer. The single source of truth is
   button beside it switches everything off, stopping a running measurement
   first. The shared checkboxes now follow the real state too, so a source a
   run switched off no longer shows as checked.
-- **Live View readout card.** Integration time, peak counts, peak pixel,
-  percent of full scale, display frame rate, a saturation flag and the
-  stream state beside the plot, refreshed up to ten times a second.
+- **Live View readout card.** Peak counts, peak pixel, percent of full
+  scale, a saturation flag, the applied integration time, display frame rate
+  and the stream state beside the plot, refreshed up to ten times a second.
+- **Event log drawer.** A **Log** button in the status bar (or F12) opens a
+  colour-tagged view of every logger's records above the status bar, with
+  Clear and Copy; warnings and errors that arrive while it is closed are
+  counted on the button. Backend errors no longer live only in dialogs and
+  the console.
+
+### Changed
+
+- **Integration time steps from the keyboard.** The Live View and Check
+  Resolution fields are spinboxes: Up/Down and the arrows step 0.1 ms (1 ms
+  on Check Resolution) and apply at once while a spectrometer is connected,
+  Enter applies a typed value, and Apply IT still works as before.
+- **Start/Stop pairs show their state.** Stop is greyed while nothing runs
+  and Start while something does, on Live View, Check Resolution and
+  Measurements; Analysis's Clear All is disabled until there is a run tab.
+- **Setup reads with one primary button per card.** Refresh Ports, Load
+  Config and + Add Laser are outlined now; Connect and Save Settings stay
+  filled. The COM port, head sensor and stage indicators say "not tested",
+  "testing…", "open", "not found" or "no port" beside the dot, with the
+  reason in a tooltip. The driver-path row is shown only for a backend that
+  may need it (not for Auto or Simulated, unless an override was typed), and
+  the bench speed options live in a collapsed Advanced card that opens on
+  its own when an option is on.
+- **One name per source.** The lamp is "Hg-Ar" on every tab (it was
+  "Hg_Ar" on the checkboxes and "Hg-Ar lamp" on Setup); the data tags in
+  CSV files are unchanged.
+- **Plots say what to do while empty.** Live View, Measurements and Check
+  Resolution show a muted hint ("Select sources and press Run Selected",
+  …) until the first frame, and Check Resolution starts on sensible axes
+  instead of matplotlib's defaults.
+- **Clearer actions.** The Measurements button that ran the analysis was
+  labelled "Analysis"; it is "Analyse last run". "Check Spectrometer" moved
+  from the laser switches to the Live View Control card as "Check
+  spectrometer (line fit)". The EEPROM write buttons are red and say
+  "Write …" instead of "Save …".
 
 ### Fixed
+
+- Bench speed options saved in the settings file loaded into the
+  measurement but not into the Setup checkboxes, which stayed unticked.
 
 - Check Resolution's Fit Readout rows painted the canvas grey behind their
   labels on the white card: the `FieldLabel`, `Metric`, `MetricSmall` and
