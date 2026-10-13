@@ -269,3 +269,15 @@ number, is in `docs/jeti-pe60-2-integration-guide.md`.
 | `hardware/`, `stage/` | laser / filter-wheel serial controllers, Modbus stage |
 | `results/` | created at runtime: `<serial>_<timestamp>/Measurements_*.csv` + `plots/` (not versioned) |
 | `spectro_gui_settings.json` | operator settings (ports, powers, advanced flags) |
+| `LICENSE` | SciLab software licence agreement (SciGlob Research LLC) |
+| `THIRD-PARTY-NOTICES.md` | vendor libraries and open-source components shipped with SciLab, with their licences |
+
+## License
+
+Copyright (C) 2026 SciGlob Research LLC. All rights reserved.
+
+SciLab is proprietary software, licensed under the terms in
+[`LICENSE`](LICENSE). The vendor libraries and open-source components it
+ships with keep their own licences, listed in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). The installer shows the
+licence for acceptance and installs both files beside `SciLab.exe`.

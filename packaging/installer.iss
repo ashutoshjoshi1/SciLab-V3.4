@@ -37,6 +37,11 @@ AllowNoIcons=yes
 UninstallDisplayName={#MyProductName} {#MyAppDisplayVersion}
 UninstallDisplayIcon={app}\{#MyExeName}
 
+; Licence page: the wizard shows LICENSE and the operator must accept it
+; before installing. Silent installs skip the page. Relative to this script
+; (packaging/), so a direct ISCC compile finds it too.
+LicenseFile=..\LICENSE
+
 ; The bundled vendor DLLs (avaspecx64.dll and friends) are 64-bit, so a 32-bit
 ; install would produce an app that cannot open any instrument.
 ArchitecturesAllowed=x64compatible
@@ -83,6 +88,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; The whole PyInstaller folder. recursesubdirs+createallsubdirs keeps the
 ; layout the app expects (_internal, "spectrometers dll files", ...).
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The licence and third-party notices go beside SciLab.exe, where an operator
+; or an auditor will look for them.
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyExeName}"; Comment: "{#MyProductName}"

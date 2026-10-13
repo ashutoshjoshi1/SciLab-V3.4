@@ -95,6 +95,11 @@ SciLab-Setup-3.4.0.6.exe /VERYSILENT /CURRENTUSER /NORESTART
 Useful switches: `/DIR=<path>`, `/LOG=<file>`, `/SUPPRESSMSGBOXES`,
 `/ALLUSERS`, `/NOICONS`.
 
+The wizard shows [`LICENSE`](../LICENSE) and will not continue until the
+operator accepts it. `/SILENT` and `/VERYSILENT` skip that page, so whoever
+deploys an unattended install accepts the licence on the site's behalf.
+`LICENSE.txt` and `THIRD-PARTY-NOTICES.md` are installed beside `SciLab.exe`.
+
 > **Testing installers from Git Bash:** prefix the command with
 > `MSYS_NO_PATHCONV=1`. Without it MSYS rewrites every `/SWITCH` into a path
 > like `C:/Program Files/Git/VERYSILENT`, Setup sees no switches at all, and

@@ -1,0 +1,239 @@
+SciLab Spectrometer Characterization System
+SOFTWARE LICENSE AGREEMENT
+
+Copyright (c) 2026 SciGlob Research LLC. All rights reserved.
+
+IMPORTANT - READ CAREFULLY. This Software License Agreement (the
+"Agreement") is a legal agreement between you, either as an individual
+or on behalf of the entity you represent ("Licensee"), and SciGlob
+Research LLC ("SciGlob"). It governs the use of the SciLab software. By
+installing, copying, or otherwise using the Software, Licensee agrees to
+be bound by this Agreement. If Licensee does not agree, Licensee must
+not install or use the Software.
+
+1. DEFINITIONS
+
+1.1 "Software" means the SciLab Spectrometer Characterization System in
+source code and object code form, including its installer, executables,
+scripts, configuration files, reference data, images, and documentation,
+and any updates or new versions that SciGlob provides, but excluding
+Third-Party Components.
+
+1.2 "Third-Party Components" means software owned by parties other than
+SciGlob that is distributed with the Software or that the Software loads
+when it runs, including instrument vendors' drivers and libraries and
+the open-source components listed in the file THIRD-PARTY-NOTICES.md.
+
+1.3 "Output Data" means the spectra, measurement files, analysis
+results, plots, and reports that Licensee generates by running the
+Software.
+
+1.4 "Authorized Users" means Licensee's employees and contractors who
+use the Software on Licensee's behalf and who are bound by written
+obligations at least as protective of the Software as this Agreement.
+
+2. OWNERSHIP
+
+The Software is licensed, not sold. SciGlob and its licensors own all
+right, title, and interest in and to the Software, including all
+copyrights, trade secrets, and other intellectual property rights in it.
+All rights not expressly granted in this Agreement are reserved by
+SciGlob. This Agreement grants no right to use the names, logos, or
+trademarks of SciGlob.
+
+3. LICENSE GRANT
+
+3.1 Subject to Licensee's compliance with this Agreement, SciGlob grants
+Licensee a non-exclusive, non-transferable, non-sublicensable license,
+for the term of this Agreement, to:
+    (a) install and run the Software on computers that Licensee owns or
+        controls, and allow Authorized Users to use it, solely for
+        Licensee's internal research, testing, calibration, and
+        characterization of spectrometers and related instruments; and
+    (b) make a reasonable number of copies of the Software for backup
+        and archival purposes.
+
+3.2 If SciGlob gives Licensee access to the source code of the Software,
+Licensee may modify it solely to maintain or adapt Licensee's own
+internal installation. Modified versions are part of the Software,
+remain subject to this Agreement, and may not be distributed.
+
+3.3 If Licensee and SciGlob have signed a separate written agreement
+covering the Software, that agreement prevails over this Agreement to
+the extent they conflict.
+
+4. RESTRICTIONS
+
+Except as this Agreement or a separate written agreement with SciGlob
+expressly permits, Licensee shall not, and shall not allow anyone else
+to:
+    (a) copy, distribute, publish, sell, rent, lease, lend, sublicense,
+        or otherwise make the Software available to any third party,
+        including by hosting it or offering it as a service;
+    (b) reverse engineer, decompile, or disassemble any part of the
+        Software that is provided only in object code form, except to
+        the extent that applicable law expressly permits this despite
+        this restriction;
+    (c) remove, alter, or obscure any copyright, license, or other
+        proprietary notice in the Software;
+    (d) use the Software, or knowledge gained from its source code or
+        documentation, to build a product that competes with the
+        Software;
+    (e) extract any Third-Party Component from the Software and use it
+        separately, except as that component's own license allows; or
+    (f) use the Software in violation of any applicable law or
+        regulation.
+
+5. THIRD-PARTY COMPONENTS
+
+5.1 Third-Party Components are owned by their respective owners and are
+licensed under their own terms, not under this Agreement.
+THIRD-PARTY-NOTICES.md lists the Third-Party Components distributed with
+the Software and the license that applies to each.
+
+5.2 If the license of a Third-Party Component grants Licensee rights
+that this Agreement would otherwise restrict, that license governs for
+that component. For example, the GNU Lesser General Public License that
+covers the libusb library allows Licensee to replace or modify that
+library, and to reverse engineer the Software to the extent needed to
+debug such modifications.
+
+5.3 The instrument libraries from Avantes, Hamamatsu Photonics, and JETI
+Technische Instrumente are included only so that the Software can
+operate those vendors' instruments. Licensee shall comply with each
+vendor's terms, including any prohibition on modifying, reverse
+engineering, or redistributing those libraries.
+
+5.4 Some instrument libraries are not distributed with the Software,
+such as the Ocean Insight OceanDirect SDK and the Hamamatsu DCAM-API
+runtime. Licensee must obtain them from their vendors and is solely
+responsible for complying with their license terms.
+
+6. OUTPUT DATA
+
+As between Licensee and SciGlob, Licensee owns the Output Data, and
+SciGlob claims no rights in it. Licensee is responsible for reviewing
+and validating Output Data before relying on it for any purpose.
+
+7. CONFIDENTIALITY
+
+The Software, including its source code, design, algorithms, and
+documentation, is confidential information and a trade secret of
+SciGlob. Licensee shall protect it with at least the degree of care it
+uses for its own confidential information of similar importance, and in
+no case less than reasonable care, and shall disclose it only to
+Authorized Users who need access to it. This Section does not apply to
+information that is or becomes public through no fault of Licensee.
+
+8. HARDWARE AND SAFETY
+
+The Software controls laboratory hardware, including laser light
+sources, a mercury-argon lamp, power relays, and motorized stages.
+Licensee is solely responsible for the safe installation and operation
+of that hardware, including laser and ultraviolet safety controls, eye
+protection, interlocks, training of personnel, and compliance with all
+applicable safety standards and regulations. The Software is not a
+safety system and must not be relied on to protect persons or property.
+
+9. UPDATES AND SUPPORT
+
+SciGlob has no obligation to provide maintenance, support, updates, or
+new versions of the Software unless it agrees to do so in a separate
+written agreement. Any update that SciGlob provides is part of the
+Software and is governed by this Agreement, unless SciGlob provides it
+with different terms.
+
+10. DISCLAIMER OF WARRANTIES
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF
+ANY KIND. TO THE MAXIMUM EXTENT PERMITTED BY LAW, SCIGLOB AND ITS
+LICENSORS DISCLAIM ALL WARRANTIES, WHETHER EXPRESS, IMPLIED, OR
+STATUTORY, INCLUDING ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, AND ACCURACY. SCIGLOB DOES
+NOT WARRANT THAT THE SOFTWARE WILL BE ERROR-FREE OR OPERATE WITHOUT
+INTERRUPTION, THAT IT WILL WORK WITH ANY PARTICULAR INSTRUMENT, DRIVER,
+OR OPERATING SYSTEM, OR THAT THE MEASUREMENTS AND ANALYSIS RESULTS IT
+PRODUCES WILL BE ACCURATE OR COMPLETE.
+
+11. LIMITATION OF LIABILITY
+
+11.1 TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT WILL SCIGLOB OR
+ITS LICENSORS BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
+CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF DATA,
+PROFITS, REVENUE, OR USE, OR ANY DAMAGE TO INSTRUMENTS OR OTHER
+EQUIPMENT, ARISING OUT OF OR RELATING TO THE SOFTWARE OR THIS AGREEMENT,
+HOWEVER CAUSED AND UNDER ANY THEORY OF LIABILITY, EVEN IF SCIGLOB HAS
+BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+11.2 TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE TOTAL LIABILITY OF
+SCIGLOB ARISING OUT OF OR RELATING TO THE SOFTWARE OR THIS AGREEMENT
+WILL NOT EXCEED THE GREATER OF (A) THE AMOUNT LICENSEE PAID FOR THE
+SOFTWARE IN THE TWELVE (12) MONTHS BEFORE THE EVENT GIVING RISE TO THE
+CLAIM AND (B) ONE HUNDRED U.S. DOLLARS (USD 100).
+
+11.3 Some jurisdictions do not allow the exclusion or limitation of
+certain warranties or damages, so some of the limitations above may not
+apply to Licensee.
+
+12. TERM AND TERMINATION
+
+12.1 This Agreement takes effect when Licensee first installs or uses
+the Software and continues until terminated.
+
+12.2 Licensee may terminate this Agreement at any time by destroying all
+copies of the Software in its possession or control. SciGlob may
+terminate this Agreement by written notice if Licensee breaches it and
+does not cure the breach within thirty (30) days after receiving notice
+of it.
+
+12.3 On termination, Licensee shall stop using the Software and destroy
+all copies of it in its possession or control. Sections 2, 4, 5, 6, 7,
+10, 11, 12.3, 13, and 15 survive termination.
+
+13. EXPORT CONTROL
+
+The Software may be subject to U.S. and other export control and
+sanctions laws, including the U.S. Export Administration Regulations.
+Licensee shall comply with those laws and shall not export, re-export,
+or transfer the Software in violation of them.
+
+14. U.S. GOVERNMENT END USERS
+
+The Software is "commercial computer software" and its documentation is
+"commercial computer software documentation", as those terms are used in
+48 C.F.R. 2.101, 48 C.F.R. 12.212, and 48 C.F.R. 227.7202. U.S.
+Government end users acquire the Software only with the rights set out
+in this Agreement.
+
+15. GENERAL
+
+15.1 Governing law. This Agreement is governed by the laws of the State
+in which SciGlob Research LLC is organized, United States of America,
+without regard to its conflict-of-laws rules. The United Nations
+Convention on Contracts for the International Sale of Goods does not
+apply. The state and federal courts located in that State have exclusive
+jurisdiction over any dispute arising out of or relating to this
+Agreement, and each party consents to their jurisdiction. SciGlob may
+also seek injunctive relief in any court of competent jurisdiction to
+protect its intellectual property or confidential information.
+
+15.2 Entire agreement. This Agreement, together with any separate
+written agreement described in Section 3.3, is the entire agreement
+between the parties about the Software and supersedes all prior
+understandings about it. It may be amended only in a writing signed by
+both parties.
+
+15.3 Severability. If any provision of this Agreement is held
+unenforceable, it will be enforced to the maximum extent permissible,
+and the remaining provisions will remain in full force and effect.
+
+15.4 No waiver. A failure or delay by SciGlob in enforcing any provision
+of this Agreement is not a waiver of that provision.
+
+15.5 Assignment. Licensee may not assign or transfer this Agreement, or
+any rights under it, without the prior written consent of SciGlob, and
+any attempt to do so is void. SciGlob may assign this Agreement to an
+affiliate or to a successor to its business.
+
+Questions about this Agreement: SciGlob Research LLC,
+https://sciglob.com

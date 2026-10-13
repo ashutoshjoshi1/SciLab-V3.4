@@ -900,7 +900,7 @@ flowchart TD
     dist --> selftest{"SciLab.exe --self-test<br/>exit 0?"}
     selftest -->|no| stop(["build fails"])
     selftest -->|yes| bmp["render wizard_banner.bmp, wizard_small.bmp"]
-    bmp --> iscc["ISCC installer.iss<br/>/D defines from scilab_version.py<br/>x64 only, AppMutex, fixed AppId, LZMA2"]
+    bmp --> iscc["ISCC installer.iss<br/>/D defines from scilab_version.py<br/>x64 only, AppMutex, fixed AppId, LZMA2,<br/>licence page from LICENSE"]
     iscc --> setup["dist/installer/SciLab-Setup-&lt;version&gt;.exe (~55 MB)"]
     setup --> install["Install: per-machine by default,<br/>/CURRENTUSER per-user, /VERYSILENT unattended"]
     install --> post["[Code] runs --self-test after copying;<br/>warns and points at self-test.log on failure"]

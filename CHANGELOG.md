@@ -10,6 +10,19 @@ the installer. The single source of truth is
 
 ## [Unreleased]
 
+### Added
+
+- **Software licence.** `LICENSE` is the SciLab licence agreement from
+  SciGlob Research LLC (proprietary, all rights reserved), and
+  `THIRD-PARTY-NOTICES.md` lists the vendor libraries and open-source
+  components shipped with SciLab and their licences. The installer shows
+  the licence for acceptance and installs both files beside `SciLab.exe`.
+
+### Changed
+
+- The executable's copyright field now reads "Copyright (C) 2026 SciGlob
+  Research LLC".
+
 ## [3.4.4.0] — 2026-10-09
 
 ### Added

@@ -21,7 +21,8 @@ APP_NAME = "SciLab"
 PRODUCT_NAME = "SciLab Spectrometer Characterization System"
 PUBLISHER = "SciGlob"
 PUBLISHER_URL = "https://sciglob.com"
-COPYRIGHT = "Copyright (C) SciGlob"
+# Legal owner of the software; must match the notice at the top of LICENSE.
+COPYRIGHT = "Copyright (C) 2026 SciGlob Research LLC"
 
 # Stable across releases: Inno Setup uses it to recognise an installed copy and
 # upgrade it in place instead of stacking a second entry in Apps & features.
