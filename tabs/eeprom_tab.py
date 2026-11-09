@@ -348,41 +348,46 @@ def read_eeprom_data(app):
 
     if not _ensure_avantes_eeprom_supported(app, "Reading EEPROM"):
         return
-    busy = app.acq.busy_reason()
-    if busy:
-        messagebox.showwarning("EEPROM", busy)
-        return
 
     try:
         app.eeprom_status_label.config(text="Reading EEPROM data via AVS_GetParameter...",
                                       foreground=Colors.ACCENT)
         app.update_idletasks()
 
-        # ============ READ ACTUAL EEPROM DATA VIA AVS_GetParameter ============
-        # Call the get_device_config() method which uses AVS_GetParameter
-        result = app.spec.get_device_config()
+        # The read talks to the device: it holds the spectrometer token for
+        # its duration so an acquisition cannot start on the same handle.
+        with app.acq.hold("EEPROM") as acquired:
+            if not acquired:
+                busy = app.acq.busy_reason() or "Spectrometer is busy."
+                app.eeprom_status_label.config(text=busy, foreground=Colors.WARNING)
+                messagebox.showwarning("EEPROM", busy)
+                return
 
-        if result != "OK":
-            raise RuntimeError(f"Failed to read device parameters: {result}")
+            # ============ READ ACTUAL EEPROM DATA VIA AVS_GetParameter ============
+            # Call the get_device_config() method which uses AVS_GetParameter
+            result = app.spec.get_device_config()
 
-        # Access the DeviceConfigType structure
-        # The get_device_config() method populates a DeviceConfigType structure internally
-        # We need to call it again to get the structure with data
+            if result != "OK":
+                raise RuntimeError(f"Failed to read device parameters: {result}")
 
-        from ctypes import c_uint32, byref
-        from spectrometers.ava1_spectrometer import DeviceConfigType
+            # Access the DeviceConfigType structure
+            # The get_device_config() method populates a DeviceConfigType structure internally
+            # We need to call it again to get the structure with data
 
-        devconfig = DeviceConfigType()
-        size = c_uint32(63484)
-        reqsize = c_uint32()
+            from ctypes import c_uint32, byref
+            from spectrometers.ava1_spectrometer import DeviceConfigType
 
-        # Read device parameters from EEPROM
-        resdll = app.spec.dll_handler.AVS_GetParameter(
-            app.spec.spec_id, size, byref(reqsize), byref(devconfig)
-        )
+            devconfig = DeviceConfigType()
+            size = c_uint32(63484)
+            reqsize = c_uint32()
 
-        if resdll != 0:
-            raise RuntimeError(f"AVS_GetParameter failed with code: {resdll}")
+            # Read device parameters from EEPROM
+            resdll = app.spec.dll_handler.AVS_GetParameter(
+                app.spec.spec_id, size, byref(reqsize), byref(devconfig)
+            )
+
+            if resdll != 0:
+                raise RuntimeError(f"AVS_GetParameter failed with code: {resdll}")
 
         # ============ EXTRACT AND DISPLAY EEPROM DATA ============
 
@@ -478,38 +483,20 @@ def read_eeprom_data(app):
             else:
                 coef_label.config(text=f"{coef_value:.8f}")
 
-        # Success message
+        # Success: the values are on the page, so no dialog repeats them.
         app.eeprom_status_label.config(
-            text="✅ EEPROM data successfully read via AVS_GetParameter",
+            text=f"EEPROM read: S/N {serial_number}, {detector_name}, {total_pixels} pixels, "
+                 f"{len(defective_pixels)} defective pixel(s) listed",
             foreground=Colors.SUCCESS)
+        app.status.toast(f"EEPROM of S/N {serial_number} read")
 
-        # Create detailed summary
-        summary = (
-            f"✅ EEPROM Data Read Successfully!\n\n"
-            f"📟 Device Information:\n"
-            f"  • Serial Number: {serial_number}\n"
-            f"  • Detector: {detector_name}\n"
-            f"  • Structure Version: {struct_version}\n\n"
-            f"Pixel Configuration:\n"
-            f"  • Total Pixels: {total_pixels}\n"
-            f"  • Effective Range: [{start_pixel} - {stop_pixel}]\n"
-            f"  • Optical Black (L/R): {obp_left} / {obp_right}\n"
-            f"  • Defective Pixels: {len(defective_pixels)}\n\n"
-            f"Gain and Offset:\n"
-            f"  • Gain[0]: {gain_0:.6f}\n"
-            f"  • Gain[1]: {gain_1:.6f}\n"
-            f"  • Offset[0]: {offset_0:.6f}\n"
-            f"  • Offset[1]: {offset_1:.6f}\n"
-            f"  • Extended Offset: {ext_offset:.6f}\n\n"
-            f"Wavelength Calibration:\n"
+        LOGGER.info(
+            "EEPROM data read: sn=%s detector=%s version=%s pixels=%s range=[%s-%s] obp=%s/%s "
+            "defective=%d gain=[%.6f, %.6f] offset=[%.6f, %.6f] ext=%.6f fit=%s",
+            serial_number, detector_name, struct_version, total_pixels, start_pixel, stop_pixel,
+            obp_left, obp_right, len(defective_pixels), gain_0, gain_1, offset_0, offset_1, ext_offset,
+            ", ".join(f"{coef:.6e}" for coef in wl_coefficients),
         )
-
-        for i, coef in enumerate(wl_coefficients):
-            summary += f"  • x{i} = {coef:.6e}\n"
-
-        messagebox.showinfo("EEPROM Data", summary)
-
-        LOGGER.info("EEPROM data read successfully\n%s", summary)
 
     except Exception as e:
         app.eeprom_status_label.config(text=f"❌ Error reading EEPROM: {str(e)}",
@@ -530,10 +517,10 @@ def save_defective_pixels_to_eeprom(app):
         messagebox.showwarning("EEPROM", busy)
         return
 
-    # Check if EEPROM data has been read
-    if not hasattr(app, 'eeprom_current_devconfig'):
+    # Check if EEPROM data has been read from the spectrometer that is connected now
+    if getattr(app, 'eeprom_current_devconfig', None) is None:
         messagebox.showwarning("Save to EEPROM",
-                             "Please read EEPROM data first before saving.")
+                             "Read the EEPROM of the connected spectrometer first.")
         return
 
     try:
@@ -595,30 +582,28 @@ def save_defective_pixels_to_eeprom(app):
         app.update_idletasks()
 
         from ctypes import byref
-        resdll = app.spec.dll_handler.AVS_SetParameter(app.spec.spec_id, byref(devconfig))
+        # Hold the spectrometer token for the write itself: an acquisition
+        # must not start on the handle while the EEPROM is being written.
+        with app.acq.hold("EEPROM") as acquired:
+            if not acquired:
+                raise RuntimeError(app.acq.busy_reason() or "Spectrometer is busy.")
+            resdll = app.spec.dll_handler.AVS_SetParameter(app.spec.spec_id, byref(devconfig))
 
         if resdll != 0:
             error_msg = app.spec.get_error(resdll)
             raise RuntimeError(f"AVS_SetParameter failed: {error_msg} (code: {resdll})")
 
-        # Success!
+        # Success: the page and the status bar say so; the confirmation
+        # already happened before the write.
         app.eeprom_status_label.config(
-            text="✅ Defective pixels successfully saved to EEPROM!",
+            text=f"Written to EEPROM: {len(defective_pixels)} defective pixel(s) "
+                 f"({', '.join(map(str, defective_pixels)) if defective_pixels else 'none'}), "
+                 f"{30 - len(defective_pixels)} unused entries set to 65535",
             foreground=Colors.SUCCESS)
+        app.status.toast(f"EEPROM: {len(defective_pixels)} defective pixel(s) written")
 
         # Update stored config
         app.eeprom_current_devconfig = devconfig
-
-        success_msg = (
-            f"✅ Success!\n\n"
-            f"Defective pixels successfully written to EEPROM:\n\n"
-            f"Entries written: {len(defective_pixels)}\n"
-            f"Pixel numbers: {', '.join(map(str, defective_pixels)) if defective_pixels else 'None'}\n"
-            f"Unused entries: {30 - len(defective_pixels)} (set to 65535)\n\n"
-            f"The changes are now permanent in the spectrometer's EEPROM."
-        )
-
-        messagebox.showinfo("EEPROM Write Success", success_msg)
 
         LOGGER.info("EEPROM write successful: %d defective pixels written", len(defective_pixels))
 
@@ -641,10 +626,10 @@ def save_gain_offset_to_eeprom(app):
         messagebox.showwarning("EEPROM", busy)
         return
 
-    # Check if EEPROM data has been read
-    if not hasattr(app, 'eeprom_current_devconfig'):
+    # Check if EEPROM data has been read from the spectrometer that is connected now
+    if getattr(app, 'eeprom_current_devconfig', None) is None:
         messagebox.showwarning("Save to EEPROM",
-                             "Please read EEPROM data first before saving.")
+                             "Read the EEPROM of the connected spectrometer first.")
         return
 
     try:
@@ -693,33 +678,27 @@ def save_gain_offset_to_eeprom(app):
         app.update_idletasks()
 
         from ctypes import byref
-        resdll = app.spec.dll_handler.AVS_SetParameter(app.spec.spec_id, byref(devconfig))
+        # Hold the spectrometer token for the write itself: an acquisition
+        # must not start on the handle while the EEPROM is being written.
+        with app.acq.hold("EEPROM") as acquired:
+            if not acquired:
+                raise RuntimeError(app.acq.busy_reason() or "Spectrometer is busy.")
+            resdll = app.spec.dll_handler.AVS_SetParameter(app.spec.spec_id, byref(devconfig))
 
         if resdll != 0:
             error_msg = app.spec.get_error(resdll)
             raise RuntimeError(f"AVS_SetParameter failed: {error_msg} (code: {resdll})")
 
-        # Success!
+        # Success: the fields hold the values that were written; the status
+        # line and the toast confirm it.
         app.eeprom_status_label.config(
-            text="✅ Gain/Offset values successfully saved to EEPROM!",
+            text=f"Written to EEPROM: gain [{gain_0:.6f}, {gain_1:.6f}], offset [{offset_0:.6f}, {offset_1:.6f}], "
+                 f"extended offset {ext_offset:.6f}",
             foreground=Colors.SUCCESS)
+        app.status.toast("EEPROM: gain and offset written")
 
         # Update stored config
         app.eeprom_current_devconfig = devconfig
-
-        success_msg = (
-            f"✅ Success!\n\n"
-            f"Gain and Offset values successfully written to EEPROM:\n\n"
-            f"Gain[0]: {gain_0:.8f}\n"
-            f"Gain[1]: {gain_1:.8f}\n"
-            f"Offset[0]: {offset_0:.8f}\n"
-            f"Offset[1]: {offset_1:.8f}\n"
-            f"Extended Offset: {ext_offset:.8f}\n\n"
-            f"The changes are now permanent in the spectrometer's EEPROM.\n"
-            f"These values will be used for detector calibration."
-        )
-
-        messagebox.showinfo("EEPROM Write Success", success_msg)
 
         LOGGER.info("Gain/Offset EEPROM write successful: G[%.8f, %.8f] O[%.8f, %.8f] ExtO=%.8f", gain_0, gain_1, offset_0, offset_1, ext_offset)
 

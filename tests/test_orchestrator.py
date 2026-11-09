@@ -24,10 +24,10 @@ APP_CONFIG = dict(
     target_high=65000,
     target_mid=62500,
     it_min=0.2,
-    it_max=3000.0,
+    it_max=None,                 # the spectrometer's own maximum (FALLBACK_IT_MAX_MS for the simulator)
     it_step_up=0.3,
     it_step_down=0.1,
-    max_it_adjust_iters=1000,
+    max_it_adjust_iters=None,    # no frame limit
     sat_thresh=65400,
     n_sig=50,
     n_dark=50,
@@ -62,15 +62,16 @@ def make_orchestrator(sim_spec, sim_lasers):
         data = MeasurementData(npix=sim_spec.npix_active, serial_number=sim_spec.sn)
         auto_it_log: List[Tuple[str, float, float]] = []
         completed: List[str] = []
-        callbacks = MeasurementOrchestratorCallbacks(
+        callback_kwargs = dict(
             prepare_devices=lambda: None,
-            power_lookup=lambda tag: 0.01,
+            power_lookup=lambda tag: 30.0,      # mW, as the application's source table stores it
             auto_it_update=lambda tag, spectrum, it_ms, peak: auto_it_log.append((tag, float(it_ms), float(peak))),
             measurement_completed=lambda tag: completed.append(tag),
             countdown=lambda *_args: None,
             error_handler=lambda *_args: None,
-            **(_callbacks or {}),
         )
+        callback_kwargs.update(_callbacks or {})
+        callbacks = MeasurementOrchestratorCallbacks(**callback_kwargs)
         orchestrator = MeasurementOrchestrator(
             spectrometer=sim_spec,
             laser_controller=sim_lasers,
@@ -112,6 +113,41 @@ def test_full_run_writes_all_rows_and_turns_sources_off(make_orchestrator, bench
     assert sorted(grouped) == sorted(ALL_TAGS + [f"{t}_dark" for t in ALL_TAGS])
 
 
+def test_sources_are_routed_by_the_source_table(make_orchestrator, sim_lasers, bench):
+    """The run switches each tag through the controller and channel Setup configured, OBIS in watts."""
+    sources = {
+        "405": {"type": "OBIS", "channel": 1, "power_mw": 25.0},     # not the bench default slot 5
+        "532": {"type": "RELAY", "channel": 3, "power_mw": 30.0},
+        "Hg_Ar": {"type": "RELAY", "channel": 4, "power_mw": 0.0},
+    }
+    sim_lasers.configure_sources(sources)
+    orchestrator, _data, _log, completed = make_orchestrator(
+        {"power_lookup": lambda tag: sources[tag]["power_mw"]}, sources=sources)
+    result = orchestrator.run(["405", "532"])
+    assert result.errors == [] and completed == ["405", "532"]
+    assert ("obis_set_power", "1", "0.0250") in sim_lasers.log      # 25 mW sent as 0.0250 W on slot 1
+    assert ("obis_on", "1") in sim_lasers.log and ("relay_on", "3") in sim_lasers.log
+    assert bench.active() == {}
+
+
+def test_per_source_start_and_step_are_honoured(make_orchestrator):
+    """The operator's start IT and largest step per frame for a source win over the defaults."""
+    sources = {
+        "405": {"type": "OBIS", "channel": 5, "power_mw": 30.0, "start_it_ms": 1.0, "it_step_ms": 2.0},
+        "445": {"type": "OBIS", "channel": 4, "power_mw": 30.0},
+    }
+    orchestrator, _data, log, _completed = make_orchestrator(sources=sources)
+    result = orchestrator.run(["405", "445"])
+    assert result.errors == []
+    its_405 = [it for tag, it, _peak in log if tag == "405"]
+    its_445 = [it for tag, it, _peak in log if tag == "445"]
+    assert its_405[0] == 1.0 and its_445[0] == 2.4                  # custom start vs. the bench default
+    rises_405 = [b - a for a, b in zip(its_405, its_405[1:]) if b > a]
+    rises_445 = [b - a for a, b in zip(its_445, its_445[1:]) if b > a]
+    assert rises_405 and max(rises_405) <= 2.0 + 1e-9 and max(rises_405) > 0.3   # 2 ms steps, not 0.3 ms
+    assert rises_445 and max(rises_445) <= 0.3 + 1e-9
+
+
 def test_auto_it_converges_into_target_band(make_orchestrator):
     orchestrator, data, log, _completed = make_orchestrator()
     tags = ["377", "405", "488", "532"]
@@ -146,7 +182,6 @@ def test_auto_it_steps_additively_without_jumping(make_orchestrator):
     steps = np.diff(its)
     assert len(steps) >= 100 and np.all(steps > 0.0), len(steps)
     assert np.all(steps <= APP_CONFIG["it_step_up"] + 1e-9), steps.max()
-    assert len(its) <= APP_CONFIG["max_it_adjust_iters"] + 1
 
 
 def test_dim_source_creeps_up_from_the_start_it(make_orchestrator, sim_spec):
@@ -166,6 +201,64 @@ def test_dim_source_creeps_up_from_the_start_it(make_orchestrator, sim_spec):
     assert its == pytest.approx([2.4 + 0.3 * i for i in range(21)])
     assert result.errors and "did not reach the target band" in result.errors[0]
     assert completed == [] and data.rows == []
+
+
+def _dim_405(sim_spec, counts_per_ms: float = 62.0) -> None:
+    sim_spec.lines = tuple(
+        line if line.tag != "405" else line.__class__("405", line.wavelength_nm, counts_per_ms) for line in sim_spec.lines
+    )
+
+
+def test_dim_source_keeps_stepping_past_the_old_frame_budget(make_orchestrator, sim_spec):
+    """The 3.4.5.0 fix: no frame budget, so a weak source still reaches 60,000 counts.
+
+    At 62 counts/ms the band sits near 950 ms. The old 1000-frame budget of
+    0.3 ms steps ended near 302 ms with the peak around 19,000 counts.
+    """
+    _dim_405(sim_spec)
+    orchestrator, data, log, completed = make_orchestrator()
+    result = orchestrator.run(["405"])
+    assert result.errors == []
+    assert completed == ["405"]
+    its = [it for tag, it, _peak in log if tag == "405"]
+    peaks = [peak for tag, _it, peak in log if tag == "405"]
+    assert len(its) > 1001, len(its)
+    assert its[-1] > 900.0, its[-1]
+    assert APP_CONFIG["target_low"] <= peaks[-1] <= APP_CONFIG["target_high"]
+    assert np.all(np.diff(its) <= APP_CONFIG["it_step_up"] + 1e-9)     # still creeping, never jumping
+
+
+def test_weak_source_stops_at_the_spectrometer_maximum(make_orchestrator, sim_spec):
+    """With it_max=None the ceiling is the backend's max_it_ms, and the failure says so."""
+    _dim_405(sim_spec)
+    sim_spec.max_it_ms = 40.0
+    orchestrator, data, log, completed = make_orchestrator()
+    result = orchestrator.run(["405"])
+    its = [it for tag, it, _peak in log if tag == "405"]
+    assert its[-1] == pytest.approx(40.0) and max(its) <= 40.0
+    assert result.errors and "maximum integration time of 40 ms" in result.errors[0]
+    assert completed == [] and data.rows == []
+
+
+def test_band_between_two_its_is_bisected_not_cycled(make_orchestrator, sim_spec, monkeypatch):
+    """Without a frame budget a source that steps over the band must not loop forever.
+
+    The peak is 50,000 counts below 10 ms and clipped from 10 ms up, so no
+    integration time lands in the band: auto-IT halves the bracket around
+    10 ms and reports it once the bracket is narrower than IT_RESOLUTION_MS.
+    """
+    def stepped_frame(it_ms, _sources):
+        level = 50000.0 if it_ms < 10.0 else 70000.0
+        return np.full(sim_spec.npix_active, level), np.zeros(sim_spec.npix_active)
+
+    monkeypatch.setattr(sim_spec, "expected_frame", stepped_frame)
+    orchestrator, _data, log, completed = make_orchestrator()
+    result = orchestrator.run(["405"], start_it_override=9.0)
+    its = [it for tag, it, _peak in log if tag == "405"]
+    assert result.errors and "jumps from below the band" in result.errors[0]
+    assert completed == []
+    assert len(its) < 30, len(its)
+    assert 9.0 <= min(its) and max(its) <= 10.2 + 1e-9, its
 
 
 def test_saturated_at_minimum_it_is_reported_not_spun(make_orchestrator, sim_spec):
@@ -254,12 +347,12 @@ def test_progress_callbacks_report_sequence_failures_and_source_switching(make_o
         source_state_changed=lambda tag, is_on: events.append(("source", tag, is_on)),
         all_sources_off=lambda: events.append(("all_off",)),
     )
-    # 405 nm too dim to reach the band even with the full frame budget (62 counts/ms
-    # x 302 ms is ~19,000 counts); 532 nm and 640 nm measure normally.
+    # 405 nm too dim to reach the band below a 50 ms ceiling (62 counts/ms x 50 ms
+    # is ~3,700 counts); 532 nm and 640 nm measure normally.
     sim_spec.lines = tuple(
         line if line.tag != "405" else line.__class__("405", line.wavelength_nm, 62.0) for line in sim_spec.lines
     )
-    orchestrator, _data, _log, _completed = make_orchestrator(_callbacks=hooks)
+    orchestrator, _data, _log, _completed = make_orchestrator(_callbacks=hooks, it_max=50.0)
     result = orchestrator.run(["640", "405", "532"])
 
     assert events[0] == ("all_off",)                              # everything off before the first source

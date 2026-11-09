@@ -147,8 +147,46 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.unbind_all("<Shift-Button-5>")
         self._wheel_bound = False
 
+    # Widgets that use the wheel themselves. The page must not scroll under a
+    # table or a list the pointer is over while that widget still has rows to
+    # show, and never under a spinbox or a dropdown, where the wheel edits.
+    _SELF_SCROLLING = {"Treeview", "Listbox", "Text", "TCombobox", "TSpinbox", "Spinbox", "Canvas"}
+
+    def _wheel_belongs_to(self, event, axis: str) -> bool:
+        """True when the wheel event is for a widget that scrolls or edits on its own."""
+        widget = getattr(event, "widget", None)
+        if widget is None or widget is self.canvas:
+            return False
+        if isinstance(widget, str):
+            # A widget Tk made on its own (a combobox's dropdown list): leave the wheel to it.
+            return True
+        try:
+            cls = widget.winfo_class()
+        except (tk.TclError, AttributeError):
+            return False
+        if cls not in self._SELF_SCROLLING:
+            return False
+        if cls in ("TCombobox", "TSpinbox", "Spinbox"):
+            return True
+        view = getattr(widget, "yview" if axis == "y" else "xview", None)
+        if view is None:
+            return False
+        try:
+            first, last = view()
+        except (tk.TclError, ValueError, TypeError):
+            return False
+        return not (float(first) <= 0.0 and float(last) >= 1.0)
+
+    def _can_scroll(self, axis: str) -> bool:
+        """Only a page with overflow reacts to the wheel; one that fits stays put."""
+        try:
+            first, last = (self.canvas.yview() if axis == "y" else self.canvas.xview())
+        except tk.TclError:
+            return False
+        return not (float(first) <= 0.0 and float(last) >= 1.0)
+
     def _on_mousewheel(self, event):
-        if not self._y_scroll:
+        if not self._y_scroll or self._wheel_belongs_to(event, "y") or not self._can_scroll("y"):
             return
         delta = event.delta
         if delta == 0:
@@ -156,7 +194,7 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.yview_scroll(int(-delta / 120), "units")
 
     def _on_shift_mousewheel(self, event):
-        if not self._x_scroll:
+        if not self._x_scroll or self._wheel_belongs_to(event, "x") or not self._can_scroll("x"):
             return
         delta = event.delta
         if delta == 0:
@@ -164,13 +202,13 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.xview_scroll(int(-delta / 120), "units")
 
     def _on_linux_mousewheel(self, event):
-        if not self._y_scroll:
+        if not self._y_scroll or self._wheel_belongs_to(event, "y") or not self._can_scroll("y"):
             return
         direction = -1 if event.num == 4 else 1
         self.canvas.yview_scroll(direction, "units")
 
     def _on_linux_shift_mousewheel(self, event):
-        if not self._x_scroll:
+        if not self._x_scroll or self._wheel_belongs_to(event, "x") or not self._can_scroll("x"):
             return
         direction = -1 if event.num == 4 else 1
         self.canvas.xview_scroll(direction, "units")
@@ -188,18 +226,24 @@ def run_in_worker(app, work, *, on_done=None, on_error=None, busy=(), name="work
     lock = getattr(app, "_hardware_io_lock", None)
     if lock is None:
         lock = app._hardware_io_lock = threading.Lock()
-    widgets = [widget for widget in busy if widget is not None]
-    for widget in widgets:
+    # Each widget goes back to the state it had (a read-only combobox stays
+    # read-only; "normal" would make it a free-text entry).
+    widgets = []
+    for widget in busy:
+        if widget is None:
+            continue
         try:
+            previous = str(widget.cget("state") or "normal")
             widget.configure(state="disabled")
         except tk.TclError:
-            pass
+            continue
+        widgets.append((widget, previous))
 
     def _restore():
-        for widget in widgets:
+        for widget, previous in widgets:
             try:
                 if widget.winfo_exists():
-                    widget.configure(state="normal")
+                    widget.configure(state=previous)
             except tk.TclError:
                 pass
 
@@ -350,7 +394,7 @@ class Tooltip:
             self._after_id = None
 
     def _show(self) -> None:
-        if self._window is not None or not self.widget.winfo_exists():
+        if self._window is not None or not self.text or not self.widget.winfo_exists():
             return
         from .theme import Colors, Fonts
 

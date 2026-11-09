@@ -74,6 +74,9 @@ class RunSnapshot:
     done: int
     failed: int
     total: int
+    # Rough time left while running, from the sources measured so far; None
+    # until one has finished (and after the run ends).
+    eta_s: Optional[float] = None
 
     @property
     def position(self) -> int:
@@ -82,6 +85,25 @@ class RunSnapshot:
             if source.state == RUNNING:
                 return index + 1
         return self.done + self.failed
+
+
+def estimate_remaining_s(sources: Sequence[SourceProgress], now: float) -> Optional[float]:
+    """Time left for the sources not yet done, assuming each takes the mean of those that did.
+
+    Auto-IT makes every source's duration its own (a dim line walks the
+    exposure for minutes, a bright one settles in seconds), so this is an
+    estimate and is shown as one. None until a source has completed.
+    """
+    finished = [source.duration_s(now) for source in sources if source.state in (DONE, FAILED)
+                and source.started_at is not None and source.finished_at is not None]
+    if not finished:
+        return None
+    mean = sum(finished) / len(finished)
+    remaining = mean * sum(1 for source in sources if source.state == PENDING)
+    for source in sources:
+        if source.state == RUNNING:
+            remaining += max(0.0, mean - source.duration_s(now))
+    return remaining
 
 
 class RunProgress:
@@ -203,4 +225,5 @@ class RunProgress:
                 done=sum(1 for source in sources if source.state == DONE),
                 failed=sum(1 for source in sources if source.state == FAILED),
                 total=len(sources),
+                eta_s=estimate_remaining_s(sources, now) if self.status == RUNNING else None,
             )

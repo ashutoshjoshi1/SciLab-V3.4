@@ -19,7 +19,7 @@ from matplotlib.figure import Figure
 
 from services.check_spectrometer_service import _fit_peak, _mgauss
 
-from .ui_utils import ScrollableFrame, ThrottledRedraw, bind_debounced_configure
+from .ui_utils import BlitRenderer, ScrollableFrame, ThrottledRedraw, bind_debounced_configure
 
 from services.run_progress import source_label
 from .theme import (Colors, Spacing, bind_figure_margins, configure_matplotlib_style,
@@ -33,6 +33,12 @@ _HALF_WIN = 40
 _IT_MIN = 0.2
 _IT_MAX = 3000.0
 _FRAME_PAUSE_S = 0.05  # idle between frames
+# The title carries the fitted numbers; rewriting it forces a full redraw, so
+# it follows the readout at this rate while the traces are blitted every frame.
+_TITLE_MIN_S = 1.0
+# The default zoom follows the fit window; it moves only when the window has
+# drifted this far, so a peak pixel jittering by one does not redraw the axes.
+_XLIM_SLACK_PX = 3.0
 
 
 def build(app):
@@ -98,11 +104,16 @@ def build(app):
     app.check_res_empty_text = empty_state_text(ax, "Switch one source on, then press Start to fit its line")
 
     canvas = FigureCanvasTkAgg(fig, master=plot_container)
-    canvas.draw()
     relax_canvas_size(canvas, 620, 340, dpi=screen_dpi(app))
     bind_figure_margins(canvas, fig)
     app.check_res_toolbar = mount_toolbar(canvas, plot_container, NavigationToolbar2Tk)
     canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+
+    # The four series are blitted over a cached background (ticks, grid,
+    # legend, title); a full draw happens only when the limits or the title
+    # change, on resize, and after a toolbar zoom.
+    blit = BlitRenderer(canvas, ax, [line_signal, line_bg, line_fitpts, line_fit_curve])
+    canvas.draw()
 
     app.check_res_fig = fig
     app.check_res_ax = ax
@@ -110,9 +121,7 @@ def build(app):
 
     # Track user zoom — once the user pans/zooms, stop autoscaling.
     app._check_res_locked = False
-
-    def _on_press(_event):
-        pass
+    _view_state = {"xlim": None, "last_snapshot": None}
 
     def _on_release(event):
         if event.inaxes is not None:
@@ -166,15 +175,22 @@ def build(app):
 
     laser_frame.columnconfigure(0, weight=1)
     laser_frame.columnconfigure(1, weight=1)
-    for index, tag in enumerate(app.laser_tags()):
-        var = app.laser_var(tag)
-        text = source_label(tag)
-        chk = ttk.Checkbutton(
-            laser_frame, text=text, variable=var,
-            style=source_style(laser_frame, tag, "Bold.TCheckbutton"),
-            command=lambda t=tag, v=var: app.toggle_laser(t, v.get()),
-        )
-        chk.grid(row=index // 2, column=index % 2, sticky="w", padx=(0, Spacing.PAD_SM), pady=2)
+
+    def _build_laser_checks():
+        """One checkbox per configured source; rebuilt when Setup adds or removes one."""
+        for child in laser_frame.winfo_children():
+            child.destroy()
+        for index, tag in enumerate(app.laser_tags()):
+            var = app.laser_var(tag)
+            chk = ttk.Checkbutton(
+                laser_frame, text=source_label(tag), variable=var,
+                style=source_style(laser_frame, tag, "Bold.TCheckbutton"),
+                command=lambda t=tag, v=var: app.toggle_laser(t, v.get()),
+            )
+            chk.grid(row=index // 2, column=index % 2, sticky="w", padx=(0, Spacing.PAD_SM), pady=2)
+
+    _build_laser_checks()
+    app._laser_ui_rebuilders.append(_build_laser_checks)
 
     # Readout
     readout_frame = ttk.LabelFrame(controls_column, text="Fit Readout",
@@ -231,23 +247,39 @@ def build(app):
                     messagebox.showwarning("Apply IT", app.acq.busy_reason() or "Spectrometer is busy.")
                     return
                 try:
-                    app.spec.set_it(it)
+                    _check_backend(app.spec.set_it(it), "set_it")
                     val_status.config(text=f"IT applied ({it:.2f} ms)",
                                       foreground=Colors.SUCCESS)
                 except Exception as exc:
                     messagebox.showerror("Apply IT", str(exc))
 
+    def _check_backend(result, action):
+        """Backends report failure by returning a string, not by raising."""
+        if isinstance(result, str) and result not in ("", "OK"):
+            raise RuntimeError(f"{action} failed: {result}")
+
     def _reset_zoom():
+        """Back to the default view of the fit window, at once when a fit is on the plot."""
         app._check_res_locked = False
+        _view_state["xlim"] = None
+        snapshot = _view_state["last_snapshot"]
+        if snapshot is not None:
+            try:
+                _render_snapshot(snapshot)
+                app.check_res_toolbar.update()   # drop the zoom history the toolbar kept
+                blit.draw()
+            except Exception as exc:
+                app._post_error("Reset Zoom", exc)
 
     def _start():
         if app.check_res_running.is_set():
             return
         if not app.claim_spectrometer("Check Resolution"):
             return
+        app._check_res_pending_it = None     # a value queued in an earlier session must not win over the entry
         try:
             it = _read_it_entry()
-            app.spec.set_it(it)
+            _check_backend(app.spec.set_it(it), "set_it")
         except Exception as exc:
             app.release_spectrometer("Check Resolution")
             messagebox.showerror("Start", str(exc))
@@ -257,18 +289,23 @@ def build(app):
         set_action_enabled(start_btn, False)
         set_action_enabled(stop_btn, True)
         val_status.config(text="Running…", foreground=Colors.SUCCESS)
-        threading.Thread(target=_loop, daemon=True, name="check-resolution").start()
+        app.check_res_thread = threading.Thread(target=_loop, daemon=True, name="check-resolution")
+        app.check_res_thread.start()
 
     def _stop():
+        was_running = app.check_res_running.is_set()
         app.check_res_running.clear()
-        app.request_spectrometer_stop()
+        app._check_res_pending_it = None
+        if was_running:   # never abort another owner's capture
+            app.request_spectrometer_stop()
         val_status.config(text="Stopped", foreground=Colors.TEXT_MUTED)
 
     # ---------------- Acquisition loop ----------------
     def _blind_correct(spec, signal_mean, signal_std):
+        """Dark-corrected signal and uncertainty, plus the dark level that was subtracted."""
         n_blind_r = int(getattr(spec, "npix_blind_right", 0) or 0)
         n_blind_l = int(getattr(spec, "npix_blind_left", 0) or 0)
-        sig, unc = signal_mean, signal_std
+        sig, unc, dark = signal_mean, signal_std, 0.0
         if n_blind_r > 0:
             dark = float(np.max(sig[-n_blind_r:]))
             sig = sig[:-n_blind_r] - dark
@@ -277,7 +314,7 @@ def build(app):
             dark = float(np.max(sig[:n_blind_l]))
             sig = sig[n_blind_l:] - dark
             unc = unc[n_blind_l:] if unc.size >= sig.size + n_blind_l else unc
-        return sig, unc
+        return sig, unc, dark
 
     def _buttons_idle():
         set_action_enabled(start_btn, True)
@@ -294,6 +331,7 @@ def build(app):
     def _loop_body():
         last_t = time.time()
         ema_dt = None
+        failed = False
         while app.check_res_running.is_set():
             try:
                 # Apply queued IT change between frames.
@@ -301,14 +339,19 @@ def build(app):
                 if pending is not None:
                     app._check_res_pending_it = None
                     try:
-                        app.spec.set_it(pending)
+                        _check_backend(app.spec.set_it(pending), "set_it")
+                        app.pump.post(val_status.config, {"text": f"IT applied ({pending:.2f} ms)",
+                                                          "foreground": Colors.SUCCESS})
                     except Exception as exc:
                         LOGGER.warning("Check Resolution set_it failed: %s", exc)
+                        app.pump.post(val_status.config, {"text": f"IT not applied: {exc}",
+                                                          "foreground": Colors.DANGER})
 
-                app.spec.measure(ncy=1)
-                app.spec.wait_for_measurement()
+                _check_backend(app.spec.measure(ncy=1), "measure")
+                waited = app.spec.wait_for_measurement()
                 if not app.check_res_running.is_set():
                     break
+                _check_backend(waited, "wait_for_measurement")
 
                 rcm = np.asarray(getattr(app.spec, "rcm", []), dtype=float)
                 rcs = np.asarray(getattr(app.spec, "rcs", []), dtype=float)
@@ -316,8 +359,8 @@ def build(app):
                     time.sleep(_FRAME_PAUSE_S)
                     continue
 
-                sig, unc = _blind_correct(app.spec, rcm, rcs if rcs.size else
-                                          np.zeros_like(rcm))
+                sig, unc, dark_level = _blind_correct(app.spec, rcm, rcs if rcs.size else
+                                                      np.zeros_like(rcm))
 
                 n_total = sig.size
                 indm = int(np.argmax(sig))
@@ -364,7 +407,9 @@ def build(app):
                     "x_bg": x_bg, "y_bg": y_bg,
                     "x_fitpts": x_fitpts, "y_fitpts": y_fitpts,
                     "x_curve": x_curve, "y_curve": y_curve,
-                    "indm": indm, "peak": float(sig[indm] + bg),
+                    # Raw counts at the peak pixel (dark level added back), the
+                    # number to judge exposure and saturation by.
+                    "indm": indm, "peak": float(sig[indm] + dark_level),
                     "xcen": xcen, "resolfit": resolfit_disp,
                     "shape": float(a[3]), "rms": float(rms),
                     "fit_err": int(fit_err), "fps": fps,
@@ -373,35 +418,43 @@ def build(app):
 
             except Exception as exc:
                 LOGGER.exception("Check Resolution loop error")
+                failed = True
                 app.pump.post(val_status.config, {"text": f"Error: {exc}", "foreground": Colors.DANGER})
+                app._post_error("Check Resolution", exc)
                 break
             time.sleep(_FRAME_PAUSE_S)
 
-        app.pump.post(val_status.config, {"text": "Stopped", "foreground": Colors.TEXT_MUTED})
+        if not failed:   # an error status must not be overwritten by "Stopped" a tick later
+            app.pump.post(val_status.config, {"text": "Stopped", "foreground": Colors.TEXT_MUTED})
 
-    _title_cache = {"text": None}
+    _title_cache = {"text": None, "at": 0.0}
 
     def _render_snapshot(snap):
         """Main thread: push the newest fit snapshot into the existing artists."""
+        _view_state["last_snapshot"] = snap
         hint = getattr(app, "check_res_empty_text", None)
         if hint is not None and hint.get_visible():
             hint.set_visible(False)
+            blit.request_full()
         line_signal.set_data(snap["pix"], snap["norm"])
         line_bg.set_data(snap["x_bg"], snap["y_bg"])
         line_fitpts.set_data(snap["x_fitpts"], snap["y_fitpts"])
         line_fit_curve.set_data(snap["x_curve"], snap["y_curve"])
 
-        if not app._check_res_locked:
-            # Default zoom: tight on the windowed pixels.
-            if snap["x_fitpts"].size:
-                x_min = float(np.min(snap["x_fitpts"]))
-                x_max = float(np.max(snap["x_fitpts"]))
-                span = max(x_max - x_min, 1.0)
-                pad = max(2.0, span * 0.05)
-                ax.set_xlim(x_min - pad, x_max + pad)
-                y_min = -0.05
-                y_max = 1.15
-                ax.set_ylim(y_min, y_max)
+        if not app._check_res_locked and snap["x_fitpts"].size:
+            # Default zoom: tight on the windowed pixels, moved only once the
+            # window has drifted (see _XLIM_SLACK_PX).
+            x_min = float(np.min(snap["x_fitpts"]))
+            x_max = float(np.max(snap["x_fitpts"]))
+            span = max(x_max - x_min, 1.0)
+            pad = max(2.0, span * 0.05)
+            xlim = (x_min - pad, x_max + pad)
+            current = _view_state["xlim"]
+            if current is None or abs(xlim[0] - current[0]) > _XLIM_SLACK_PX or abs(xlim[1] - current[1]) > _XLIM_SLACK_PX:
+                ax.set_xlim(*xlim)
+                ax.set_ylim(-0.05, 1.15)
+                _view_state["xlim"] = xlim
+                blit.request_full()
 
         err = snap["fit_err"]
         err_tag = ""
@@ -414,9 +467,13 @@ def build(app):
             f"w={snap['resolfit']:.2f}, n={snap['shape']:.2f}, "
             f"rms={snap['rms']:.4f}{err_tag}"
         )
-        if title != _title_cache["text"]:
+        now = time.monotonic()
+        if title != _title_cache["text"] and (_title_cache["text"] is None
+                                              or now - _title_cache["at"] >= _TITLE_MIN_S):
             ax.set_title(title, **plot_title_font(fontsize=scaled_pt(11)))
             _title_cache["text"] = title
+            _title_cache["at"] = now
+            blit.request_full()
 
         val_cen.config(text=f"{snap['xcen']:.3f}")
         val_width.config(text=f"{snap['resolfit']:.3f}")
@@ -429,7 +486,7 @@ def build(app):
     redraw = ThrottledRedraw(
         app.pump,
         _render_snapshot,
-        draw=canvas.draw_idle,
+        draw=blit.draw,
         visible=lambda: app._is_tab_visible(app.check_res_tab),
     )
 

@@ -1,7 +1,7 @@
 # SciLab Design Document
 
 **Product:** SciLab Spectrometer Characterization System
-**Version described:** v3.4.4.0 (released 2026-10-09)
+**Version described:** v3.4.4.0 (released 2026-10-09); section 8.2 updated for v3.4.5.0, section 11.1 for v3.4.6.0 (2026-11-05) and v3.4.7.4, and sections 7.1, 7.2, 10 and 11 for v3.4.8.0 (2026-11-06)
 **Document date:** 2026-10-12
 **Maintainer:** Ashutosh Joshi, SciGlob. Prepared with Claude Code from the source tree, the test-suite and the bench notes in `docs/`.
 
@@ -199,7 +199,8 @@ flowchart TB
 | `analysis/models.py` | `CharacterizationConfig` and the typed result dataclasses | numpy |
 | `spectrometer_loader.py` | Type normalisation, DLL path inference, Auto probe order, USB vendor pre-scan, discovery, connection, contract validation | backends |
 | `spectrometers/*` | One module per vendor family; `spec_xfus.py` shared helpers (`calc_msl`, `split_cycles`, `measurement_timeout_s`, `SpecClock`); `_winapi.py` shim so drivers import off Windows | ctypes, pyusb, pythonnet, vendor SDKs |
-| `hardware/controllers.py` | `SerialDevice` (open, framed or timed replies, retries), `LaserController` (OBIS, CUBE, RELAY, `all_off`), `FilterWheelController` | pyserial |
+| `hardware/controllers.py` | `SerialDevice` (open, framed or timed replies, retries), `LaserController` (OBIS with `OK`/`ERR` parsing and queries, CUBE, RELAY, `all_off`), `FilterWheelController` | pyserial |
+| `services/light_sources.py` | The source table (`{tag: {type, channel, power_mw}}`): bench defaults, conversion of older settings, validation of a new source, controller descriptions | — |
 | `stage/*` | Modbus RTU motor control, config reader, safe three-step slot move | pymodbus |
 | `packaging/*` | `build.py` (version resource, icon, PyInstaller, self-test, Inno Setup), `SciLab.spec`, `installer.iss` | PyInstaller, ISCC |
 | `tools/*` | Bench diagnostics and smoke tests for C13016, Hamamatsu drivers, OceanDirect, JETI | backends |
@@ -527,7 +528,7 @@ Driver-specific behaviour worth knowing when reading a log:
 
 | Device | Port setting | Baud, framing | Commands used | Notes |
 | --- | --- | --- | --- | --- |
-| OBIS laser box | `com_ports["OBIS"]` | 9600, CR LF | `SOURn:POW:LEV:IMM:AMPL <W>`, `SOURn:AM:STAT ON/OFF` | pause 0.2 s per command |
+| OBIS laser box | `com_ports["OBIS"]` | 9600, CR LF (USB CDC: the rate is nominal) | `SYST:COMM:HAND ON` once per connection; `SOURn:POW:LEV:IMM:AMPL <W>` (and `?`), `SOURn:POW:LEV?`, `SOURn:POW:LIM:LOW?`/`HIGH?`, `SOURn:AM:STAT ON/OFF/?`, `SYSTn:INF:WAV?` | pause 0.2 s per command; every reply is parsed: `ERR-nnn` raises `ObisError` with the code's meaning, a silent query raises too |
 | CUBE 377 nm laser | `com_ports["CUBE"]` | 19200, CR, 8N1 | `EXT=1`, `CW=1`, `P=<mW>`, `L=1`, `L=0` | arm takes 3 x 1 s waits; emit waits 3 s to settle; retries 3 |
 | Relay board | `com_ports["RELAY"]` | 9600, CR | `R<n>S` set, `R<n>R` reset | no buffer reset before a command (kept from v3.3); pause 0.05 s |
 | Head sensor / filter wheels | `com_ports["HEADSENSOR"]` | 4800, CR | `?` identity (expects `Pan...`), `F<w><pos>`, `F<w>r` reset, `F<w>m` test | `FilterWheelController`, status history of 50 entries |
@@ -535,21 +536,23 @@ Driver-specific behaviour worth knowing when reading a log:
 
 ### 7.2 Source routing
 
-Every source tag maps to one controller and channel. The same table is used by the Live View and Check Resolution checkboxes (`SpectroApp.set_source_state`) and by the orchestrator (`_ensure_source_state`), so the lit-source chip in the app bar is right no matter which path did the switching.
+The source table, `SpectroApp.laser_configs = {tag: {"type", "channel", "power_mw"}}` (`services/light_sources.py`), says which controller and channel each source is switched through and at what setpoint. Setup's Light sources card edits it, the settings file persists it (`laser_configs_version: 2`; older files, which stored OBIS setpoints in watts and no channels, are converted on load), and every switching path reads it: the Live View and Check Resolution checkboxes (`SpectroApp.set_source_state`), the orchestrator (`MeasurementOrchestratorConfig.sources`, `_ensure_source_state`) and All off, so the lit-source chip in the app bar is right no matter which path did the switching. Power is in mW throughout; `LaserController.obis_set_power` is handed watts. The bench as shipped:
 
-| Tag | Controller | Channel | Power unit in settings | Default start IT for auto-IT |
+| Tag | Controller | Channel | Setpoint | Default start IT for auto-IT |
 | --- | --- | --- | --- | --- |
-| 377 | CUBE | shutter `L=1` | W if value <= 0.3 (converted to mW), else mW | 2.4 ms, after a 3 s stabilisation wait |
-| 405 | OBIS | 5 | W | 2.4 ms |
-| 445 | OBIS | 4 | W | 2.4 ms |
-| 488 | OBIS | 3 | W | 2.4 ms |
-| 517 | RELAY | 2 | n/a | 80 ms |
-| 532 | RELAY | 1 | n/a | 20 ms |
-| 640 | OBIS | 2 | W | fixed ladder 100 / 500 / 1000 ms, no auto-IT |
-| 685 | OBIS | 6 | W | 2.4 ms |
-| Hg_Ar | RELAY | 4 | n/a | 20 ms, preceded by a 45 s fibre-switch countdown |
+| 377 | CUBE | shutter `L=1` | 12 mW (`P=` when armed) | 2.4 ms, after a 3 s stabilisation wait |
+| 405 | OBIS | slot 5 | 50 mW | 2.4 ms |
+| 445 | OBIS | slot 4 | 30 mW | 2.4 ms |
+| 488 | OBIS | slot 3 | 30 mW | 2.4 ms |
+| 517 | RELAY | relay 2 | switch only | 80 ms |
+| 532 | RELAY | relay 1 | switch only | 20 ms |
+| 640 | OBIS | slot 2 | 50 mW | fixed ladder 100 / 500 / 1000 ms, no auto-IT |
+| 685 | OBIS | slot 6 | 30 mW | 2.4 ms |
+| Hg_Ar | RELAY | relay 4 | switch only | 20 ms, preceded by a 45 s fibre-switch countdown |
 
-`all_off()` is the safety path: it switches every OBIS channel, relays 1 to 4 and the CUBE off, logs each device that does not answer, and returns their names. It runs before and after every measurement run, from the app-bar All off button, and on exit.
+A lab with a different box adds or removes sources in Setup (wavelength, controller, channel, setpoint; the lamp cannot be removed), and every source list in the application follows (`SpectroApp.rebuild_laser_ui` runs the rebuilders each tab registered). `SpectroApp.apply_source_power` sends a new setpoint to an OBIS laser immediately and reads back what it accepted; `read_source_report` fetches a slot's range, setpoint, output and emission state for the table.
+
+`all_off()` is the safety path: it switches every configured OBIS slot, relays 1 to 4 and the CUBE off, logs each device that does not answer, and returns their names (a slot that answers `ERR` is logged and skipped). It runs before and after every measurement run, from the app-bar All off button, and on exit.
 
 ### 7.3 Stage safe move
 
@@ -605,7 +608,7 @@ sequenceDiagram
         end
         O->>L: switch tag on (OBIS power + ON / CUBE arm + emit / relay set)
         O->>O: sleep 0.2 s (3 s for the CUBE)
-        loop auto-IT, up to 1000 single frames
+        loop auto-IT, single frames until the peak is in the band (no frame limit)
             O->>S: set_it(it) only if changed, measure(1), wait
             S-->>O: rcm
             O->>P: auto_it_update(tag, frame, it, peak)
@@ -628,9 +631,11 @@ A source whose measurement raises (a backend error, saturation at the minimum IT
 
 The controller is the v3.3 additive stepper. Each unsaturated single frame moves the integration time by `|target_mid - peak| / 5000` ms, never less than 0.05 ms and never more than 0.3 ms upward or 0.1 ms downward, so the exposure creeps toward the band and slows as it gets close. A saturated frame carries no amplitude information and backs off by 30 %. Versions 3.4.0 to 3.4.2 jumped proportionally to `it x target / peak`; on a detector whose first frame is mostly dark offset that sent the exposure to about 200 ms in one step, so the stepper was restored in 3.4.3 and a test now asserts that no frame-to-frame jump exceeds the step limits.
 
+Since 3.4.5 the walk has no frame budget. Up to 3.4.4 it stopped after 1000 frames, which held a dim source to about 300 ms above its start IT, so a weak spectrometer could never reach 60,000 counts. The walk now ends only in the band, pinned at the minimum IT or at the ceiling, or on Stop. The ceiling is the connected spectrometer's own `max_it_ms` (4000 ms on Hama3 and Ava1) instead of a fixed 3000 ms. Without a budget a source that steps over the band and back could cycle forever, so once one IT has fallen short of the band and another has overshot it, every new IT stays inside that bracket and halves it when the additive step would leave it; a bracket narrower than 0.001 ms fails the source with an explanation. The step limits are unchanged, and that costs time on weak sources: on the simulator a line at 62 counts/ms settles near 956 ms after about 3,200 frames, roughly 25 minutes of exposure.
+
 ```mermaid
 flowchart TD
-    start(["start IT: override, or per-tag default<br/>(532: 20 ms, 517: 80 ms, Hg-Ar: 20 ms, else 2.4 ms)"]) --> clamp["clamp to 0.2 .. 3000 ms"]
+    start(["start IT: override, or per-tag default<br/>(532: 20 ms, 517: 80 ms, Hg-Ar: 20 ms, else 2.4 ms)"]) --> clamp["clamp to 0.2 ms .. ceiling<br/>(the spectrometer's max_it_ms)"]
     clamp --> frame["capture 1 frame at IT<br/>peak = max(counts)"]
     frame --> finite{"peak finite?"}
     finite -->|"no, 3 in a row"| err1(["error: non-finite frames"])
@@ -638,18 +643,17 @@ flowchart TD
     finite -->|yes| report["auto_it_update(tag, frame, IT, peak)<br/>RunProgress.frame()"]
     report --> sat{"peak >= 65,400?"}
     sat -->|"yes, IT at minimum"| err2(["error: saturates at the minimum IT,<br/>reduce the source power"])
-    sat -->|yes| back["IT = IT x 0.7"] --> pinned
+    sat -->|yes| back["IT = IT x 0.7"] --> bracket
     sat -->|no| band{"60,000 <= peak <= 65,000?"}
     band -->|yes| done(["settled: use this IT for signal and dark"])
     band -->|no| step["IT += sign(error) x min(limit, max(0.05, |error| / 5000))<br/>limit = 0.3 ms up, 0.1 ms down"]
-    step --> pinned{"IT unchanged (pinned at a limit)?"}
-    pinned -->|yes| out(["leave the loop with the last IT and peak"])
-    pinned -->|no| budget{"frames < 1000?"}
-    budget -->|yes| frame
-    budget -->|no| out
-    out --> check{"peak in band?"}
-    check -->|no| err3(["error: band not reached within N frames;<br/>last frame IT and peak reported"])
-    check -->|yes| done
+    step --> bracket{"band bracketed<br/>(one IT short of it, one over it)?"}
+    bracket -->|"yes, bracket under 0.001 ms"| err3(["error: the peak jumps over the band,<br/>reduce the source power"])
+    bracket -->|"yes, new IT outside the bracket"| half["IT = middle of the bracket"] --> pinned
+    bracket -->|"no, or new IT inside it"| pinned{"IT unchanged (pinned at a limit)?"}
+    pinned -->|"yes, below the band"| err4(["error: too weak at the maximum IT,<br/>last IT and peak reported"])
+    pinned -->|"yes, above the band"| err5(["error: above the band at the minimum IT"])
+    pinned -->|no| frame
 ```
 
 ![Figure 3: Auto-IT convergence on the simulated spectrometer](figures/fig-auto-it-convergence.png)
@@ -667,10 +671,11 @@ Tunables (class attributes on `SpectroApp`, copied into `MeasurementOrchestrator
 | Name | Value | Meaning |
 | --- | --- | --- |
 | `TARGET_LOW`, `TARGET_MID`, `TARGET_HIGH` | 60,000 / 62,500 / 65,000 counts | the band; the Measurements tab lets the operator move the mid-point, the band is mid +/- 2,500 |
-| `IT_MIN`, `IT_MAX` | 0.2 ms, 3000 ms | clamp |
+| `IT_MIN`, `IT_MAX` | 0.2 ms, `None` | clamp; `None` uses the spectrometer's `max_it_ms` (a fixed 3000 ms up to 3.4.4.0) |
 | `IT_STEP_UP`, `IT_STEP_DOWN` | 0.3 ms, 0.1 ms | largest additive step per frame |
+| per-source `start_it_ms`, `it_step_ms` (source table) | unset | the operator's start IT and largest step per frame for one source (Measurements › Auto-IT); they win over `DEFAULT_START_IT` and `IT_STEP_*` |
 | `IT_STEP_FLOOR_MS`, `IT_STEP_COUNTS_PER_MS` | 0.05 ms, 5000 counts/ms | step shaping near the band |
-| `MAX_IT_ADJUST_ITERS` | 1000 | frame budget per source |
+| `MAX_IT_ADJUST_ITERS` | `None` | no frame limit per source (1000 up to 3.4.4.0) |
 | `SAT_THRESH` | 65,400 counts | saturation for auto-IT; `saturation_backoff` 0.7 |
 | `N_SIG`, `N_DARK` | 50, 50 cycles | signal and dark averaging |
 | `N_SIG_640`, `N_DARK_640`, `nm640_integrations` | 10, 10, (100, 500, 1000) ms | the 640 nm ladder for out-of-range (stray light) analysis |
@@ -779,7 +784,7 @@ The writable base is chosen once per process:
 | `last_connected_type` | the backend that connected most recently; Auto probes it first |
 | `dll_path` | vendor DLL path typed by the operator (a suggested path is cleared when Auto is selected) |
 | `com_ports` | `OBIS`, `CUBE`, `RELAY`, `HEADSENSOR`, `STAGE` |
-| `laser_power`, `laser_configs` | per-tag power and controller type (`OBIS`, `CUBE`, `RELAY`) |
+| `laser_configs`, `laser_configs_version` | the source table: per-tag controller type (`OBIS`, `CUBE`, `RELAY`), channel and `power_mw`; version 2 since 3.4.8.0 (`laser_power` is written alongside for older readers) |
 | `available_lasers` | the tags shown on every tab (Hg_Ar is always present) |
 | `stage_config_path` | path to the Stage Software `config.json` |
 | `measurement_flags` | `smart_source_off`, `cube_prearm`, `framed_serial_reads` |
@@ -858,9 +863,9 @@ Both use the same modified-Gaussian line model `f(x) = B + A exp(-0.5 |(x - xcen
 
 | Tab | Shortcut | Built | Purpose |
 | --- | --- | --- | --- |
-| Setup | Ctrl+1 | eagerly | backend, DLL, COM ports with test buttons, lasers and powers, stage, Advanced bench options, Connect, Save Settings (Ctrl+S), Refresh Ports (F5) |
-| Live View | Ctrl+2 (Ctrl+L toggles streaming) | lazily, warmed up at startup | live trace with blitting, IT spinbox applied between frames, readout card (peak, pixel, percent full scale, saturation, IT, fps), source checkboxes, Check spectrometer |
-| Measurements | Ctrl+3 | eagerly (figure created on first show, warmed up) | source checkboxes and presets, target peak, Auto-IT start, reference CSVs, Run Selected / Stop / Save CSV / Analyse last run, run progress card, live Auto-IT plot |
+| Setup | Ctrl+1 | eagerly | backend, DLL, COM ports with test buttons, the Light sources table (controller, channel, setpoint in mW applied to the laser at once, what the laser reports, Add/Remove), stage, Advanced bench options, Connect, Save Settings (Ctrl+S), Refresh Ports (F5) |
+| Live View | Ctrl+2 (Ctrl+L toggles streaming) | lazily, warmed up at startup | live trace with blitting, IT spinbox applied between frames, readout card (peak, pixel, percent full scale, saturation, IT, fps), source checkboxes, Check spectrometer; the toolbar's sliders button opens Chart settings (invert the spectrum with the axis still 0 → end, logarithmic counts axis, matplotlib's margins tool) |
+| Measurements | Ctrl+3 | eagerly (figure created on first show, warmed up) | source checkboxes and presets (rebuilt from the source table), target peak, Auto-IT start and step per source (dialog), reference CSVs, Run Selected / Stop / Save CSV / Analyse last run, run checklist with a fixed four-row viewport, live Auto-IT plot |
 | Check Resolution | Ctrl+4 | lazily, warmed up | live line fit with fit readouts |
 | Analysis | Ctrl+5 | eagerly | run tabs with PNG previews (at most 5 kept, about 10 MB each), summary, Export plots, Open folder, Clear All |
 | EEPROM | Ctrl+6 | lazily, warmed up | Avantes EEPROM read and write (red "Write" buttons) |
@@ -926,7 +931,8 @@ Design choices recorded in `packaging/README.md`:
 | Loader | probe order, preferred type, USB vendor gating, Jeti1 gate, failure message, connect reuses discovery | monkeypatched probes | `test_loader.py` |
 | UI plumbing | pump ordering, cross-thread post, `call_sync`, throttled redraw, acquisition guard | Tk-free fakes with `after` | `test_ui_pump.py` |
 | Startup contract | eager modules do not import pandas or scipy | fresh interpreter import set | `test_startup_imports.py` |
-| GUI smoke | every tab builds, simulated frames stream into Live View, Check Resolution fits, disconnect restores hardware lasers, chips and progress follow the model, idle button states, log drawer | a real `SpectroApp` with the Simulated backend; self-skips without Tk | `test_smoke_gui.py` (marker `gui`) |
+| GUI smoke | every tab builds, simulated frames stream into Live View, Live View chart settings (invert, log, zoom kept, Reset Zoom), Check Resolution fits, the Light sources card (a setpoint reaches the simulated OBIS in watts, a refused one is reported, Add/Remove update every tab and the settings file), disconnect restores hardware lasers, chips and progress follow the model, idle button states, log drawer | a real `SpectroApp` with the Simulated backend; self-skips without Tk | `test_smoke_gui.py` (marker `gui`) |
+| Source table and OBIS protocol | defaults in mW, conversion of 3.4.7 settings, validation of a new source; `OK`/`ERR-nnn` parsing, watts on the wire, handshake requested once, `all_off` past an empty slot | pure Python; a scripted serial port | `test_light_sources.py`, `test_obis_protocol.py` |
 
 Figure 1 (right panel) shows the distribution. Commands:
 
@@ -965,7 +971,7 @@ Bench checks that complement the suite: `tools/jeti_smoke_test.py`, `tools/ocean
 | Stop pressed during a capture | `measure_running` cleared, `request_stop()` | the backend aborts and wakes the waiter; the run ends as stopped without an error dialog; partial CSV is saved |
 | Vendor call never returns | per-backend watchdogs (Hama6 15 s per call, others `wait_for_measurement` timeout 2 x expected + margin) | an error with the status codes instead of a frozen window; Hama6 asks for a restart and re-plug |
 | Source saturates at the minimum IT | auto-IT branch | the source is reported in the run summary; the run continues |
-| Auto-IT cannot reach the band | frame budget or IT limit hit | the source fails with the last IT and peak in the message; the run continues |
+| Auto-IT cannot reach the band | maximum or minimum IT hit, or the band lies between two ITs less than 0.001 ms apart | the source fails with the reason, the last IT and peak in the message; the run continues |
 | Backend error on one source | exception in the orchestrator loop | recorded in `result.errors`, shown as failed in the progress card with a tooltip, run continues |
 | Non-finite frames | three in a row | source fails with a clear message |
 | Serial device does not answer | `SerialDevice.command` empty reply, exceptions | checkbox reverts, status strip reports; `all_off` logs each unreachable device once and returns their names |

@@ -8,6 +8,7 @@ the integration time, peak and elapsed time keep moving between transitions.
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import ttk
 
 from services.run_progress import (DONE, FAILED, IDLE, PENDING, RUNNING, STOPPED, RunProgress,
@@ -17,6 +18,7 @@ from .theme import Colors, Fonts, Spacing, source_color
 from .ui_utils import Tooltip
 
 POLL_MS = 200
+_ROW_PADY = 1
 
 _GLYPH = {PENDING: "○", RUNNING: "●", DONE: "✓", FAILED: "✕", STOPPED: "–"}
 _GLYPH_COLOR = {
@@ -48,6 +50,16 @@ def _row_text(source: SourceProgress, now: float) -> str:
     return _SEP.join(parts)
 
 
+def _timing_text(snapshot: RunSnapshot) -> str:
+    """Elapsed time, with the estimated time left while a run is in flight ("1:05 · ~2:30 left")."""
+    if snapshot.status == IDLE:
+        return ""
+    text = format_duration(snapshot.elapsed_s)
+    if snapshot.status == RUNNING and snapshot.eta_s is not None:
+        text += f"{_SEP}~{format_duration(snapshot.eta_s)} left"
+    return text
+
+
 def _header(snapshot: RunSnapshot) -> tuple:
     """Header text and colour for a run state."""
     if snapshot.status == IDLE:
@@ -66,7 +78,16 @@ def _header(snapshot: RunSnapshot) -> tuple:
 
 
 class RunProgressPanel(ttk.Frame):
-    """Checklist of the sources in a run with the live IT, peak and timing per row."""
+    """Checklist of the sources in a run with the live IT, peak and timing per row.
+
+    The panel has one height, run or no run: the rows live in a viewport
+    ``VISIBLE_ROWS`` high that scrolls when a run has more sources and keeps
+    the source being measured in view. The card it sits in used to grow by a
+    row per source the moment Run was pressed, which pushed the whole control
+    strip around under the operator's hands.
+    """
+
+    VISIBLE_ROWS = 4
 
     def __init__(self, master, model: RunProgress, *, post, background: str = Colors.BG_SURFACE):
         super().__init__(master, style="Surface.TFrame")
@@ -89,31 +110,75 @@ class RunProgressPanel(ttk.Frame):
         self.bar = ttk.Progressbar(self, orient="horizontal", mode="determinate", maximum=1, value=0)
         self.bar.pack(fill="x", pady=(Spacing.PAD_XS, Spacing.PAD_SM))
 
-        self.rows_frame = tk.Frame(self, bg=background)
-        self.rows_frame.pack(fill="both", expand=True)
+        # Fixed-height viewport over the rows.
+        self._row_height = tkfont.Font(font=Fonts.BODY_SMALL_BOLD).metrics("linespace") + 2 * _ROW_PADY
+        viewport = tk.Frame(self, bg=background)
+        viewport.pack(fill="x")
+        self.rows_canvas = tk.Canvas(viewport, bg=background, bd=0, highlightthickness=0,
+                                     height=self._row_height * self.VISIBLE_ROWS)
+        self.rows_canvas.pack(side="left", fill="x", expand=True)
+        self.rows_scroll = ttk.Scrollbar(viewport, orient="vertical", command=self.rows_canvas.yview)
+        self.rows_canvas.configure(yscrollcommand=self.rows_scroll.set)
+        self.rows_frame = tk.Frame(self.rows_canvas, bg=background)
         self.rows_frame.columnconfigure(2, weight=1)
+        self._rows_window = self.rows_canvas.create_window((0, 0), window=self.rows_frame, anchor="nw")
+        self.rows_canvas.bind("<Configure>", lambda e: self.rows_canvas.itemconfigure(self._rows_window, width=e.width))
+        self.rows_frame.bind("<Configure>", lambda _e: self._sync_scroll())
+        self.hint_label = tk.Label(self.rows_frame, text="Sources are listed here as the run measures them.",
+                                   font=Fonts.CAPTION, bg=background, fg=Colors.TEXT_MUTED, anchor="w")
 
         model.add_listener(lambda: self._post(self.refresh))
         self.refresh()
+
+    def _sync_scroll(self) -> None:
+        try:
+            needed = self.rows_frame.winfo_reqheight()
+            self.rows_canvas.configure(scrollregion=(0, 0, 0, max(needed, 1)))
+            if needed > self.rows_canvas.winfo_height() + 2:
+                if not self.rows_scroll.winfo_manager():
+                    self.rows_scroll.pack(side="right", fill="y")
+            elif self.rows_scroll.winfo_manager():
+                self.rows_scroll.pack_forget()
+                self.rows_canvas.yview_moveto(0)
+        except tk.TclError:
+            pass
+
+    def _show_row(self, tag: str) -> None:
+        """Scroll so the row for ``tag`` is inside the viewport."""
+        index = self._row_tags.index(tag) if tag in self._row_tags else -1
+        if index < 0 or len(self._row_tags) <= self.VISIBLE_ROWS:
+            return
+        first = index - (self.VISIBLE_ROWS - 1) // 2
+        first = max(0, min(first, len(self._row_tags) - self.VISIBLE_ROWS))
+        try:
+            self.rows_canvas.yview_moveto(first / len(self._row_tags))
+        except tk.TclError:
+            pass
 
     def _ensure_rows(self, tags: tuple) -> None:
         if tags == self._row_tags:
             return
         for child in self.rows_frame.winfo_children():
-            child.destroy()
+            if child is not self.hint_label:
+                child.destroy()
         self._rows = {}
+        if tags:
+            self.hint_label.grid_forget()
+        else:
+            self.hint_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=_ROW_PADY)
         for index, tag in enumerate(tags):
             glyph = tk.Label(self.rows_frame, text=_GLYPH[PENDING], font=Fonts.BODY_SMALL_BOLD,
                              bg=self._bg, fg=Colors.TEXT_MUTED, width=2, anchor="w")
-            glyph.grid(row=index, column=0, sticky="w")
+            glyph.grid(row=index, column=0, sticky="w", pady=_ROW_PADY)
             name = tk.Label(self.rows_frame, text=source_label(tag), font=Fonts.BODY_SMALL_BOLD,
                             bg=self._bg, fg=source_color(tag), width=8, anchor="w")
-            name.grid(row=index, column=1, sticky="w", padx=(0, Spacing.PAD_SM))
+            name.grid(row=index, column=1, sticky="w", padx=(0, Spacing.PAD_SM), pady=_ROW_PADY)
             value = tk.Label(self.rows_frame, text="", font=Fonts.MONO_SMALL,
                              bg=self._bg, fg=Colors.TEXT_SECONDARY, anchor="w")
-            value.grid(row=index, column=2, sticky="ew")
+            value.grid(row=index, column=2, sticky="ew", pady=_ROW_PADY)
             self._rows[tag] = {"glyph": glyph, "name": name, "value": value, "tip": None}
         self._row_tags = tags
+        self.rows_canvas.yview_moveto(0)
 
     def refresh(self) -> None:
         try:
@@ -142,10 +207,15 @@ class RunProgressPanel(ttk.Frame):
                     row["tip"] = Tooltip(row["value"], source.message)
                 else:
                     row["tip"].text = source.message
+            elif row["tip"] is not None:
+                # The same selection run again: last time's failure must not linger on a good row.
+                row["tip"].text = ""
+        if snapshot.status == RUNNING and snapshot.current is not None:
+            self._show_row(snapshot.current.tag)
 
         text, color = _header(snapshot)
         self.status_label.configure(text=text, fg=color)
-        self.elapsed_label.configure(text=format_duration(snapshot.elapsed_s) if snapshot.status != IDLE else "")
+        self.elapsed_label.configure(text=_timing_text(snapshot))
         self.bar.configure(maximum=max(1, snapshot.total), value=snapshot.done + snapshot.failed)
 
         if snapshot.status == RUNNING:
@@ -217,6 +287,8 @@ class RunChip:
                 text = f"Measuring {source_label(current.tag)}{_SEP}{snapshot.position}/{snapshot.total}"
                 if current.it_ms is not None:
                     text += f"{_SEP}{current.it_ms:.2f} ms"
+                if snapshot.eta_s is not None:
+                    text += f"{_SEP}~{format_duration(snapshot.eta_s)} left"
             color = Colors.WARNING
             self._after_id = self.chip.after(POLL_MS, self.refresh)
         elif snapshot.status == STOPPED:

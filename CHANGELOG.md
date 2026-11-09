@@ -10,6 +10,240 @@ the installer. The single source of truth is
 
 ## [Unreleased]
 
+## [3.4.9.0] — 2026-11-09
+
+A review of every page for function, smoothness and finish. Live View gains
+frame averaging, dark subtraction and a frame export; the Analysis page opens
+on the numbers and shows its plots full size in the app; the run reports how
+long it has left; informational pop-ups give way to the status bar; and the
+choice widgets, port fields and plot redraws are brought up to date.
+
+### Added
+
+- **Live View › Spectrum Controls: frame processing.** *Average frames*
+  (1–64) shows the rolling mean of the last N frames; *Capture dark* keeps
+  the frame on the plot as the dark and *Subtract dark* takes it off the
+  frames that follow (the caption warns when the integration time has
+  changed since the dark was taken); *Save frame as CSV…* writes the
+  processed and the raw frame with the serial number, integration time,
+  averaging depth and dark state in the header. Saturation is still judged
+  on each raw frame; the readout follows what is on the plot.
+- **Live View: the brightest pixel is marked** on the trace (a marker and
+  its pixel number), also when zoomed in or mirrored. *Chart settings ›
+  Mark the brightest pixel* switches it off.
+- **Analysis › Key results.** Each run tab opens with the headline numbers
+  (Hg-Ar lines matched and RMSE, the dispersion's linear term, the lasers
+  and the detector size) and a table per measured laser: peak pixel, FWHM,
+  width at 20 %, a2 and a3. The numbers come from the metrics JSON saved
+  next to the plots.
+- **Analysis: plots open in the app.** A click on a preview shows the plot
+  at the size of the screen in one viewer window; Left/Right or the buttons
+  step through the run's plots, *Open in image viewer* hands it to Windows
+  as before, Esc closes.
+- **Measurements: time left.** Once a source has finished, the checklist
+  header and the app-bar chip show an estimate of the time remaining
+  (~2:30 left), from the mean duration of the sources measured so far.
+- **Setup: serial ports are dropdowns.** The OBIS, CUBE, relay, head sensor
+  and stage fields list the ports Windows sees with their descriptions (COM4
+  · USB Serial Device); typing still works, and picking an entry keeps the
+  port name. The list fills on a worker a moment after start and on
+  *Refresh Ports* (F5), which no longer overwrites the fields with the first
+  four ports it finds.
+- **F1** opens an About window with the keyboard shortcuts, the version and
+  the settings and results locations, each with an *Open* button.
+- `tabs/analysis_results.py` (key-results card, image viewer) and
+  `tools/screenshot_tabs.py`, which builds the app against the simulated
+  backend and screenshots every tab at a chosen window size.
+
+### Changed
+
+- **Check boxes and radio buttons are drawn**, anti-aliased at the screen's
+  scale: a filled accent square with a white tick, a ring with an accent dot,
+  with hover and disabled states. clam's bevelled square-with-a-cross was
+  the most dated element on every page; the per-source tints are kept.
+- **Fewer pop-ups.** The end of a run, Save CSV, Export Plots, Save
+  Settings, a loaded stage config and an EEPROM read or write report to the
+  status bar (and the run chip) instead of a dialog that had to be
+  dismissed; the EEPROM page shows its values, not a second copy in a box.
+  Errors and confirmations before a write are dialogs as before. The Save
+  Settings note that a restart was needed for port changes was wrong and is
+  gone.
+- **Smoother plots.** Check Resolution blits its four traces over a cached
+  background like Live View, moves its default zoom only when the fit
+  window has drifted by three pixels and rewrites the title once a second;
+  the Measurements auto-IT title follows the frames at four per second and
+  the axes are set only when they change.
+- **Scrolling.** The mouse wheel over a table, list or text field that can
+  still scroll, over a spinbox or dropdown, scrolls (or edits) that widget
+  and not the page behind it; a page that fits ignores the wheel.
+- **Analysis previews fill the width.** The grid is laid out for the main
+  window's width (the hidden run notebook kept its size from the last time
+  the page was shown, which was the warm-up size), in columns of about 640
+  logical pixels: four columns on a 4K screen, two on a laptop. Run tabs
+  are named *Run 1 · 12:09:23*.
+- *Analyse last run* with the results already shown selects their tab
+  instead of adding a second copy.
+- A click on a source check box while its previous switch is still on the
+  wire is ignored and the box shows the source's real state.
+- The window is warmed up at the size it will have maximised, so the tabs
+  come up laid out for it instead of relaying out on first show.
+- The combobox dropdown list follows the type scale (it was pinned to 10 pt
+  and looked small beside its field on a 4K screen). The axis labels no
+  longer ask matplotlib for a "medium" weight Segoe UI does not have, which
+  logged a warning at every start.
+
+### Fixed
+
+- Reading or writing the EEPROM now holds the spectrometer token for the
+  duration of the DLL call, so a Live View or run cannot start on the same
+  handle meanwhile (it only checked the token beforehand).
+- Save CSV and Save frame open the file dialog in the results folder.
+
+## [3.4.8.0] — 2026-11-06
+
+A quality release for the lab benches: the windows resize cleanly, the light
+sources are managed in one place and their power really reaches the lasers,
+and a round of defects found in a code review of every tab is fixed.
+
+### Added
+
+- **Setup › Light sources.** One table replaces the laser list, the power card
+  and the Add Laser dialog: each source with its controller and channel
+  (OBIS slot 1–6, relay 1–4, or the CUBE), its setpoint in mW, what the laser
+  itself reports (power range, setpoint, output) and whether it is on.
+  - **Apply** sends the setpoint to an OBIS laser at once, lit or not, and
+    shows the value the laser accepted; a refused value (out of range, no
+    answer) is reported instead of being silently kept. The CUBE takes its
+    power when it is next armed.
+  - **Read from lasers** queries every OBIS slot for its range and state.
+  - **Add source…** validates the wavelength, controller, channel and
+    setpoint on the form (free channels are suggested); **Remove** protects
+    the Hg-Ar lamp and refuses a source that is on.
+  - Every source list follows the table at once: the Live View and Check
+    Resolution checkboxes, the Measurements checklist and its Full Spectrum
+    preset, and the table itself after Load Settings.
+- **Measurements › Auto-IT › Start and step per source…** sets, for each
+  source, the integration time the auto-exposure search starts from and the
+  largest change per frame (for example 405 nm from 200 ms in 5 ms steps,
+  445 nm from 100 ms in 3 ms steps). Blank fields keep the defaults (2.4 ms
+  start, 0.3 ms up / 0.1 ms down; 532 nm and Hg-Ar start at 20 ms, 517 nm at
+  80 ms); the values are validated on the form and saved with the sources.
+  This replaces the single "Auto-IT start" field that applied to every source.
+- `services/light_sources.py`: the source table and its validation; settings
+  carry `laser_configs_version: 2` (power in mW, explicit channels, optional
+  per-source `start_it_ms` and `it_step_ms`). Earlier files are converted on
+  load (OBIS setpoints were stored in watts).
+- The OBIS driver now checks the laser's `OK` / `ERR-nnn` reply to every
+  command (handshaking is requested once per connection) and can query the
+  setpoint, output power, power limits, emission state and wavelength.
+
+### Changed
+
+- **Window layout.** The plot keeps a working height when the window is
+  small: the control strip under it gives way and scrolls, and shrinks to its
+  cards on a large screen so the plot gets the surplus. Live View goes
+  side-by-side from a 1366 px wide window up (the column scrolls on a short
+  one). In the stacked Measurements layout the Actions card sits right under
+  the sources. The window minimum and restore size are in logical pixels, so
+  a 125 % screen gets the same window as a 100 % one.
+- **Measurements › Actions** no longer grows when a run starts: the run
+  checklist has a fixed four-row viewport that scrolls and keeps the source
+  being measured in view.
+- The title strip shortens the product name to "SciLab" when the run and
+  source chips would otherwise run into it on a narrow window.
+- Laser power is in **mW** everywhere (the OBIS channels were sent watts
+  under an mW label; typing 30 for 30 mW sent 30 W, which the laser refused).
+- Start Live applies the integration time in the spinbox, so the readout
+  matches the device after another tool (Check Resolution, Check
+  spectrometer, a run) changed it.
+
+### Fixed
+
+- Check spectrometer fitted the previous frame: `measure()` is non-blocking
+  on every real backend and the service read the data without waiting for
+  the frame, so the fit, plot, CSV and DDF came from the last auto-IT frame
+  and the first call after Connect failed with an empty spectrum.
+- Pressing Stop Live, Check Resolution's Stop or a run's Stop while another
+  tool owned the spectrometer aborted that tool's capture.
+- A second Connect, or Disconnect during an acquisition, tore the backend
+  down under a running thread; both now stop and wait for it, and Connect
+  releases the previous backend first.
+- An EEPROM read from one Avantes could be written into another connected
+  later; the read is discarded on Connect and Disconnect.
+- An integration time queued while streaming survived Stop and was applied
+  on the next Start; the Apply IT button stayed greyed; the window title was
+  overwritten (Live View and Check Resolution).
+- Check Resolution hid its own error behind "Stopped"; its peak-counts
+  readout double-counted the baseline; a failed `set_it` was reported as
+  applied.
+- A Stop during the last source, or during the delay before a dark capture,
+  was reported as a finished run or ran the whole dark capture with Stop
+  greyed out.
+- Save CSV and Analyse last run acted on the half-finished run; they are
+  disabled while a run is in progress. A blank or half-typed target peak is
+  refused at Run instead of driving the exposure to a few counts.
+- The head-sensor command box became free text after its first use (busy
+  widgets go back to their previous state). The run checklist no longer
+  keeps last run's failure tooltip on a row that succeeded.
+- Removing the Hg-Ar row, or a source that only existed in the settings file,
+  raised a KeyError.
+
+## [3.4.7.4] — 2026-11-06
+
+### Changed
+
+- **Live View: Invert now mirrors the spectrum, not the axis.** In Chart
+  settings, "Invert the spectrum" draws the trace last pixel first, while the
+  x axis keeps reading 0 → end (0 → 2047, or 0 → 4095), left to right.
+  Before, the axis numbers themselves ran 2047 → 0. The trace already on the
+  plot mirrors at once, also while Live View is stopped. A zoomed view moves
+  to the mirrored range, so the same part of the spectrum stays in view.
+  The readout's peak pixel is the position on the plot.
+
+## [3.4.7.0] — 2026-11-05
+
+### Fixed
+
+- **Hama3 (C13015-01) measurements stopped with "Timeout error".** A run
+  failed with "wait_for_measurement failed: measure_blocking, measurement
+  failed, Error happen at measurement call 1/1, ncy_pack=50: Error happen
+  while waiting for data, Timeout error" whenever auto-IT settled above
+  about 80 ms. Hama3 takes each source's 50 signal and 50 dark cycles in one
+  `DcIcUSB.dll` capture, and the DLL's data timeout, set to 4 s at connect,
+  bounds that whole capture, not one cycle: the DLL reads all of a capture's
+  data in one USB read and counts the timeout down from its start. The
+  timeout is now set for every capture to its exposure plus 10 ms per cycle
+  and 4 s of margin (about 54 s for 50 cycles at 1 s). The 640 nm ladder
+  (10 cycles at 500 and 1000 ms) exceeded the old limit in the same way, and
+  so would a single frame at the 4000 ms maximum.
+
+## [3.4.6.0] — 2026-11-05
+
+### Added
+
+- **Live View chart settings.** The sliders button on the plot's toolbar
+  (bottom left) now opens Chart settings, with two checkboxes that apply at
+  once, while streaming or stopped:
+  - **Invert x axis** runs the pixel axis from the last pixel down to 0
+    (2047 → 0, or 4095 → 0 on a 4096-pixel detector).
+  - **Logarithmic y axis** shows the counts on a log scale, labelled in
+    plain counts (100, 200, 500, 1000, ...). The bottom of the axis follows
+    the decade below the trace's lowest count, usually the dark level.
+
+  A zoomed view keeps its pixel range when the axis is inverted. The
+  settings last for the session. matplotlib's own margins tool, which the
+  button used to open, is still there as "Subplot margins…".
+
+### Fixed
+
+- **Reset Zoom left a toolbar zoom in place.** After zooming with the
+  toolbar while Live View was streaming, Reset Zoom kept the zoomed pixel
+  range, because the frames only re-set the axis when the pixel count
+  changed. It now restores the whole trace, in the direction and scale
+  chosen in Chart settings.
+
+## [3.4.5.0] — 2026-11-05
+
 ### Added
 
 - **Software licence.** `LICENSE` is the SciLab licence agreement from
@@ -22,6 +256,34 @@ the installer. The single source of truth is
 
 - The executable's copyright field now reads "Copyright (C) 2026 SciGlob
   Research LLC".
+- `MeasurementOrchestratorConfig.max_it_adjust_iters` is optional (default
+  `None`, no frame limit) and `it_max=None` means the spectrometer's own
+  maximum integration time; when both a configured `it_max` and the
+  backend's `max_it_ms` are known, the lower one applies.
+
+### Fixed
+
+- **Auto-IT gave up on weak sources before reaching the target.** Auto-IT
+  stopped after 1000 frames (`MAX_IT_ADJUST_ITERS`), and with steps of at
+  most 0.3 ms that held the integration time to about 300 ms above its
+  start, so a weak spectrometer failed with "did not reach the target band"
+  far short of 60,000 counts. The frame limit is gone: auto-IT keeps
+  stepping, in the same additive 0.3 ms up / 0.1 ms down steps, until the
+  peak is in the band, the integration time reaches its ceiling, or Stop is
+  pressed. The ceiling is now the connected spectrometer's own maximum
+  (`max_it_ms`, for example 4000 ms on Hama3 and Ava1) instead of a fixed
+  3000 ms (`IT_MAX = None`). Weak sources take longer: one that needs about
+  950 ms takes about 3,200 frames, roughly 25 minutes of auto-IT exposure;
+  the run-progress card shows the IT, peak and frame count as it climbs.
+- Without a frame limit a source that steps across the band and back could
+  cycle forever. Once one integration time has fallen short of the band and
+  another has overshot it, auto-IT stays inside that bracket, halving it,
+  and fails the source with an explanation if the band lies between two
+  integration times less than 0.001 ms apart.
+- The auto-IT failure message says why it stopped: the maximum integration
+  time reached with the peak still below the band (source too weak), the
+  minimum reached with the peak above it, or the band falling between two
+  integration times.
 
 ## [3.4.4.0] — 2026-10-09
 
@@ -342,3 +604,4 @@ remains the fuller account. Released before this changelog existed.
 v3.3 and earlier predate this changelog. See the git history.
 
 [Unreleased]: https://github.com/ashutoshjoshi1/SciLab-V3.4/compare/main...HEAD
+[3.4.9.0]: https://github.com/ashutoshjoshi1/SciLab-V3.4/releases/tag/v3.4.9.0

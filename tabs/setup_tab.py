@@ -20,8 +20,9 @@ from spectrometer_loader import (
     discover_spectrometers,
     suggest_default_dll_path,
 )
+from services import light_sources
 from services.run_progress import source_label
-from .theme import Colors, Fonts, Spacing, badge, harmonize, logical_px, source_color, style_listbox
+from .theme import Colors, Fonts, Spacing, harmonize, logical_px, source_color, style_listbox
 from .ui_utils import ScrollableFrame, Tooltip, bind_debounced_configure, center_over, run_in_worker
 
 LOGGER = logging.getLogger(__name__)
@@ -29,8 +30,6 @@ LOGGER = logging.getLogger(__name__)
 def build(app):
     # Import constants from app
     DEFAULT_COM_PORTS = app.DEFAULT_COM_PORTS
-    DEFAULT_ALL_LASERS = app.DEFAULT_ALL_LASERS
-    DEFAULT_LASER_POWERS = app.DEFAULT_LASER_POWERS
     SETTINGS_FILE = app.SETTINGS_FILE
 
     def _is_suggested_path(path):
@@ -63,6 +62,71 @@ def build(app):
         tip.text = detail or hint
 
     app.set_port_status = _set_port_status
+
+    # ---- serial-port dropdowns ------------------------------------------------
+    _PORT_SEP = "  ·  "
+    app._serial_ports = []          # [(device, description)] as last enumerated
+    app._port_comboboxes = []
+
+    def _port_values():
+        return [f"{device}{_PORT_SEP}{description}" if description else device
+                for device, description in app._serial_ports]
+
+    def _on_port_pick(event):
+        """Keep only the device name once an entry with a description is picked."""
+        combo = event.widget
+        text = combo.get()
+        device = text.split(_PORT_SEP, 1)[0].strip()
+        if device != text:
+            combo.set(device)
+        combo.selection_clear()
+
+    def _port_combobox(parent):
+        combo = ttk.Combobox(parent, width=14, font=Fonts.BODY, values=_port_values())
+        combo.bind("<<ComboboxSelected>>", _on_port_pick)
+        Tooltip(combo, "Type a port (COM4) or open the list of the serial ports Windows sees. "
+                       "Refresh Ports (F5) updates the list.")
+        app._port_comboboxes.append(combo)
+        return combo
+
+    def _refresh_port_lists():
+        values = _port_values()
+        for combo in app._port_comboboxes:
+            try:
+                combo.configure(values=values)
+            except tk.TclError:
+                pass
+
+    def _enumerate_ports():
+        """Worker: the ports and their descriptions, sorted by number."""
+        if serial is None:
+            return []
+        ports = []
+        for port in serial.tools.list_ports.comports():
+            description = str(getattr(port, "description", "") or "")
+            device = str(port.device)
+            if description.endswith(f"({device})"):
+                description = description[: -len(device) - 2].strip()
+            ports.append((device, description))
+
+        def _key(item):
+            digits = "".join(ch for ch in item[0] if ch.isdigit())
+            return (0, int(digits)) if digits else (1, item[0])
+        return sorted(ports, key=_key)
+
+    def _ports_found(ports):
+        app._serial_ports = list(ports)
+        _refresh_port_lists()
+
+    def refresh_port_lists_async():
+        """Fill the dropdowns without stalling the window (enumeration can take a moment on Windows)."""
+        if serial is None:
+            return
+        run_in_worker(app, _enumerate_ports, on_done=_ports_found,
+                      on_error=lambda exc: LOGGER.debug("Serial port listing failed: %s", exc),
+                      name="serial-ports")
+
+    app.refresh_port_lists_async = refresh_port_lists_async
 
     def _build_setup_tab():
         main_frame = ttk.Frame(app.setup_tab)
@@ -216,9 +280,13 @@ def build(app):
         ttk.Label(ports_group, text="RELAY:",
                  style='SetupLabel.TLabel').grid(row=2, column=0, sticky="e", padx=8, pady=6)
 
-        app.obis_entry = ttk.Entry(ports_group, width=15, font=Fonts.BODY)
-        app.cube_entry = ttk.Entry(ports_group, width=15, font=Fonts.BODY)
-        app.relay_entry = ttk.Entry(ports_group, width=15, font=Fonts.BODY)
+        # Editable dropdowns: type a port, or pick one from the ports Windows
+        # sees (with their descriptions, so the laser box can be told from the
+        # relay board). The list is filled on a worker at startup and by
+        # Refresh Ports; what is typed or picked is the plain "COMn".
+        app.obis_entry = _port_combobox(ports_group)
+        app.cube_entry = _port_combobox(ports_group)
+        app.relay_entry = _port_combobox(ports_group)
         app.obis_entry.grid(row=0, column=1, padx=8, pady=6, sticky="w")
         app.cube_entry.grid(row=1, column=1, padx=8, pady=6, sticky="w")
         app.relay_entry.grid(row=2, column=1, padx=8, pady=6, sticky="w")
@@ -240,7 +308,8 @@ def build(app):
         refresh_btn = ttk.Button(ports_button_frame, text="Refresh Ports", command=refresh_ports,
                                  style='SetupButton.TButton', width=18)
         refresh_btn.pack(side="left", padx=(0, 8))
-        Tooltip(refresh_btn, "List the serial ports Windows currently sees and fill the first four in (F5).")
+        Tooltip(refresh_btn, "List the serial ports Windows currently sees in every port dropdown (F5). "
+                             "Fields that are set are left alone.")
         app.test_com_btn = ttk.Button(ports_button_frame, text="Test Connect", command=test_com_connect,
                                       style='SetupButton.TButton', width=18)
         app.test_com_btn.pack(side="left")
@@ -256,7 +325,7 @@ def build(app):
 
         ttk.Label(headsensor_group, text="COM Port:",
                  style='SetupLabel.TLabel').grid(row=0, column=0, sticky="e", padx=8, pady=8)
-        app.headsensor_entry = ttk.Entry(headsensor_group, width=15, font=Fonts.BODY)
+        app.headsensor_entry = _port_combobox(headsensor_group)
         app.headsensor_entry.grid(row=0, column=1, padx=8, pady=8, sticky="w")
 
         app.headsensor_status = ttk.Label(headsensor_group, font=Fonts.BODY_SMALL_BOLD)
@@ -310,7 +379,7 @@ def build(app):
 
         ttk.Label(stage_group, text="Stage COM:",
                  style='SetupLabel.TLabel').grid(row=1, column=0, sticky="e", padx=8, pady=6)
-        app.stage_com_entry = ttk.Entry(stage_group, width=15, font=Fonts.BODY)
+        app.stage_com_entry = _port_combobox(stage_group)
         app.stage_com_entry.grid(row=1, column=1, sticky="w", padx=8, pady=6)
 
         app.stage_status = ttk.Label(stage_group, font=Fonts.BODY_SMALL_BOLD)
@@ -339,7 +408,8 @@ def build(app):
                 # Refresh slot buttons in Live View if builder exists
                 if hasattr(app, '_refresh_stage_slots_ui'):
                     app._refresh_stage_slots_ui()
-                messagebox.showinfo("Stage", f"Loaded {len(app.stage.slots)} slots:\n" + "\n".join(f"  - {n}" for n in slot_names))
+                app.status.toast(f"Stage: {len(app.stage.slots)} slots loaded ({', '.join(slot_names)}); "
+                                 "the buttons are in Live View")
             else:
                 messagebox.showerror("Stage", f"Failed to load stage config:\n{cfg_path}")
 
@@ -380,490 +450,378 @@ def build(app):
         ttk.Button(stage_btn_frame, text="Test Connect", command=test_stage_connect,
                   style='SetupButton.TButton', width=16).pack(side="left")
 
-        # ============ LASER MANAGEMENT SECTION ============
-        laser_mgmt_group = ttk.LabelFrame(right_col, text="Laser Management",
-                                        style='Setup.TLabelframe')
-        laser_mgmt_group.pack(**card_pack)
+        # ============ LIGHT SOURCES ============
+        # One table for everything about the bench's sources: the controller
+        # and channel each hangs off, its setpoint, and what the laser itself
+        # reports. A setpoint reaches an OBIS laser at once (lit or not) and the
+        # CUBE when it is next armed; every change is saved and the source lists
+        # on the other tabs follow. This replaced a list box, a separate card of
+        # power entries and a dialog that only showed the right values until the
+        # settings file was next read.
+        sources_group = ttk.LabelFrame(right_col, text="Light sources", style='Setup.TLabelframe')
+        sources_group.pack(**card_pack)
 
-        # Info label
-        ttk.Label(laser_mgmt_group, text="Manage available lasers in the system:",
-                 style='SetupLabel.TLabel').pack(anchor="w", padx=8, pady=(0, 6))
+        app._source_reports = {}     # tag -> what the laser last reported (Read from lasers / Apply)
+        tree_columns = ("controller", "setpoint", "reports", "state")
+        tree_frame = ttk.Frame(sources_group)
+        tree_frame.pack(fill="x", padx=8, pady=(2, 6))
+        tree = ttk.Treeview(tree_frame, columns=tree_columns, show="tree headings", selectmode="browse",
+                            height=len(app.laser_configs))
+        tree.heading("#0", text="Source", anchor="w")
+        tree.heading("controller", text="Controller", anchor="w")
+        tree.heading("setpoint", text="Setpoint", anchor="e")
+        tree.heading("reports", text="Laser reports", anchor="w")
+        tree.heading("state", text="State", anchor="w")
+        tree.column("#0", width=logical_px(app, 96), minwidth=logical_px(app, 80), stretch=False, anchor="w")
+        tree.column("controller", width=logical_px(app, 100), minwidth=logical_px(app, 84), stretch=False, anchor="w")
+        tree.column("setpoint", width=logical_px(app, 90), minwidth=logical_px(app, 76), stretch=False, anchor="e")
+        tree.column("reports", width=logical_px(app, 250), minwidth=logical_px(app, 120), stretch=True, anchor="w")
+        tree.column("state", width=logical_px(app, 56), minwidth=logical_px(app, 48), stretch=False, anchor="w")
+        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.pack(side="left", fill="x", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+        app.sources_tree = tree
 
-        # Laser list display with better styling
-        laser_list_frame = ttk.Frame(laser_mgmt_group)
-        laser_list_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        def _report_text(tag):
+            report = app._source_reports.get(tag)
+            config = app.laser_configs.get(tag, {})
+            kind = str(config.get("type", "")).upper()
+            if kind != light_sources.OBIS:
+                return "switch only" if kind == light_sources.RELAY else "set when armed"
+            if not report:
+                return "not read yet"
+            if "error" in report:
+                return f"no answer: {report['error']}"
+            # Apply only learns the setpoint; Read from lasers fills in the rest.
+            parts = []
+            if report.get("max_mw") is not None:
+                parts.append(f"{report.get('min_mw', 0.0):.1f}–{report['max_mw']:.1f} mW")
+            if report.get("setpoint_mw") is not None:
+                parts.append(f"set {report['setpoint_mw']:.1f}")
+            if report.get("on") and report.get("output_mw") is not None:
+                parts.append(f"out {report['output_mw']:.1f} mW")
+            return "  ·  ".join(parts) or "not read yet"
 
-        # Column headers
-        header_frame = ttk.Frame(laser_list_frame)
-        header_frame.pack(fill="x", pady=(0, 2))
-        ttk.Label(header_frame, text="Wavelength",
-                 font=Fonts.BODY_SMALL_BOLD,
-                 foreground=Colors.TEXT_SECONDARY).pack(side="left", padx=(2, 90))
-        ttk.Label(header_frame, text="Type",
-                 font=Fonts.BODY_SMALL_BOLD,
-                 foreground=Colors.TEXT_SECONDARY).pack(side="left", padx=(0, 80))
-        ttk.Label(header_frame, text="Power",
-                 font=Fonts.BODY_SMALL_BOLD,
-                 foreground=Colors.TEXT_SECONDARY).pack(side="left")
+        def _setpoint_text(tag):
+            config = app.laser_configs.get(tag, {})
+            if str(config.get("type", "")).upper() == light_sources.RELAY:
+                return "—"
+            return f"{float(config.get('power_mw', 0.0) or 0.0):.1f} mW"
 
-        # Scrollbar and listbox with increased height
-        list_container = ttk.Frame(laser_list_frame)
-        list_container.pack(fill="both", expand=True)
+        def refresh_sources_table():
+            """Rebuild the rows from the source table; keeps the selection."""
+            selected = tree.selection()
+            keep = selected[0] if selected else None
+            for item in tree.get_children():
+                tree.delete(item)
+            tags = light_sources.sort_tags(app.laser_configs)
+            for tag in tags:
+                config = app.laser_configs[tag]
+                color_tag = f"src_{tag}"
+                tree.tag_configure(color_tag, foreground=source_color(tag))
+                tree.insert("", "end", iid=tag, text=source_label(tag), tags=(color_tag,),
+                            values=(light_sources.describe_controller(config), _setpoint_text(tag),
+                                    _report_text(tag), "on" if tag in app.lit_sources else "off"))
+            tree.configure(height=max(3, min(10, len(tags))))
+            if keep in tags:
+                tree.selection_set(keep)
+            _sync_setpoint_editor()
 
-        laser_scrollbar = ttk.Scrollbar(list_container, orient="vertical")
-        app.laser_listbox = tk.Listbox(list_container, height=6,
-                                       yscrollcommand=laser_scrollbar.set,
-                                       selectmode=tk.SINGLE)
-        style_listbox(app.laser_listbox)
-        laser_scrollbar.config(command=app.laser_listbox.yview)
-        app.laser_listbox.pack(side="left", fill="both", expand=True)
-        laser_scrollbar.pack(side="right", fill="y")
+        # ---- setpoint editor ------------------------------------------------
+        editor = ttk.Frame(sources_group)
+        editor.pack(fill="x", padx=8, pady=(0, 4))
+        app.source_setpoint_label = ttk.Label(editor, text="Setpoint:", style='SetupLabel.TLabel')
+        app.source_setpoint_label.pack(side="left", padx=(0, 6))
+        app.source_setpoint_entry = ttk.Entry(editor, width=9, font=Fonts.BODY, justify="right")
+        app.source_setpoint_entry.pack(side="left")
+        ttk.Label(editor, text="mW", foreground=Colors.TEXT_MUTED, font=Fonts.BODY_SMALL).pack(side="left", padx=(4, 8))
+        app.source_apply_btn = ttk.Button(editor, text="Apply", style='SetupAction.TButton', width=9)
+        app.source_apply_btn.pack(side="left")
+        Tooltip(app.source_apply_btn, "Send this setpoint to the laser now and save it. An OBIS laser takes "
+                                      "it whether it is lit or not and reports the value it accepted.")
+        app.source_read_btn = ttk.Button(editor, text="Read from lasers", style='SetupButton.TButton', width=16)
+        app.source_read_btn.pack(side="right")
+        Tooltip(app.source_read_btn, "Ask every OBIS laser for its power range, setpoint and output. "
+                                     "Needs the OBIS port; Coherent Connection must be closed.")
 
-        # Initialize laser configurations from settings or defaults
-        if not hasattr(app, 'laser_configs'):
-            # Structure: {"wavelength": {"type": "OBIS/CUBE/RELAY", "power": float}}
-            app.laser_configs = {}
-            for laser in DEFAULT_ALL_LASERS:
-                # Assign default types based on wavelength
-                if laser == "377":
-                    laser_type = "CUBE"
-                elif laser in ["517", "Hg_Ar"]:
-                    laser_type = "RELAY"
+        def _selected_tag():
+            selected = tree.selection()
+            return selected[0] if selected and selected[0] in app.laser_configs else None
+
+        def _sync_setpoint_editor(*_event):
+            tag = _selected_tag()
+            entry = app.source_setpoint_entry
+            entry.configure(state="normal")
+            entry.delete(0, "end")
+            if tag is None:
+                app.source_setpoint_label.configure(text="Setpoint:")
+                entry.configure(state="disabled")
+                app.source_apply_btn.state(["disabled"])
+                return
+            kind = str(app.laser_configs[tag].get("type", "")).upper()
+            app.source_setpoint_label.configure(text=f"Setpoint for {source_label(tag)}:")
+            if kind == light_sources.RELAY:
+                entry.insert(0, "—")
+                entry.configure(state="disabled")
+                app.source_apply_btn.state(["disabled"])
+            else:
+                entry.insert(0, f"{app.source_power_mw(tag):.1f}")
+                app.source_apply_btn.state(["!disabled"])
+
+        tree.bind("<<TreeviewSelect>>", _sync_setpoint_editor)
+        tree.bind("<Double-1>", lambda _event: (app.source_setpoint_entry.focus_set(),
+                                               app.source_setpoint_entry.select_range(0, "end")))
+
+        def apply_setpoint(*_event):
+            tag = _selected_tag()
+            if tag is None:
+                return
+            text = app.source_setpoint_entry.get().strip().replace("mW", "").strip()
+            try:
+                power_mw = float(text)
+            except ValueError:
+                messagebox.showerror("Setpoint", f"'{text}' is not a number. Enter the setpoint in mW.")
+                return
+            problems = light_sources.validate_source(tag, app.laser_configs[tag]["type"],
+                                                     app.laser_configs[tag].get("channel"), power_mw,
+                                                     app.laser_configs, replacing=tag)
+            if problems:
+                messagebox.showerror("Setpoint", "\n".join(problems))
+                return
+            report = app._source_reports.get(tag) or {}
+            if report.get("max_mw") and power_mw > float(report["max_mw"]) + 1e-6:
+                if not messagebox.askyesno("Setpoint", f"{source_label(tag)} reported a maximum of "
+                                           f"{float(report['max_mw']):.1f} mW. Send {power_mw:.1f} mW anyway?"):
+                    return
+            app._update_ports_from_ui()
+
+            def _done(accepted_mw):
+                stored = power_mw if accepted_mw is None else float(accepted_mw)
+                app.set_source_power_mw(tag, stored)
+                if accepted_mw is not None and abs(float(accepted_mw) - power_mw) > 0.05:
+                    app.status.toast(f"{source_label(tag)}: the laser accepted {stored:.1f} mW "
+                                     f"(asked {power_mw:.1f} mW)", kind="warning")
                 else:
-                    laser_type = "OBIS"
-                app.laser_configs[laser] = {
-                    "type": laser_type,
-                    "power": DEFAULT_LASER_POWERS.get(laser, 0.01)
-                }
+                    app.status.toast(f"{source_label(tag)} setpoint {stored:.1f} mW")
+                if accepted_mw is not None:
+                    app._source_reports.setdefault(tag, {}).update({"setpoint_mw": float(accepted_mw)})
+                save_settings_silently()
+                refresh_sources_table()
 
-        # Populate listbox with formatted laser info
-        def format_laser_display(wavelength):
-            """Format laser for display in listbox with proper alignment."""
-            config = app.laser_configs.get(wavelength, {})
-            laser_type = config.get("type", "OBIS")
-            power = config.get("power", 0.01)
-            # Fixed-width formatting for alignment
-            wl_str = f"{source_label(wavelength):>9}"
-            type_str = f"{laser_type:<6}"
-            power_str = f"{power:>8.2f} mW"
-            return f"{wl_str}  │  {type_str}  │  {power_str}"
+            def _failed(exc):
+                refresh_sources_table()
+                _post_error(f"Setpoint {source_label(tag)}", exc)
 
-        for laser in sorted(app.laser_configs.keys(),
-                           key=lambda x: float(x) if x.replace('.','').isdigit() else 999):
-            app.laser_listbox.insert(tk.END, format_laser_display(laser))
-            # Tint the row towards its own wavelength; the text still says which.
-            app.laser_listbox.itemconfigure(tk.END, foreground=source_color(laser))
+            run_in_worker(app, lambda: app.apply_source_power(tag, power_mw), on_done=_done,
+                          on_error=_failed, busy=(app.source_apply_btn,), name=f"setpoint-{tag}")
 
-        # Buttons for laser management
-        laser_button_frame = ttk.Frame(laser_mgmt_group)
-        laser_button_frame.pack(fill="x", padx=8, pady=(0, 8))
+        app.source_apply_btn.configure(command=apply_setpoint)
+        app.source_setpoint_entry.bind("<Return>", apply_setpoint)
 
-        def add_laser():
-            """Add a new laser with custom dialog for wavelength, type, and power."""
-            # Create custom dialog
+        def read_from_lasers():
+            tags = [tag for tag in light_sources.sort_tags(app.laser_configs)
+                    if str(app.laser_configs[tag].get("type", "")).upper() == light_sources.OBIS]
+            if not tags:
+                app.status.toast("No OBIS source is configured", kind="warning")
+                return
+            app._update_ports_from_ui()
+
+            def _work():
+                reports = {}
+                for tag in tags:
+                    try:
+                        reports[tag] = app.read_source_report(tag)
+                    except Exception as exc:
+                        reports[tag] = {"error": str(exc)}
+                return reports
+
+            def _done(reports):
+                app._source_reports.update(reports)
+                failed = [tag for tag, report in reports.items() if "error" in report]
+                refresh_sources_table()
+                if failed:
+                    first = reports[failed[0]]["error"]
+                    app.status.toast(f"No answer from {', '.join(source_label(t) for t in failed)}: {first}",
+                                     kind="warning")
+                else:
+                    app.status.toast(f"Read {len(reports)} OBIS source(s)", kind="success")
+
+            run_in_worker(app, _work, on_done=_done, on_error=lambda exc: _post_error("Read from lasers", exc),
+                          busy=(app.source_read_btn,), name="read-sources")
+
+        app.source_read_btn.configure(command=read_from_lasers)
+
+        # ---- add / remove ---------------------------------------------------
+        actions = ttk.Frame(sources_group)
+        actions.pack(fill="x", padx=8, pady=(4, 2))
+
+        def add_source():
+            """A small form; problems are shown on it, not in a chain of message boxes."""
             dialog = tk.Toplevel(app)
-            dialog.title("Add New Laser")
+            dialog.title("Add light source")
             dialog.transient(app)
             dialog.resizable(False, False)
             dialog.grab_set()
-
-            # Set icon if available
             try:
                 dialog.iconbitmap(get_resource_path("sciglob_symbol.ico"))
             except Exception:
                 pass
+            body = ttk.Frame(dialog, padding=Spacing.PAD_XL, style="Surface.TFrame")
+            body.pack(fill="both", expand=True)
+            ttk.Label(body, text="Add light source", font=Fonts.H3).grid(row=0, column=0, columnspan=3,
+                                                                           sticky="w", pady=(0, 12))
+            body.columnconfigure(1, weight=1)
 
-            # Configure dialog style
-            dialog_frame = ttk.Frame(dialog, padding=Spacing.PAD_XL)
-            dialog_frame.pack(fill="both", expand=True)
+            ttk.Label(body, text="Wavelength (nm)").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 12))
+            wl_entry = ttk.Entry(body, width=12, font=Fonts.BODY)
+            wl_entry.grid(row=1, column=1, sticky="w", pady=4)
+            ttk.Label(body, text="e.g. 561", foreground=Colors.TEXT_MUTED,
+                      font=Fonts.CAPTION).grid(row=1, column=2, sticky="w", padx=(8, 0))
 
-            # Title
-            title_label = ttk.Label(dialog_frame, text="Add New Laser Configuration",
-                                   font=Fonts.H3)
-            title_label.pack(pady=(0, 20))
+            ttk.Label(body, text="Controller").grid(row=2, column=0, sticky="w", pady=4, padx=(0, 12))
+            kind_var = tk.StringVar(value=light_sources.OBIS)
+            kind_combo = ttk.Combobox(body, textvariable=kind_var, values=list(light_sources.SOURCE_TYPES),
+                                      state="readonly", width=10, font=Fonts.BODY)
+            kind_combo.grid(row=2, column=1, sticky="w", pady=4)
+            kind_hint = ttk.Label(body, text="", foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION)
+            kind_hint.grid(row=2, column=2, sticky="w", padx=(8, 0))
 
-            # Wavelength field
-            wl_frame = ttk.Frame(dialog_frame)
-            wl_frame.pack(fill="x", pady=8)
-            ttk.Label(wl_frame, text="Wavelength (nm):",
-                     font=Fonts.BODY).pack(side="left", padx=(0, 12))
-            wl_entry = ttk.Entry(wl_frame, width=15, font=Fonts.BODY)
-            wl_entry.pack(side="left")
-            wl_entry.insert(0, "532")  # Default value
-            ttk.Label(wl_frame, text="e.g., 405, 532, 638",
-                     foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION).pack(side="left", padx=(8, 0))
+            ttk.Label(body, text="Channel").grid(row=3, column=0, sticky="w", pady=4, padx=(0, 12))
+            channel_var = tk.StringVar(value="1")
+            channel_spin = ttk.Spinbox(body, textvariable=channel_var, from_=1, to=6, width=5, font=Fonts.BODY)
+            channel_spin.grid(row=3, column=1, sticky="w", pady=4)
+            channel_hint = ttk.Label(body, text="", foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION)
+            channel_hint.grid(row=3, column=2, sticky="w", padx=(8, 0))
 
-            # Type selection
-            type_frame = ttk.Frame(dialog_frame)
-            type_frame.pack(fill="x", pady=8)
-            ttk.Label(type_frame, text="Laser Type:",
-                     font=Fonts.BODY).pack(side="left", padx=(0, 32))
-            type_var = tk.StringVar(value="OBIS")
-            type_combo = ttk.Combobox(type_frame, textvariable=type_var,
-                                     values=["OBIS", "CUBE", "RELAY"],
-                                     state="readonly", width=12,
-                                     font=Fonts.BODY)
-            type_combo.pack(side="left")
+            ttk.Label(body, text="Setpoint (mW)").grid(row=4, column=0, sticky="w", pady=4, padx=(0, 12))
+            power_entry = ttk.Entry(body, width=12, font=Fonts.BODY)
+            power_entry.insert(0, "10.0")
+            power_entry.grid(row=4, column=1, sticky="w", pady=4)
+            power_hint = ttk.Label(body, text="milliwatts", foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION)
+            power_hint.grid(row=4, column=2, sticky="w", padx=(8, 0))
 
-            # Power field
-            power_frame = ttk.Frame(dialog_frame)
-            power_frame.pack(fill="x", pady=8)
-            ttk.Label(power_frame, text="Power (mW):",
-                     font=Fonts.BODY).pack(side="left", padx=(0, 35))
-            power_entry = ttk.Entry(power_frame, width=15, font=Fonts.BODY)
-            power_entry.pack(side="left")
-            power_entry.insert(0, "30.0")  # Default value
-            ttk.Label(power_frame, text="milliwatts",
-                     foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION).pack(side="left", padx=(8, 0))
+            problem = ttk.Label(body, text="", foreground=Colors.DANGER, font=Fonts.BODY_SMALL,
+                                wraplength=logical_px(app, 360), justify="left")
+            problem.grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
-            # Info text
-            info_text = (
-                "Configure laser wavelength, type, and power.\n"
-                "OBIS: Multi-channel laser controller\n"
-                "CUBE: Single laser unit\n"
-                "RELAY: Relay-controlled lasers"
-            )
-            info_label = ttk.Label(dialog_frame, text=info_text,
-                                  foreground=Colors.TEXT_SECONDARY, font=Fonts.CAPTION,
-                                  justify="left")
-            info_label.pack(pady=(12, 0))
+            def _on_kind(*_args):
+                kind = kind_var.get()
+                used = {int(cfg["channel"]) for cfg in app.laser_configs.values()
+                        if str(cfg.get("type", "")).upper() == kind and cfg.get("channel")}
+                free = []
+                if kind == light_sources.OBIS:
+                    kind_hint.configure(text="Coherent laser box, by slot")
+                    channel_spin.configure(from_=1, to=6, state="normal")
+                    power_entry.configure(state="normal")
+                    free = [c for c in light_sources.OBIS_CHANNELS if c not in used]
+                    channel_hint.configure(text=f"slot 1–6; free: {', '.join(map(str, free)) or 'none'}")
+                elif kind == light_sources.RELAY:
+                    kind_hint.configure(text="switched by the relay board")
+                    channel_spin.configure(from_=1, to=4, state="normal")
+                    power_entry.configure(state="normal")
+                    free = [c for c in light_sources.RELAY_CHANNELS if c not in used]
+                    channel_hint.configure(text=f"relay 1–4; free: {', '.join(map(str, free)) or 'none'}")
+                else:
+                    kind_hint.configure(text="single CUBE laser on its own port")
+                    channel_spin.configure(state="disabled")
+                    power_entry.configure(state="normal")
+                    channel_hint.configure(text="not needed")
+                if kind != light_sources.CUBE and free:
+                    channel_var.set(str(free[0]))
 
-            # Separator before buttons
-            ttk.Separator(dialog_frame, orient="horizontal").pack(fill="x", pady=(16, 12))
+            kind_var.trace_add("write", _on_kind)
+            _on_kind()
 
-            # Buttons with clear labels
-            button_frame = ttk.Frame(dialog_frame)
-            button_frame.pack(pady=(0, 8))
+            result = {"tag": None}
 
-            result = {"confirmed": False, "wavelength": None, "type": None, "power": None}
-
-            def on_confirm():
-                wavelength = wl_entry.get().strip()
-                laser_type = type_var.get()
-                power_str = power_entry.get().strip()
-
+            def on_confirm(*_event):
+                tag = wl_entry.get().strip()
+                kind = kind_var.get()
                 try:
-                    power_value = float(power_str)
+                    channel = int(channel_var.get()) if kind != light_sources.CUBE else None
                 except ValueError:
-                    messagebox.showerror("Invalid Power",
-                                        "Please enter a valid number for power.",
-                                        parent=dialog)
+                    channel = None
+                problems = light_sources.validate_source(tag, kind, channel, power_entry.get().strip(),
+                                                         app.laser_configs)
+                if problems:
+                    problem.configure(text="\n".join(problems))
                     return
-
-                # Validate wavelength
-                try:
-                    float(wavelength)  # Check if it's a valid number
-                except ValueError:
-                    messagebox.showerror("Invalid Wavelength",
-                                        "Please enter a valid number for wavelength (e.g., 405, 532)",
-                                        parent=dialog)
-                    return
-
-                if wavelength in app.laser_configs:
-                    messagebox.showwarning("Duplicate",
-                                          f"Laser {wavelength} nm already exists.",
-                                          parent=dialog)
-                    return
-
-                # Add laser configuration
-                app.laser_configs[wavelength] = {
-                    "type": laser_type,
-                    "power": power_value
-                }
-
-                # Store values before destroying dialog
-                result["confirmed"] = True
-                result["wavelength"] = wavelength
-                result["type"] = laser_type
-                result["power"] = power_str
-
+                app.laser_configs[tag] = {"type": kind, "channel": channel,
+                                          "power_mw": float(power_entry.get().strip())}
+                result["tag"] = tag
                 dialog.destroy()
 
-            def on_cancel():
-                dialog.destroy()
-
-            # Make buttons more prominent with better styling
-            save_btn = ttk.Button(button_frame, text="Save & Add", command=on_confirm,
-                                 style='SetupAction.TButton', width=16)
-            save_btn.pack(side="left", padx=(0, 8))
-
-            cancel_btn = ttk.Button(button_frame, text="Cancel", command=on_cancel,
-                                   style='SetupButton.TButton', width=12)
-            cancel_btn.pack(side="left")
-
-            # Toplevels are outside the tab tree the app harmonises on show.
+            buttons = ttk.Frame(body, style="Surface.TFrame")
+            buttons.grid(row=6, column=0, columnspan=3, sticky="e", pady=(16, 0))
+            ttk.Button(buttons, text="Cancel", command=dialog.destroy,
+                       style='SetupButton.TButton', width=10).pack(side="right")
+            ttk.Button(buttons, text="Add", command=on_confirm,
+                       style='SetupAction.TButton', width=10).pack(side="right", padx=(0, 8))
+            dialog.bind("<Return>", on_confirm)
+            dialog.bind("<Escape>", lambda _event: dialog.destroy())
             dialog.configure(bg=Colors.BG_SURFACE)
-            dialog_frame.configure(style="Surface.TFrame")
             harmonize(dialog, Colors.BG_SURFACE)
-
-            # Sized to its content and centred over the main window.
             center_over(dialog, app, min_width=logical_px(app, 440))
-
-            # Focus on wavelength entry
             wl_entry.focus_set()
-            wl_entry.select_range(0, tk.END)
-
-            # Wait for dialog to close
+            app.add_source_dialog = dialog
             app.wait_window(dialog)
+            app.add_source_dialog = None
 
-            if result["confirmed"]:
-                # Get values from result dictionary (saved before dialog was destroyed)
-                wavelength = result["wavelength"]
-                laser_type = result["type"]
-                power = result["power"]
-
-                LOGGER.info("Adding laser: %s nm (%s, %s mW)", wavelength, laser_type, power)
-
-                # Refresh the laser management display
-                refresh_laser_display()
-
-                # Update available lasers list
-                app.available_lasers = list(app.laser_configs.keys())
-                # Ensure Hg_Ar is always in the list
-                if "Hg_Ar" not in app.available_lasers:
-                    app.available_lasers.append("Hg_Ar")
-                    # Also add to laser_configs if missing
-                    if "Hg_Ar" not in app.laser_configs:
-                        app.laser_configs["Hg_Ar"] = {
-                            "type": "RELAY",
-                            "power": 1.0
-                        }
-                LOGGER.debug("Available lasers: %s", app.available_lasers)
-
-                # Auto-save settings after adding laser
+            tag = result["tag"]
+            if tag is not None:
+                LOGGER.info("Source added: %s (%s)", tag, light_sources.describe_controller(app.laser_configs[tag]))
+                app.rebuild_laser_ui()
                 save_settings_silently()
+                refresh_sources_table()
+                tree.selection_set(tag)
+                app.status.toast(f"{source_label(tag)} added to every tab", kind="success")
 
-                # Rebuild laser checkboxes in other tabs
-                LOGGER.debug("Calling rebuild_laser_ui()")
-                try:
-                    app.rebuild_laser_ui()
-                    LOGGER.debug("rebuild_laser_ui() completed")
-                except Exception as e:
-                    LOGGER.error("Error in rebuild_laser_ui(): %s", e)
-
-
-                messagebox.showinfo("Laser Added",
-                                   f"Laser configuration saved successfully!\n\n"
-                                   f"Wavelength: {wavelength} nm\n"
-                                   f"Type: {laser_type}\n"
-                                   f"Power: {power} mW\n\n"
-                                   f"The laser is now available in all tabs.",
-                                   icon='info')
-
-        def remove_laser():
-            """Remove selected laser wavelength."""
-            selection = app.laser_listbox.curselection()
-            if not selection:
-                messagebox.showwarning("No Selection", "Please select a laser to remove.")
+        def remove_source():
+            tag = _selected_tag()
+            if tag is None:
+                messagebox.showwarning("Remove source", "Select a source in the table first.")
                 return
-
-            idx = selection[0]
-            laser_text = app.laser_listbox.get(idx)
-            # Parse wavelength from display format: "405 nm  │  OBIS  │  5.0 mW"
-            wavelength = laser_text.split("nm")[0].strip()
-
-            # Prevent Hg_Ar from being removed
-            if wavelength == "Hg_Ar":
-                messagebox.showwarning("Cannot Remove",
-                                      "Hg_Ar calibration lamp cannot be removed.\n\n"
-                                      "It is a permanent part of the system.")
+            if tag == light_sources.LAMP_TAG:
+                messagebox.showwarning("Remove source", "The Hg-Ar calibration lamp is part of every bench "
+                                       "and cannot be removed.")
                 return
-
-            if len(app.laser_configs) <= 1:
-                messagebox.showwarning("Cannot Remove", "You must have at least one laser configured.")
+            if len(app.laser_configs) <= 2:
+                messagebox.showwarning("Remove source", "Keep at least one laser besides the lamp.")
                 return
-
-            config = app.laser_configs.get(wavelength, {})
-            laser_type = config.get("type", "OBIS")
-            power = config.get("power", 0.01)
-
-            confirm = messagebox.askyesno("Confirm Removal",
-                                         f"Remove laser configuration?\n\n"
-                                         f"Wavelength: {wavelength} nm\n"
-                                         f"Type: {laser_type}\n"
-                                         f"Power: {power} mW")
-            if confirm:
-                LOGGER.info("Removing laser: %s nm (%s)", wavelength, laser_type)
-
-                del app.laser_configs[wavelength]
-                # Remove power entry if exists
-                if wavelength in app.power_entries:
-                    del app.power_entries[wavelength]
-
-                # Refresh display
-                refresh_laser_display()
-
-                # Update available lasers list
-                app.available_lasers = list(app.laser_configs.keys())
-                # Ensure Hg_Ar is always in the list (never remove it)
-                if "Hg_Ar" not in app.available_lasers:
-                    app.available_lasers.append("Hg_Ar")
-                    # Also add to laser_configs if missing
-                    if "Hg_Ar" not in app.laser_configs:
-                        app.laser_configs["Hg_Ar"] = {
-                            "type": "RELAY",
-                            "power": 1.0
-                        }
-                LOGGER.debug("Available lasers: %s", app.available_lasers)
-
-                # Auto-save settings after removing laser
-                save_settings_silently()
-
-                # Rebuild laser checkboxes in other tabs
-                LOGGER.debug("Calling rebuild_laser_ui()")
-                try:
-                    app.rebuild_laser_ui()
-                    LOGGER.debug("rebuild_laser_ui() completed")
-                except Exception as e:
-                    LOGGER.error("Error in rebuild_laser_ui(): %s", e)
-
-
-                messagebox.showinfo("Laser Removed",
-                                   f"Laser configuration removed and saved!\n\n"
-                                   f"Removed: {wavelength} nm ({laser_type})\n\n"
-                                   f"The laser has been removed from all tabs.",
-                                   icon='info')
-
-        def refresh_laser_display():
-            """Refresh the laser listbox and power entries."""
-            # Clear and repopulate listbox
-            app.laser_listbox.delete(0, tk.END)
-            for wavelength in sorted(app.laser_configs.keys(),
-                                   key=lambda x: float(x) if x.replace('.','').isdigit() else 999):
-                app.laser_listbox.insert(tk.END, format_laser_display(wavelength))
-                app.laser_listbox.itemconfigure(tk.END, foreground=source_color(wavelength))
-
-            # Rebuild power configuration section
-            rebuild_power_entries()
-
-        ttk.Button(laser_button_frame, text="+ Add Laser", command=add_laser,
-                  style='SetupButton.TButton', width=16).pack(side="left", padx=(0, 6))
-        ttk.Button(laser_button_frame, text="- Remove Laser", command=remove_laser,
-                  style='SetupButton.TButton', width=16).pack(side="left")
-
-        ttk.Label(laser_mgmt_group, text="Tip: Laser changes are saved automatically when you add or remove lasers.",
-                 foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION_ITALIC).pack(anchor="w", padx=8, pady=(6, 4))
-
-        # ============ LASER POWER CONFIGURATION ============
-        power_group = ttk.LabelFrame(right_col, text="Laser Power Configuration",
-                                    style='Setup.TLabelframe')
-        power_group.pack(**card_pack)
-
-        app.power_entries = {}
-        app.power_group_frame = power_group  # Store reference for rebuilding
-
-        def rebuild_power_entries(force=False, width=None):
-            """Rebuild power entry widgets based on current laser configurations."""
-            available_width = width or power_group.winfo_width() or 0
-            column_groups = 1 if available_width < logical_px(app, 640) or len(app.laser_configs) <= 4 else 2
-            if (
-                not force
-                and getattr(app, "_setup_power_column_groups", None) == column_groups
-                and getattr(app, "_setup_power_laser_count", None) == len(app.laser_configs)
-            ):
+            if tag in app.lit_sources:
+                messagebox.showwarning("Remove source", f"{source_label(tag)} is on. Switch it off first.")
                 return
+            config = app.laser_configs[tag]
+            if not messagebox.askyesno("Remove source",
+                                       f"Remove {source_label(tag)} ({light_sources.describe_controller(config)}) "
+                                       f"from the bench?\n\nIt disappears from Live View, Check Resolution and "
+                                       f"Measurements. Add it again later if needed."):
+                return
+            LOGGER.info("Source removed: %s", tag)
+            del app.laser_configs[tag]
+            app._source_reports.pop(tag, None)
+            app.rebuild_laser_ui()
+            save_settings_silently()
+            refresh_sources_table()
+            app.status.toast(f"{source_label(tag)} removed", kind="success")
 
-            app._setup_power_column_groups = column_groups
-            app._setup_power_laser_count = len(app.laser_configs)
+        app.add_source = add_source
+        app.remove_source = remove_source
+        app.refresh_sources_table = refresh_sources_table
+        ttk.Button(actions, text="+ Add source…", command=add_source,
+                   style='SetupButton.TButton', width=15).pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="− Remove", command=remove_source,
+                   style='SetupButton.TButton', width=11).pack(side="left")
+        ttk.Label(sources_group,
+                  text="OBIS setpoints reach the laser at once; the CUBE takes its power when next armed; "
+                       "relay sources only switch. Changes are saved automatically.",
+                  foreground=Colors.TEXT_MUTED, font=Fonts.CAPTION_ITALIC,
+                  wraplength=logical_px(app, 640), justify="left").pack(anchor="w", padx=8, pady=(4, 6))
 
-            # Preserve anything the operator has typed but not yet saved so a
-            # resize-triggered rebuild never discards their edits.
-            typed_values = {}
-            for wavelength, entry in getattr(app, "power_entries", {}).items():
-                try:
-                    typed_values[wavelength] = entry.get()
-                except tk.TclError:
-                    pass
-
-            # Clear existing widgets
-            for widget in power_group.winfo_children():
-                widget.destroy()
-
-            app.power_entries = {}
-
-            # Sort lasers numerically
-            sorted_lasers = sorted(app.laser_configs.keys(),
-                                  key=lambda x: float(x) if x.replace('.','').isdigit() else 999)
-            lasers_per_group = max(1, (len(sorted_lasers) + column_groups - 1) // column_groups)
-            total_columns = column_groups * 4
-
-            # Groups sit at the left edge and a trailing spacer column takes the
-            # slack; weights on the label columns used to float the groups
-            # towards the middle of the card.
-            for col in range(9):
-                power_group.columnconfigure(col, weight=0)
-            power_group.columnconfigure(total_columns, weight=1)
-
-            header_row = 0
-            for group_index in range(column_groups):
-                col_offset = group_index * 4
-                ttk.Label(power_group, text="Wavelength",
-                         font=Fonts.BODY_SMALL_BOLD,
-                         foreground=Colors.TEXT_SECONDARY).grid(row=header_row, column=col_offset, sticky="e", padx=(8, 4), pady=(2, 8))
-                ttk.Label(power_group, text="Type",
-                         font=Fonts.BODY_SMALL_BOLD,
-                         foreground=Colors.TEXT_SECONDARY).grid(row=header_row, column=col_offset + 1, sticky="w", padx=(4, 0), pady=(2, 8))
-                ttk.Label(power_group, text="Power",
-                         font=Fonts.BODY_SMALL_BOLD,
-                         foreground=Colors.TEXT_SECONDARY).grid(row=header_row, column=col_offset + 2, sticky="w", padx=(0, 0), pady=(2, 8))
-
-            max_row_used = header_row
-            for idx, wavelength in enumerate(sorted_lasers):
-                config = app.laser_configs[wavelength]
-                laser_type = config.get("type", "OBIS")
-                power = config.get("power", 0.01)
-
-                row = (idx % lasers_per_group) + 1
-                col_offset = (idx // lasers_per_group) * 4
-                max_row_used = max(max_row_used, row)
-
-                # Wavelength label
-                label_text = source_label(wavelength)
-                label = ttk.Label(power_group, text=label_text,
-                                 style='SetupLabel.TLabel',
-                                 font=Fonts.BODY_BOLD,
-                                 foreground=source_color(wavelength))
-                label.grid(row=row, column=col_offset, sticky="e", padx=(8, 4), pady=4)
-
-                # Type pill: filled, so the controller a source hangs off is
-                # readable at a glance instead of being bracketed grey text.
-                kinds = {"OBIS": "info", "CUBE": "warning", "RELAY": "success"}
-                type_badge = badge(power_group, laser_type,
-                                   kind=kinds.get(laser_type, "neutral"))
-                type_badge.grid(row=row, column=col_offset+1, sticky="w", padx=(0, 8), pady=4)
-
-                # Power entry
-                e = ttk.Entry(power_group, width=10, font=Fonts.BODY)
-                e.insert(0, typed_values.get(wavelength, str(power)))
-                e.grid(row=row, column=col_offset+2, sticky="w", padx=(0, 4), pady=4)
-                app.power_entries[wavelength] = e
-
-                # Unit label
-                ttk.Label(power_group, text="mW", foreground=Colors.TEXT_MUTED,
-                         font=Fonts.BODY_SMALL).grid(
-                    row=row, column=col_offset+3, sticky="w", padx=0, pady=4)
-
-            # Add separator line
-            separator_row = max_row_used + 1
-            ttk.Separator(power_group, orient="horizontal").grid(
-                row=separator_row, column=0, columnspan=total_columns + 1, sticky="ew", padx=8, pady=(12, 8))
-
-            # Add info label at bottom after separator
-            info_row = separator_row + 1
-            info_frame = ttk.Frame(power_group)
-            info_frame.grid(row=info_row, column=0, columnspan=total_columns + 1, sticky="ew", padx=8, pady=(0, 8))
-
-            ttk.Label(info_frame,
-                     text="Power values are the laser-control setpoints.",
-                     foreground=Colors.TEXT_MUTED,
-                     font=Fonts.CAPTION_ITALIC).pack(side="left")
-
-            # These rows are rebuilt long after the tab was tinted, so re-run
-            # the pass; otherwise they come back as grey blocks on the card.
-            harmonize(power_group, Colors.BG_SURFACE)
-
-        # Initial build of power entries; _layout_setup re-flows them for the column width.
-        rebuild_power_entries(force=True)
+        # The table follows every switch (on/off) and every edit of the source table.
+        app._source_listeners.append(refresh_sources_table)
+        refresh_sources_table()
 
         # ============ ADVANCED (BENCH-VALIDATED) OPTIONS ============
         # Collapsed by default: three bench-only options took a card's worth of
@@ -941,25 +899,28 @@ def build(app):
                 columns.columnconfigure(1, weight=0)
                 column_width = content_width
             _layout_ports_and_headsensor(column_width)
-            rebuild_power_entries(width=column_width - 2 * Spacing.GROUP_PAD)
 
         bind_debounced_configure(scrollable.canvas, _layout_setup)
 
 
     def refresh_ports():
+        """List the ports in every dropdown. Fields are not overwritten: which
+        port is the laser box and which the relay board is the operator's call,
+        and the old first-four fill put arbitrary ports into them."""
         if serial is None:
             messagebox.showwarning("Ports", "pyserial is not installed.")
             return
-        ports = list(serial.tools.list_ports.comports())
-        names = [p.device for p in ports]
-        if not names:
-            app.status.toast("No serial ports detected", kind="warning")
-            return
-        entries = (app.obis_entry, app.cube_entry, app.relay_entry, app.headsensor_entry)
-        for entry, name in zip(entries, names):
-            entry.delete(0, "end")
-            entry.insert(0, name)
-        app.status.toast(f"Detected {len(names)} serial port(s); first four filled in, adjust as needed")
+
+        def _done(ports):
+            _ports_found(ports)
+            if not ports:
+                app.status.toast("No serial ports detected", kind="warning")
+                return
+            names = ", ".join(f"{device} ({description})" if description else device
+                              for device, description in ports)
+            app.status.toast(f"{len(ports)} serial port{'s' if len(ports) != 1 else ''}: {names}")
+
+        run_in_worker(app, _enumerate_ports, on_done=_done, name="serial-ports")
 
 
     def test_com_connect():
@@ -1142,6 +1103,13 @@ def build(app):
         """Discover + connect on a worker thread; DLL loading and USB enumeration take seconds."""
         if getattr(app, "_connect_in_progress", False):
             return
+        busy = app.acq.busy_reason()
+        if busy:
+            messagebox.showwarning("Connect", busy)
+            return
+        if app.spec is not None:
+            # A second Connect used to drop the live backend without releasing its DLL handle.
+            disconnect_spectrometer()
         requested_type = app.spec_type_var.get().strip() or "Auto"
         dll = app.dll_entry.get().strip()
         if not dll:
@@ -1174,6 +1142,7 @@ def build(app):
             resolved_type, spec, selected_device = payload
             app._connect_in_progress = False
             app.spec = spec
+            app.eeprom_current_devconfig = None   # an EEPROM read belongs to one device only
             # Allow saturated data through so the UI can clamp & display it
             spec.abort_on_saturation = False
             app.spec_backend = resolved_type
@@ -1234,9 +1203,20 @@ def build(app):
         )
 
     def disconnect_spectrometer():
+        """Stop whatever is driving the device, let its thread finish, then release the backend."""
         try:
             app.stop_live()
             app.stop_measure()
+            running = getattr(app, "check_res_running", None)
+            if running is not None:
+                running.clear()
+            app.request_spectrometer_stop()
+            # The acquisition threads call measure()/set_it() on this handle:
+            # give them a moment to leave before the DLL is torn down under them.
+            for attr in ("live_thread", "measure_thread", "check_res_thread"):
+                worker = getattr(app, attr, None)
+                if worker is not None and worker.is_alive():
+                    worker.join(timeout=2.0)
             if app.spec:
                 try:
                     app.spec.disconnect()
@@ -1244,6 +1224,8 @@ def build(app):
                     pass
             app.spec = None
             app.spec_backend = None
+            app.eeprom_current_devconfig = None
+            app.acq.release(None)
             app.install_laser_controller_for_backend(None)
             app.spec_status.config(text="● Disconnected", foreground=Colors.DANGER)
             app.refresh_instrument_chip()
@@ -1260,13 +1242,8 @@ def build(app):
         app.filterwheel.configure_port(app.hw.com_ports["HEADSENSOR"])
 
     def _get_power(tag: str) -> float:
-        try:
-            e = app.power_entries.get(tag)
-            if e is None:
-                return DEFAULT_LASER_POWERS.get(tag, 0.01)
-            return float(e.get().strip())
-        except (ValueError, AttributeError):
-            return DEFAULT_LASER_POWERS.get(tag, 0.01)
+        """The setpoint for a source in mW, from the source table (not a widget: safe from any thread)."""
+        return app.source_power_mw(tag)
 
     def save_settings_silently():
         """Save all settings without showing a message box."""
@@ -1275,16 +1252,8 @@ def build(app):
         app.hw.spectrometer_type = app.spec_type_var.get().strip() or "Auto"
         app.stage_config_path = app.stage_config_entry.get().strip()
 
-        # Update laser configurations with current power values
-        for wavelength, e in app.power_entries.items():
-            try:
-                power_value = float(e.get().strip())
-                if wavelength in app.laser_configs:
-                    app.laser_configs[wavelength]["power"] = power_value
-                # Also update legacy laser_power dict for compatibility
-                app.hw.laser_power[wavelength] = power_value
-            except Exception:
-                pass
+        # The source table is the record; laser_power (mW) is kept for older readers.
+        app.hw.laser_power = {tag: float(cfg.get("power_mw", 0.0) or 0.0) for tag, cfg in app.laser_configs.items()}
 
         payload = {
             "spectrometer_type": app.hw.spectrometer_type,
@@ -1293,6 +1262,7 @@ def build(app):
             "com_ports": app.hw.com_ports,
             "laser_power": app.hw.laser_power,
             "laser_configs": app.laser_configs,
+            "laser_configs_version": light_sources.SETTINGS_VERSION,
             "available_lasers": app.available_lasers,
             "stage_config_path": app.stage_config_path,
             # Bench-validated speed options (all default to the v3.3 behaviour).
@@ -1314,17 +1284,17 @@ def build(app):
                 pass
 
     def save_settings():
-        """Save all settings including laser configurations."""
-        save_settings_silently()
+        """Save all settings including laser configurations.
+
+        Ports and the DLL path are read from the form on every use, so no
+        restart is needed (the old dialog said one was). A toast replaces it.
+        """
         try:
-            messagebox.showinfo("Settings Saved",
-                              f"Settings saved successfully!\n\n"
-                              f"File: {SETTINGS_FILE}\n"
-                              f"Lasers configured: {len(app.laser_configs)}\n\n"
-                              f"Note: Restart required for COM port and DLL changes.",
-                              icon='info')
+            save_settings_silently()
         except Exception as e:
             messagebox.showerror("Settings", str(e))
+            return
+        app.status.toast(f"Settings saved ({len(app.laser_configs)} sources) to {os.path.basename(SETTINGS_FILE)}")
 
     def load_settings_into_ui():
         """Load settings from file into UI, including laser configurations."""
@@ -1337,9 +1307,7 @@ def build(app):
             app.cube_entry.delete(0, "end"); app.cube_entry.insert(0, DEFAULT_COM_PORTS["CUBE"])
             app.relay_entry.delete(0, "end"); app.relay_entry.insert(0, DEFAULT_COM_PORTS["RELAY"])
             app.headsensor_entry.delete(0, "end"); app.headsensor_entry.insert(0, DEFAULT_COM_PORTS["HEADSENSOR"])
-            for wavelength, e in app.power_entries.items():
-                config = app.laser_configs.get(wavelength, {})
-                e.delete(0, "end"); e.insert(0, str(config.get("power", 0.01)))
+            app.rebuild_laser_ui()
 
         if not os.path.isfile(SETTINGS_FILE):
             apply_defaults()
@@ -1386,35 +1354,27 @@ def build(app):
             app.relay_entry.delete(0, "end"); app.relay_entry.insert(0, cp.get("RELAY", DEFAULT_COM_PORTS["RELAY"]))
             app.headsensor_entry.delete(0, "end"); app.headsensor_entry.insert(0, cp.get("HEADSENSOR", DEFAULT_COM_PORTS["HEADSENSOR"]))
 
-            # Load laser configurations (new format) or available_lasers (legacy format)
-            if "laser_configs" in obj:
-                # New format with full configurations
-                app.laser_configs = obj["laser_configs"]
-                LOGGER.info("Loaded laser configurations: %s", list(app.laser_configs.keys()))
+            # The source table. Files from 3.4.7 and earlier carry no version:
+            # their OBIS setpoints were in watts and their channels implied.
+            if isinstance(obj.get("laser_configs"), dict):
+                raw_sources = obj["laser_configs"]
             elif "available_lasers" in obj:
-                # Legacy format - convert to new format
-                app.laser_configs = {}
-                lp = obj.get("laser_power", DEFAULT_LASER_POWERS)
-                for wavelength in obj["available_lasers"]:
-                    # Assign default types based on wavelength
-                    if wavelength == "377":
-                        laser_type = "CUBE"
-                    elif wavelength in ["517", "Hg_Ar"]:
-                        laser_type = "RELAY"
-                    else:
-                        laser_type = "OBIS"
-                    app.laser_configs[wavelength] = {
-                        "type": laser_type,
-                        "power": lp.get(wavelength, DEFAULT_LASER_POWERS.get(wavelength, 0.01))
-                    }
-                LOGGER.info("Converted legacy laser list: %s", list(app.laser_configs.keys()))
-
-            # Update power entries with loaded values
-            for wavelength, e in app.power_entries.items():
-                if wavelength in app.laser_configs:
-                    power = app.laser_configs[wavelength].get("power", 0.01)
-                    e.delete(0, "end")
-                    e.insert(0, str(power))
+                # Older still: a list of tags plus a power dict.
+                defaults = light_sources.default_sources()
+                powers = obj.get("laser_power", {}) if isinstance(obj.get("laser_power"), dict) else {}
+                raw_sources = {}
+                for tag in obj["available_lasers"]:
+                    base = defaults.get(str(tag), {"type": "OBIS"})
+                    raw_sources[str(tag)] = {"type": base["type"],
+                                             "power": powers.get(str(tag), base.get("power_mw", 0.0))}
+            else:
+                raw_sources = None
+            if raw_sources is not None:
+                app.laser_configs = light_sources.load_sources(raw_sources, obj.get("laser_configs_version"))
+                LOGGER.info("Loaded %d light sources: %s", len(app.laser_configs),
+                            ", ".join(light_sources.sort_tags(app.laser_configs)))
+            # Every source list (Setup's table, the checkboxes, the run checklist) follows the file.
+            app.rebuild_laser_ui()
 
             # Bench-validated speed options; unknown keys are ignored.
             flags = obj.get("measurement_flags", {})
@@ -1516,3 +1476,8 @@ def build(app):
 
     # Call the UI builder
     _build_setup_tab()
+    # The port dropdowns fill in a moment after the window is up.
+    try:
+        app.after(1500, refresh_port_lists_async)
+    except tk.TclError:
+        pass

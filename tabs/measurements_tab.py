@@ -15,13 +15,15 @@ from services.measurement_orchestrator import (
     MeasurementOrchestratorCallbacks,
     MeasurementOrchestratorConfig,
 )
+from services import light_sources
 from services.run_progress import source_label
 from .run_progress import RunProgressPanel
 from .ui_utils import ScrollableFrame, ThrottledRedraw, Tooltip, bind_debounced_configure, center_over
 
 from .theme import (Colors, Fonts, Spacing, bind_figure_margins, configure_matplotlib_style,
-                    logical_px, make_run_button, plot_title_font, relax_canvas_size,
-                    source_style, style_legend, style_listbox, empty_state_text)
+                    control_strip_height, fit_strip_to_content, logical_px, make_run_button,
+                    plot_title_font, relax_canvas_size, source_style, style_legend, style_listbox,
+                    empty_state_text)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -238,10 +240,14 @@ def build(app):
 
         app.measure_vars = {}
         measure_checkbuttons = []
-        # All lasers in ascending order (including Hg_Ar)
-        all_lasers = app.laser_tags()
+        layout_state = {"panel_width": None}
 
         preset_state = {"applying": False}
+
+        def _preset_tags(preset):
+            """The tags a preset selects; None in the preset means every configured source."""
+            tags = preset.get("lasers")
+            return list(app.measure_vars) if tags is None else list(tags)
 
         def on_laser_change(*args):
             """When user manually changes lasers, switch to Custom preset."""
@@ -250,7 +256,7 @@ def build(app):
             if hasattr(app, 'preset_var') and app.preset_var.get() != "Custom":
                 # Check if current selection matches the active preset
                 preset = app.measurement_presets.get(app.preset_var.get(), {})
-                selected_lasers = preset.get("lasers", [])
+                selected_lasers = _preset_tags(preset)
 
                 # Get currently selected lasers
                 current_selection = [tag for tag, var in app.measure_vars.items() if var.get()]
@@ -259,18 +265,35 @@ def build(app):
                 if set(current_selection) != set(selected_lasers):
                     app.preset_var.set("Custom")
 
-        # Create horizontal layout for laser checkboxes (2 rows) - starting from row 2
-        for i, tag in enumerate(all_lasers):
-            v = tk.BooleanVar(value=True)  # Default all selected
-            label_text = source_label(tag)
-            chk = ttk.Checkbutton(laser_frame, text=label_text, variable=v,
-                                 style=source_style(laser_frame, tag,
-                                                    'Large.TCheckbutton'))
-            chk.grid(row=(i // 4) + 2, column=i % 4, padx=8, pady=3, sticky="w")
-            app.measure_vars[tag] = v
-            measure_checkbuttons.append(chk)
-            # Trace changes to laser checkboxes
-            v.trace_add("write", on_laser_change)
+        def _build_source_checks():
+            """One checkbox per configured source, in wavelength order.
+
+            Rebuilt when Setup adds or removes a source (and after the settings
+            file is read at startup): a source removed from the bench must not
+            stay ticked here and drive an empty channel. Ticks survive for the
+            sources that remain; a new source starts ticked like the others.
+            """
+            previous = {tag: var.get() for tag, var in app.measure_vars.items()}
+            for chk in measure_checkbuttons:
+                chk.destroy()
+            measure_checkbuttons.clear()
+            app.measure_vars.clear()
+            for i, tag in enumerate(app.laser_tags()):
+                v = tk.BooleanVar(master=app, value=previous.get(tag, True))
+                chk = ttk.Checkbutton(laser_frame, text=source_label(tag), variable=v,
+                                      style=source_style(laser_frame, tag, 'Large.TCheckbutton'))
+                chk.grid(row=(i // 4) + 2, column=i % 4, padx=8, pady=3, sticky="w")
+                app.measure_vars[tag] = v
+                measure_checkbuttons.append(chk)
+                v.trace_add("write", on_laser_change)
+            if layout_state["panel_width"]:
+                _layout_laser_checkbuttons(layout_state["panel_width"])
+            refresh_summary = getattr(app, "_refresh_auto_it_summary", None)
+            if callable(refresh_summary):
+                refresh_summary()
+
+        _build_source_checks()
+        app._laser_ui_rebuilders.append(_build_source_checks)
 
 
         # === MIDDLE LEFT: Settings ===
@@ -297,7 +320,7 @@ def build(app):
                 "description": "Fast scan with 405nm and 445nm lasers"
             },
             "Full Spectrum": {
-                "lasers": ["377", "405", "445", "488", "517", "532", "640", "685", "Hg_Ar"],
+                "lasers": None,            # every source configured in Setup
                 "reference_files": [],
                 "description": "All lasers, no reference"
             },
@@ -322,7 +345,7 @@ def build(app):
                 return  # Don't change anything for custom
 
             preset = app.measurement_presets.get(preset_name, {})
-            selected_lasers = preset.get("lasers", [])
+            selected_lasers = _preset_tags(preset)
 
             # Update laser checkboxes without letting on_laser_change see a
             # half-applied selection (which would snap the preset back to Custom).
@@ -398,16 +421,144 @@ def build(app):
 
         app.target_peak_var.trace_add("write", _on_target_peak_change)
 
-        # Auto-IT start - Larger font
-        ttk.Label(settings_grid, text="Auto-IT start (ms):", font=Fonts.BODY_SMALL).grid(
+        # Auto-IT: where the exposure search starts and how far it may move per
+        # frame, per source (a strong 405 nm line and a weak 445 nm line want
+        # different values). Stored in the source table with the setpoints.
+        ttk.Label(settings_grid, text="Auto-IT", font=Fonts.BODY_SMALL_BOLD).grid(
             row=7, column=0, columnspan=2, sticky="w", pady=(0, 2))
-        app.auto_it_entry = ttk.Entry(settings_grid, width=12, font=Fonts.BODY_SMALL)
-        app.auto_it_entry.insert(0, "")
-        app.auto_it_entry.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        app.auto_it_button = ttk.Button(settings_grid, text="Start and step per source…",
+                                        command=lambda: open_auto_it_dialog())
+        app.auto_it_button.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        app.auto_it_summary_label = ttk.Label(settings_grid, text="", font=Fonts.CAPTION,
+                                              foreground=Colors.TEXT_MUTED, justify="left",
+                                              wraplength=logical_px(app, 210))
+        app.auto_it_summary_label.grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 2))
 
-        ttk.Label(settings_grid, text="(Leave blank for defaults)",
-                 font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED).grid(
-            row=9, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        def _default_start(tag):
+            return float(app.DEFAULT_START_IT.get(tag, app.DEFAULT_START_IT["default"]))
+
+        def _refresh_auto_it_summary():
+            custom = [tag for tag in app.laser_tags()
+                      if light_sources.has_auto_it_override(app.laser_configs.get(tag, {}))]
+            if custom:
+                text = "Custom start/step: " + ", ".join(source_label(tag) for tag in custom)
+            else:
+                text = (f"Defaults: start {app.DEFAULT_START_IT['default']:g} ms, "
+                        f"step {app.IT_STEP_UP:g} ms up / {app.IT_STEP_DOWN:g} ms down")
+            app.auto_it_summary_label.configure(text=text)
+
+        app._refresh_auto_it_summary = _refresh_auto_it_summary
+
+        def open_auto_it_dialog():
+            """One row per source: start IT and the largest IT step per frame; blank = default."""
+            from .theme import harmonize, source_color
+
+            dialog = tk.Toplevel(app)
+            dialog.title("Auto-IT per source")
+            dialog.transient(app)
+            dialog.resizable(False, False)
+            dialog.grab_set()
+            try:
+                from app import get_resource_path
+                dialog.iconbitmap(get_resource_path("sciglob_symbol.ico"))
+            except Exception:
+                pass
+            body = ttk.Frame(dialog, padding=Spacing.PAD_XL, style="Surface.TFrame")
+            body.pack(fill="both", expand=True)
+            ttk.Label(body, text="Auto-IT per source", font=Fonts.H3).grid(
+                row=0, column=0, columnspan=5, sticky="w", pady=(0, 4))
+            ttk.Label(body, font=Fonts.BODY_SMALL, foreground=Colors.TEXT_SECONDARY, justify="left",
+                      wraplength=logical_px(app, 460),
+                      text="Start is the first frame's integration time; step is the most the exposure "
+                           "may change per frame while it walks to the target band. Leave a field blank "
+                           "for the default. 640 nm uses its fixed 100 / 500 / 1000 ms ladder.").grid(
+                row=1, column=0, columnspan=5, sticky="w", pady=(0, 10))
+            for column, heading in enumerate(("Source", "Start (ms)", "", "Step (ms)", "")):
+                ttk.Label(body, text=heading, font=Fonts.BODY_SMALL_BOLD,
+                          foreground=Colors.TEXT_SECONDARY).grid(row=2, column=column, sticky="w",
+                                                                  padx=(0, 10), pady=(0, 4))
+            app.auto_it_entries = {}
+            row = 3
+            for tag in app.laser_tags():
+                config = app.laser_configs.get(tag, {})
+                ttk.Label(body, text=source_label(tag), font=Fonts.BODY_BOLD,
+                          foreground=source_color(tag)).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=2)
+                if tag == "640":
+                    ttk.Label(body, text="fixed 100 / 500 / 1000 ms ladder, no auto-IT",
+                              font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED).grid(
+                        row=row, column=1, columnspan=4, sticky="w", pady=2)
+                    row += 1
+                    continue
+                start_entry = ttk.Entry(body, width=8, font=Fonts.BODY, justify="right")
+                start_value = light_sources.auto_it_value(config, "start_it_ms")
+                if start_value is not None:
+                    start_entry.insert(0, f"{start_value:g}")
+                start_entry.grid(row=row, column=1, sticky="w", pady=2)
+                ttk.Label(body, text=f"default {_default_start(tag):g}", font=Fonts.CAPTION,
+                          foreground=Colors.TEXT_MUTED).grid(row=row, column=2, sticky="w", padx=(6, 16))
+                step_entry = ttk.Entry(body, width=8, font=Fonts.BODY, justify="right")
+                step_value = light_sources.auto_it_value(config, "it_step_ms")
+                if step_value is not None:
+                    step_entry.insert(0, f"{step_value:g}")
+                step_entry.grid(row=row, column=3, sticky="w", pady=2)
+                ttk.Label(body, text=f"default {app.IT_STEP_UP:g} up / {app.IT_STEP_DOWN:g} down",
+                          font=Fonts.CAPTION, foreground=Colors.TEXT_MUTED).grid(row=row, column=4, sticky="w", padx=(6, 0))
+                app.auto_it_entries[tag] = (start_entry, step_entry)
+                row += 1
+
+            problem = ttk.Label(body, text="", foreground=Colors.DANGER, font=Fonts.BODY_SMALL,
+                                wraplength=logical_px(app, 460), justify="left")
+            problem.grid(row=row, column=0, columnspan=5, sticky="w", pady=(8, 0))
+
+            def on_save(*_event):
+                problems = []
+                values = {}
+                for tag, (start_entry, step_entry) in app.auto_it_entries.items():
+                    start_ms, step_ms, errors = light_sources.validate_auto_it(start_entry.get(), step_entry.get())
+                    problems.extend(f"{source_label(tag)}: {error}" for error in errors)
+                    values[tag] = (start_ms, step_ms)
+                if problems:
+                    problem.configure(text="\n".join(problems))
+                    return
+                for tag, (start_ms, step_ms) in values.items():
+                    config = app.laser_configs.get(tag)
+                    if config is None:
+                        continue
+                    for key, value in (("start_it_ms", start_ms), ("it_step_ms", step_ms)):
+                        if value is None:
+                            config.pop(key, None)
+                        else:
+                            config[key] = float(value)
+                saver = getattr(app, "save_settings_silently", None)
+                if callable(saver):
+                    saver()
+                _refresh_auto_it_summary()
+                dialog.destroy()
+                app.status.toast("Auto-IT settings saved")
+
+            def on_reset():
+                for start_entry, step_entry in app.auto_it_entries.values():
+                    start_entry.delete(0, "end")
+                    step_entry.delete(0, "end")
+                problem.configure(text="")
+
+            buttons = ttk.Frame(body, style="Surface.TFrame")
+            buttons.grid(row=row + 1, column=0, columnspan=5, sticky="ew", pady=(16, 0))
+            ttk.Button(buttons, text="Reset to defaults", command=on_reset, width=16).pack(side="left")
+            ttk.Button(buttons, text="Cancel", command=dialog.destroy, width=10).pack(side="right")
+            ttk.Button(buttons, text="Save", command=on_save, style="Accent.TButton", width=10).pack(
+                side="right", padx=(0, 8))
+            dialog.bind("<Return>", on_save)
+            dialog.bind("<Escape>", lambda _event: dialog.destroy())
+            dialog.configure(bg=Colors.BG_SURFACE)
+            harmonize(dialog, Colors.BG_SURFACE)
+            center_over(dialog, app, min_width=logical_px(app, 520))
+            app.auto_it_dialog = dialog
+            app.wait_window(dialog)
+            app.auto_it_dialog = None
+
+        app.open_auto_it_settings = open_auto_it_dialog
+        _refresh_auto_it_summary()
 
         # === MIDDLE CENTER: Reference CSV Files ===
         reference_frame = ttk.LabelFrame(controls_frame, text="Reference CSV Files", padding=(10, 6, 10, 6))
@@ -498,6 +649,7 @@ def build(app):
         def _layout_laser_checkbuttons(panel_width):
             # As many per row as fit at ~112 logical px each: one row of nine
             # on a wide screen, two or three rows on a laptop.
+            layout_state["panel_width"] = panel_width
             count = len(measure_checkbuttons)
             fit = max(2, min(count, panel_width // logical_px(app, 112)))
             rows = -(-count // fit)          # ceil: how many rows that many per row needs
@@ -525,8 +677,10 @@ def build(app):
             available_width = min(host_width, logical_px(app, 1720))
             narrow = available_width < logical_px(app, 900)
 
-            controls_height = max(logical_px(app, 230),
-                                  min(logical_px(app, 360), int(main_height * (0.5 if narrow else 0.38))))
+            # The plot keeps a working height; the strip takes what is left,
+            # scrolls on a short window, and shrinks to its cards on a tall one.
+            controls_height = control_strip_height(app, main_height, share=0.5 if narrow else 0.38,
+                                                   preferred=230, cap=360, floor=150, plot_min=300)
             controls_host.configure(height=controls_height)
 
             for col in range(4):
@@ -548,11 +702,13 @@ def build(app):
                     controls_frame.columnconfigure(col, weight=weight)
                 laser_panel_width = int(available_width * 3 / 8) - 2 * Spacing.GROUP_PAD
             elif not narrow:
+                # Stacked, the strip scrolls: Actions (Run, Stop, progress) sit
+                # right under the sources, not below the fold.
                 layouts = (
                     (laser_frame, 0, 0, {"columnspan": 2, "padx": 0}),
-                    (settings_frame, 1, 0, {"padx": (0, 6)}),
-                    (reference_frame, 1, 1, {"padx": (6, 0)}),
-                    (actions_frame, 2, 0, {"columnspan": 2, "padx": 0}),
+                    (actions_frame, 1, 0, {"columnspan": 2, "padx": 0}),
+                    (settings_frame, 2, 0, {"padx": (0, 6)}),
+                    (reference_frame, 2, 1, {"padx": (6, 0)}),
                 )
                 for col in range(2):
                     controls_frame.columnconfigure(col, weight=1)
@@ -560,9 +716,9 @@ def build(app):
             else:
                 layouts = (
                     (laser_frame, 0, 0, {"padx": 0}),
-                    (settings_frame, 1, 0, {"padx": 0}),
-                    (reference_frame, 2, 0, {"padx": 0}),
-                    (actions_frame, 3, 0, {"padx": 0}),
+                    (actions_frame, 1, 0, {"padx": 0}),
+                    (settings_frame, 2, 0, {"padx": 0}),
+                    (reference_frame, 3, 0, {"padx": 0}),
                 )
                 controls_frame.columnconfigure(0, weight=1)
                 laser_panel_width = available_width
@@ -600,6 +756,7 @@ def build(app):
 
             _layout_quick_controls(laser_panel_width)
             _layout_laser_checkbuttons(laser_panel_width)
+            fit_strip_to_content(controls_host, controls_scroll, controls_height)
 
         bind_debounced_configure(main_frame, _layout_measure_controls)
 
@@ -612,19 +769,25 @@ def build(app):
         if not tags:
             messagebox.showwarning("Run", "No lasers selected.")
             return
+        try:
+            target = int(str(app.target_peak_entry.get()).strip())
+            if not 1000 <= target <= 65535:
+                raise ValueError
+        except (ValueError, tk.TclError):
+            # The field applies per keystroke, so a half-typed or empty target
+            # (e.g. 6, from backspacing 62500) could otherwise drive the run.
+            messagebox.showerror("Run", "Enter a target peak between 1000 and 65535 counts.")
+            return
+        app.update_target_peak(target)
         if not app.claim_spectrometer("Measurement"):
             return
         app._ensure_measure_figure()
+        # Per-source start and step come with the source table (see the Auto-IT dialog).
         start_it_override = None
-        try:
-            txt = app.auto_it_entry.get().strip()
-            if txt:
-                start_it_override = float(txt)
-        except (ValueError, AttributeError):
-            start_it_override = None
 
         app._update_ports_from_ui()
-        power_snapshot = {tag: float(app._get_power(tag)) for tag in app.measure_vars.keys()}
+        # Setpoints (mW) and routing as they are now: the run keeps them even if Setup is edited meanwhile.
+        power_snapshot = {tag: float(app.source_power_mw(tag)) for tag in app.measure_vars.keys()}
 
         # Clear previous data
         app.data.clear()
@@ -638,6 +801,9 @@ def build(app):
         app.status.progress_begin("Measurement starting…", total=len(tags))
         app.run_progress.start(tags)
         app.stop_all_btn.state(["!disabled"])
+        # Save and Analyse act on the run in progress, half done: not until it ends.
+        app.save_csv_btn.state(["disabled"])
+        app.start_analysis_btn.state(["disabled"])
         app.measure_running.set()
         app.measure_thread = threading.Thread(
             target=run_measurement_with_analysis,
@@ -692,6 +858,7 @@ def build(app):
             n_dark_640=app.N_DARK_640,
             smart_source_off=bool(app.measurement_flags.get("smart_source_off", False)),
             cube_prearm=bool(app.measurement_flags.get("cube_prearm", False)),
+            sources={tag: dict(cfg) for tag, cfg in app.laser_configs.items()},
         )
         progress = app.run_progress
 
@@ -753,23 +920,13 @@ def build(app):
                 app.pump.post(app.status.progress_update, len(tags), "Analysing results…", "")
                 plot_paths = app.run_analysis_and_save_plots(csv_path)
                 app.pump.post(app.refresh_analysis_view)
-
-                # Show completion message
-                status_label = "Measurement and analysis complete!"
-                if run_result.stopped_early:
-                    status_label = "Measurement stopped early; saved partial results."
-                if run_result.errors:
-                    status_label += f"\n\nCompleted with {len(run_result.errors)} warning(s)."
-                app.pump.post(
-                    messagebox.showinfo,
-                    "Measurement Complete",
-                    f"{status_label}\n\n"
-                    f"Data saved to: {os.path.basename(csv_path)}\n"
-                    f"Generated {len(plot_paths)} analysis plots.\n\n"
-                    f"Check the Analysis tab for results.",
-                )
+                # The outcome goes to the status bar and the run chip, and the
+                # Analysis tab opens on the plots: a dialog on top of that only
+                # had to be dismissed (and sat there when the operator was away).
+                end_text = (f"{end_text}: {os.path.basename(csv_path)} saved, "
+                            f"{len(plot_paths)} plot{'s' if len(plot_paths) != 1 else ''} in Analysis")
             elif run_result.stopped_early:
-                app.pump.post(messagebox.showinfo, "Measurement", "Measurement stopped before any data was saved.")
+                end_text = "Measurement stopped before any data was saved"
         except Exception as e:
             end_text, end_kind = "Measurement failed", "error"
             app._post_error("Measurement", e)
@@ -781,10 +938,14 @@ def build(app):
             # Change button back to green (idle state)
             app.pump.post(app.run_all_btn.configure, {"bg": Colors.SUCCESS, "activebackground": "#15803d"})
             app.pump.post(app.stop_all_btn.state, ["disabled"])
+            app.pump.post(app.save_csv_btn.state, ["!disabled"])
+            app.pump.post(app.start_analysis_btn.state, ["!disabled"])
 
     def stop_measure():
+        was_running = app.measure_running.is_set()
         app.measure_running.clear()
-        app.request_spectrometer_stop()
+        if was_running:   # never abort another owner's capture
+            app.request_spectrometer_stop()
         app.stop_all_btn.state(["disabled"])
         # Change button back to green (idle state)
         app.run_all_btn.configure(bg=Colors.SUCCESS, activebackground='#15803d')
@@ -933,14 +1094,19 @@ def build(app):
         df = app.data.to_dataframe()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         default = f"Measurements_{app.data.serial_number}_{ts}.csv"
+        try:
+            app.RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+            initial_dir = str(app.RESULTS_ROOT)
+        except Exception:
+            initial_dir = None
         path = filedialog.asksaveasfilename(
-            title="Save CSV", defaultextension=".csv",
+            title="Save CSV", defaultextension=".csv", initialdir=initial_dir,
             initialfile=default, filetypes=[("CSV", "*.csv"), ("All", "*.*")])
         if not path:
             return
         try:
             df.to_csv(path, index=False)
-            messagebox.showinfo("Save CSV", f"Saved: {path}")
+            app.status.toast(f"Saved {os.path.basename(path)}")
         except Exception as e:
             messagebox.showerror("Save CSV", str(e))
 

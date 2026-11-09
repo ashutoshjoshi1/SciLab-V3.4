@@ -115,3 +115,32 @@ def test_labels_and_durations():
     assert format_duration(65.9) == "1:05"
     assert format_duration(3661) == "1:01:01"
     assert format_duration(-3) == "0:00"
+
+
+def test_estimated_time_left_uses_the_finished_sources():
+    from services.run_progress import estimate_remaining_s
+
+    model, clock = _model()
+    model.start(["405", "445", "488", "532"])
+    assert model.snapshot().eta_s is None                  # nothing finished yet: no estimate
+
+    model.source_started("405")
+    clock["t"] += 20.0
+    model.source_completed("405")
+    model.source_started("445")
+    clock["t"] += 5.0
+    snapshot = model.snapshot()
+    # One source took 20 s: two pending at 20 s each, plus 15 s left of the one in flight.
+    assert snapshot.eta_s == 55.0
+    assert estimate_remaining_s(snapshot.sources, snapshot.now) == 55.0
+
+    clock["t"] += 25.0                                      # the current source overruns the mean
+    assert model.snapshot().eta_s == 40.0                  # never negative for the one in flight
+
+    model.source_failed("445", "boom")                     # a failed source still took its time
+    model.source_started("488")
+    snapshot = model.snapshot()
+    assert snapshot.eta_s == (20.0 + 30.0) / 2 * 2
+
+    model.finish(stopped_early=True)
+    assert model.snapshot().eta_s is None                  # no estimate once the run is over

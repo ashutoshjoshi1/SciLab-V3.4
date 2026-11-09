@@ -156,12 +156,69 @@ class SerialDevice:
         return response
 
 
+class ObisError(RuntimeError):
+    """The OBIS answered a command with ERR-nnn, or did not answer a query at all."""
+
+
+# From Coherent's OBIS remote-control reference: the codes a laser box returns
+# in place of OK. Anything else is reported by number.
+OBIS_ERRORS = {
+    0: "no error",
+    100: "unrecognized command or query",
+    102: "syntax error",
+    109: "parameter missing",
+    200: "execution error",
+    203: "command protected",
+    220: "invalid parameter (out of range?)",
+    221: "settings conflict (is the laser in CW power mode?)",
+    241: "device unavailable (no laser in that slot?)",
+    310: "system error",
+    321: "out of memory",
+    350: "queue overflow",
+    400: "query unavailable",
+    500: "CCB fault",
+    510: "I2C bus fault",
+    520: "controller time-out",
+    900: "CCB message timed out",
+}
+
+
+def parse_obis_reply(reply: str, command: str, *, expect_value: bool) -> str:
+    """The value line of an OBIS reply, or '' for a plain acknowledgement.
+
+    With handshaking on (the box's default, and SciLab asks for it) every
+    command is answered with ``OK`` or ``ERR-nnn``; a query puts its value on
+    the line before. An ERR raises; so does a query that got nothing back,
+    which is how an unplugged or busy box shows up.
+    """
+    lines = [line.strip() for line in reply.replace("\r", "\n").split("\n") if line.strip()]
+    for line in lines:
+        if line.upper().startswith("ERR"):
+            try:
+                code = int(line.split("-", 1)[1])
+            except (IndexError, ValueError):
+                code = -1
+            meaning = OBIS_ERRORS.get(code, line)
+            raise ObisError(f"OBIS refused '{command}': {line} ({meaning})")
+    values = [line for line in lines if line.upper() != "OK"]
+    if expect_value and not values:
+        raise ObisError(f"No reply from the OBIS to '{command}'. Is the laser box on and "
+                        f"Coherent Connection closed?")
+    return values[0] if values else ""
+
+
 class LaserController:
+    # The SciGlob bench's slot numbers; the application passes the configured
+    # table instead (configure_sources), this is only the fallback.
     OBIS_MAP = {"405": 5, "445": 4, "488": 3, "640": 2, "685": 6}
+    RELAY_MAP = {"517": 2, "532": 1, "Hg_Ar": 4}
 
     def __init__(self, com_ports: Optional[Dict[str, str]] = None, *, framed_reads: bool = False):
         # Bench option: framed replies instead of fixed sleeps (see SerialDevice.command).
         self.framed_reads = bool(framed_reads)
+        self._obis_channels: Tuple[int, ...] = tuple(sorted(set(self.OBIS_MAP.values())))
+        self._relay_numbers: Tuple[int, ...] = (1, 2, 3, 4)
+        self._obis_handshake_done = False
         cube_kwargs = {}
         if serial is not None:
             cube_kwargs = {
@@ -179,34 +236,84 @@ class LaserController:
         self.obis.configure(port=com_ports.get("OBIS", ""))
         self.cube.configure(port=com_ports.get("CUBE", ""))
         self.relay.configure(port=com_ports.get("RELAY", ""))
+        self._obis_handshake_done = False
+
+    def configure_sources(self, sources: Dict[str, Dict[str, object]]) -> None:
+        """Remember which OBIS channels and relays the bench uses, for all_off()."""
+        obis = {int(cfg["channel"]) for cfg in sources.values()
+                if str(cfg.get("type", "")).upper() == "OBIS" and cfg.get("channel")}
+        relays = {int(cfg["channel"]) for cfg in sources.values()
+                  if str(cfg.get("type", "")).upper() == "RELAY" and cfg.get("channel")}
+        self._obis_channels = tuple(sorted(obis)) or tuple(sorted(set(self.OBIS_MAP.values())))
+        self._relay_numbers = tuple(sorted(relays | {1, 2, 3, 4}))
 
     def open_all(self) -> None:
         for device in (self.obis, self.cube, self.relay):
             if device.port:
                 device.open()
 
+    def ensure_open(self, kind: str) -> None:
+        """Open the port behind a controller type ('OBIS', 'CUBE', 'RELAY'); raise when it cannot be."""
+        kind = str(kind).upper()
+        device = {"OBIS": self.obis, "CUBE": self.cube, "RELAY": self.relay}.get(kind)
+        if device is None:
+            raise RuntimeError(f"Unknown source controller '{kind}'.")
+        if not device.open():
+            raise RuntimeError(f"Unable to open {kind} port '{device.port}'.")
+        if kind == "OBIS" and not self._obis_handshake_done:
+            # Ask for OK / ERR after every command so a refused setpoint is
+            # reported instead of silently kept at the old value.
+            self._obis_handshake_done = True
+            try:
+                self.obis_cmd("SYST:COMM:HAND ON")
+            except Exception as exc:
+                LOGGER.debug("OBIS handshake request failed: %s", exc)
+
     def ensure_open_for_tag(self, tag: str) -> None:
+        """Legacy routing by the bench's historical tags; the application routes by its source table."""
         if tag in self.OBIS_MAP:
-            if not self.obis.open():
-                raise RuntimeError(f"Unable to open OBIS port '{self.obis.port}'.")
+            self.ensure_open("OBIS")
         elif tag == "377":
-            if not self.cube.open():
-                raise RuntimeError(f"Unable to open CUBE port '{self.cube.port}'.")
-        elif tag in {"517", "532", "Hg_Ar"}:
-            if not self.relay.open():
-                raise RuntimeError(f"Unable to open RELAY port '{self.relay.port}'.")
+            self.ensure_open("CUBE")
+        elif tag in self.RELAY_MAP:
+            self.ensure_open("RELAY")
 
     def obis_cmd(self, command: str) -> str:
         return self.obis.command(command, pause_s=0.2, framed=self.framed_reads)
 
+    def _obis(self, command: str, *, expect_value: bool = False) -> str:
+        return parse_obis_reply(self.obis_cmd(command), command, expect_value=expect_value)
+
     def obis_on(self, channel: int) -> None:
-        self.obis_cmd(f"SOUR{channel}:AM:STAT ON")
+        self._obis(f"SOUR{int(channel)}:AM:STAT ON")
 
     def obis_off(self, channel: int) -> None:
-        self.obis_cmd(f"SOUR{channel}:AM:STAT OFF")
+        self._obis(f"SOUR{int(channel)}:AM:STAT OFF")
 
     def obis_set_power(self, channel: int, power_watts: float) -> None:
-        self.obis_cmd(f"SOUR{channel}:POW:LEV:IMM:AMPL {float(power_watts):.4f}")
+        """CW power setpoint in watts; takes effect at once, lit or not."""
+        self._obis(f"SOUR{int(channel)}:POW:LEV:IMM:AMPL {float(power_watts):.4f}")
+
+    def obis_setpoint_w(self, channel: int) -> float:
+        return float(self._obis(f"SOUR{int(channel)}:POW:LEV:IMM:AMPL?", expect_value=True))
+
+    def obis_output_w(self, channel: int) -> float:
+        """The power the laser reports it is emitting now (0 while off)."""
+        return float(self._obis(f"SOUR{int(channel)}:POW:LEV?", expect_value=True))
+
+    def obis_power_limits_w(self, channel: int) -> Tuple[float, float]:
+        low = float(self._obis(f"SOUR{int(channel)}:POW:LIM:LOW?", expect_value=True))
+        high = float(self._obis(f"SOUR{int(channel)}:POW:LIM:HIGH?", expect_value=True))
+        return low, high
+
+    def obis_is_on(self, channel: int) -> bool:
+        return "ON" in self._obis(f"SOUR{int(channel)}:AM:STAT?", expect_value=True).upper()
+
+    def obis_wavelength_nm(self, channel: int) -> Optional[float]:
+        try:
+            return float(self._obis(f"SYST{int(channel)}:INF:WAV?", expect_value=True))
+        except (ObisError, ValueError):
+            return None
 
     def cube_cmd(self, command: str) -> str:
         return self.cube.command(command, pause_s=0.4, retries=3, framed=self.framed_reads)
@@ -242,23 +349,27 @@ class LaserController:
     def relay_off(self, relay_number: int) -> None:
         self.relay_cmd(f"R{int(relay_number)}R")
 
-    def all_off(self) -> list:
+    def all_off(self, obis_channels=None, relay_numbers=None) -> list:
         """Switch every source off. Returns the names of devices that could not be reached.
 
         This is the safety path, so failures are logged (once per device) instead
         of being swallowed silently; ports that are not configured are skipped.
+        An OBIS slot that answers ERR (an empty slot, say) is logged and the
+        sweep goes on: only a box that does not answer counts as unreachable.
         """
         failed = []
         if self.obis.port:
-            for channel in self.OBIS_MAP.values():
+            for channel in (obis_channels or self._obis_channels):
                 try:
                     self.obis_off(channel)
+                except ObisError as exc:
+                    LOGGER.warning("all_off: OBIS channel %s: %s", channel, exc)
                 except Exception as exc:
                     LOGGER.warning("all_off: could not switch OBIS channel %s off: %s", channel, exc)
                     failed.append("OBIS")
                     break
         if self.relay.port:
-            for relay_number in (1, 2, 3, 4):
+            for relay_number in (relay_numbers or self._relay_numbers):
                 try:
                     self.relay_off(relay_number)
                 except Exception as exc:

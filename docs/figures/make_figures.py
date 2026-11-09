@@ -117,8 +117,8 @@ def figure_auto_it():
     app_config = dict(
         default_start_it={"532": 20.0, "517": 80.0, "Hg_Ar": 20.0, "default": 2.4},
         target_low=60000, target_high=65000, target_mid=62500,
-        it_min=0.2, it_max=3000.0, it_step_up=0.3, it_step_down=0.1,
-        max_it_adjust_iters=1000, sat_thresh=65400,
+        it_min=0.2, it_max=None, it_step_up=0.3, it_step_down=0.1,
+        max_it_adjust_iters=None, sat_thresh=65400,
         n_sig=50, n_dark=50, n_sig_640=10, n_dark_640=10,
     )
     bench = SimulatedBench()

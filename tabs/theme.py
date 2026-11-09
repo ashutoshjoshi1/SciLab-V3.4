@@ -626,8 +626,9 @@ def apply_theme(root: tk.Tk) -> None:
         ("*TCombobox*Listbox.selectForeground", Colors.TEXT_ON_ACCENT),
         # Braces are required: an unbraced multi-word family makes Tk read
         # "Segoe UI 10" as family "Segoe" + size "UI", and posting the
-        # dropdown then fails with 'expected integer but got "UI"'.
-        ("*TCombobox*Listbox.font", "{%s} 10" % FONT_FAMILY),
+        # dropdown then fails with 'expected integer but got "UI"'. The size
+        # follows the type scale, so the list matches the field it drops from.
+        ("*TCombobox*Listbox.font", "{%s} %d" % (FONT_FAMILY, Fonts.BODY[1])),
         ("*TCombobox*Listbox.borderWidth", "0"),
         ("*TCombobox*Listbox.relief", "flat"),
         ("*TCombobox*Listbox.highlightThickness", "1"),
@@ -819,6 +820,14 @@ def apply_theme(root: tk.Tk) -> None:
               foreground=[("disabled", Colors.TEXT_DISABLED),
                           ("active", Colors.ACCENT_HOVER)])
 
+    # clam's own indicators are a bevelled square with a cross for a tick and
+    # a bevelled circle, the two elements that most dated the panels. They are
+    # replaced by anti-aliased images drawn at the screen's scale (a filled
+    # accent square with a white tick, a ring with an accent dot); every
+    # derived style (Bold., the per-source tints, the background variants)
+    # inherits the layout, so the whole app changes at once.
+    _install_choice_indicators(root, style)
+
     # ---- TNotebook -------------------------------------------------------
     style.configure("TNotebook",
                     background=Colors.BG_PRIMARY,
@@ -945,6 +954,119 @@ def apply_theme(root: tk.Tk) -> None:
         root.option_add("*Menu.borderWidth", "1")
     except tk.TclError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Drawn check / radio indicators
+# ---------------------------------------------------------------------------
+
+# Tk keeps no reference to the images a style element uses; they live here for
+# the life of the process.
+_INDICATOR_IMAGES: list = []
+
+
+def _draw_indicator(size: int, kind: str, *, fill: str, border: str, mark: str | None,
+                    border_px: float = 1.0):
+    """One indicator image: a rounded square or a circle, optionally with its mark.
+
+    Drawn at four times the size and downsampled so the edges and the tick
+    are anti-aliased at any screen scale.
+    """
+    from PIL import Image, ImageDraw
+
+    scale = 4
+    px = size * scale
+    image = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    inset = scale // 2
+    width = max(scale, int(round(border_px * scale)))
+    box = (inset, inset, px - 1 - inset, px - 1 - inset)
+    if kind == "check":
+        draw.rounded_rectangle(box, radius=int(px * 0.18), fill=fill, outline=border, width=width)
+        if mark:
+            # The tick: two strokes from the lower-left up to the top-right.
+            stroke = max(scale, int(round(size * 0.14 * scale)))
+            points = [(px * 0.26, px * 0.53), (px * 0.43, px * 0.70), (px * 0.75, px * 0.32)]
+            draw.line(points, fill=mark, width=stroke, joint="curve")
+            radius = stroke / 2.0
+            for x, y in (points[0], points[-1]):
+                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=mark)
+    else:
+        draw.ellipse(box, fill=fill, outline=border, width=width)
+        if mark:
+            dot = px * 0.26
+            centre = px / 2.0
+            draw.ellipse((centre - dot, centre - dot, centre + dot, centre + dot), fill=mark)
+    return image.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def _install_choice_indicators(root, style: ttk.Style) -> None:
+    """Replace clam's bevelled check and radio marks with drawn, anti-aliased ones.
+
+    Falls back silently (clam's indicators stay) when Pillow is missing or
+    the element already exists, so the theme never fails on their account.
+    """
+    try:
+        from PIL import ImageTk
+    except Exception:
+        return
+
+    size = max(14, logical_px(root, 16))
+    gap = max(4, logical_px(root, 7))
+    white = Colors.TEXT_ON_ACCENT
+
+    for kind, widget_class in (("check", "Checkbutton"), ("radio", "Radiobutton")):
+        element = f"Drawn.{widget_class}.indicator"
+        images = {}
+        try:
+            variants = {
+                "off": dict(fill=Colors.BG_INPUT, border=Colors.BORDER, mark=None),
+                "off_hover": dict(fill=Colors.ACCENT_SOFT, border=Colors.ACCENT, mark=None),
+                "off_disabled": dict(fill=Colors.BG_SUBTLE, border=Colors.BORDER_LIGHT, mark=None),
+            }
+            if kind == "check":
+                variants.update({
+                    "on": dict(fill=Colors.ACCENT, border=Colors.ACCENT, mark=white),
+                    "on_hover": dict(fill=Colors.ACCENT_HOVER, border=Colors.ACCENT_HOVER, mark=white),
+                    "on_disabled": dict(fill=Colors.TEXT_DISABLED, border=Colors.TEXT_DISABLED, mark=white),
+                })
+            else:
+                variants.update({
+                    "on": dict(fill=Colors.BG_INPUT, border=Colors.ACCENT, mark=Colors.ACCENT, border_px=1.6),
+                    "on_hover": dict(fill=Colors.ACCENT_SOFT, border=Colors.ACCENT_HOVER,
+                                     mark=Colors.ACCENT_HOVER, border_px=1.6),
+                    "on_disabled": dict(fill=Colors.BG_SUBTLE, border=Colors.BORDER_LIGHT,
+                                        mark=Colors.TEXT_DISABLED, border_px=1.6),
+                })
+            for name, spec in variants.items():
+                images[name] = ImageTk.PhotoImage(_draw_indicator(size, kind, **spec), master=root)
+        except Exception:
+            return
+        _INDICATOR_IMAGES.extend(images.values())
+
+        try:
+            style.element_create(
+                element, "image", images["off"],
+                ("disabled", "selected", images["on_disabled"]),
+                ("disabled", images["off_disabled"]),
+                ("selected", "active", images["on_hover"]),
+                ("selected", images["on"]),
+                ("active", images["off_hover"]),
+                sticky="", padding=(0, 0, gap, 0),
+            )
+        except tk.TclError:
+            pass   # created already (a second root in one process): the layout below still applies
+        try:
+            style.layout(f"T{widget_class}", [
+                (f"{widget_class}.padding", {"sticky": "nswe", "children": [
+                    (element, {"side": "left", "sticky": ""}),
+                    (f"{widget_class}.focus", {"side": "left", "sticky": "", "children": [
+                        (f"{widget_class}.label", {"sticky": "nswe"}),
+                    ]}),
+                ]}),
+            ])
+        except tk.TclError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1389,6 +1511,27 @@ def style_toolbar(toolbar) -> None:
         toolbar.configure(background=Colors.BG_SURFACE, bd=0, highlightthickness=0)
     except tk.TclError:
         pass
+    # matplotlib greys Back / Forward out while the zoom history is empty, and
+    # a disabled image button is drawn by Tk on Windows as a hatched stipple
+    # that reads as a rendering fault. Both buttons stay live (with no history
+    # the commands do nothing), so the icons stay crisp.
+    buttons = getattr(toolbar, "_buttons", {})
+    history = [buttons.get(name) for name in ("Back", "Forward")]
+
+    def _keep_live(*_args, **_kwargs):
+        for button in history:
+            if button is None:
+                continue
+            try:
+                button.configure(state="normal")
+            except tk.TclError:
+                pass
+
+    try:
+        toolbar.set_history_buttons = _keep_live
+    except Exception:
+        pass
+    _keep_live()
     for child in getattr(toolbar, "winfo_children", lambda: [])():
         cls = child.winfo_class()
         try:
@@ -1534,6 +1677,53 @@ def relax_canvas_size(canvas, width: int = 560, height: int = 320, *, dpi=None):
     return widget
 
 
+def control_strip_height(root, available_height: int, *, share: float, preferred: int,
+                         cap: int, floor: int, plot_min: int) -> int:
+    """Height, in device pixels, of a strip of control cards under a plot.
+
+    The strip asks for ``share`` of ``available_height``, no less than
+    ``preferred`` and no more than ``cap``. The plot above it keeps at least
+    ``plot_min`` (toolbar included): on a short window the strip gives way,
+    down to ``floor``, and scrolls. A fixed minimum used to leave a 1100x700
+    window with an 88 px plot. Every length but ``available_height`` is in
+    96-dpi logical pixels.
+    """
+    height = max(logical_px(root, preferred),
+                 min(logical_px(root, cap), int(available_height * share)))
+    height = min(height, available_height - logical_px(root, plot_min))
+    return max(logical_px(root, floor), height)
+
+
+def fit_strip_to_content(host, scroll, height: int, *, delay_ms: int = 40) -> None:
+    """Shrink a control strip to its cards once they are laid out; the plot gets the surplus.
+
+    ``host`` is the fixed-height frame holding ``scroll`` (a ScrollableFrame)
+    and ``height`` what the layout just set. The cards' requested heights
+    settle a geometry pass after the layout, hence the short delay. A strip
+    whose cards need more than ``height`` keeps it and scrolls.
+    """
+    pending = getattr(host, "_strip_fit_id", None)
+    if pending is not None:
+        try:
+            host.after_cancel(pending)
+        except tk.TclError:
+            pass
+
+    def _fit():
+        host._strip_fit_id = None
+        try:
+            needed = scroll.content.winfo_reqheight() + _px(6)
+            if 1 < needed < height:
+                host.configure(height=needed)
+        except tk.TclError:
+            pass
+
+    try:
+        host._strip_fit_id = host.after(delay_ms, _fit)
+    except tk.TclError:
+        pass
+
+
 def configure_matplotlib_style(fig, ax, *, title: str = "",
                                 xlabel: str = "Pixel Index",
                                 ylabel: str = "Counts") -> None:
@@ -1545,11 +1735,11 @@ def configure_matplotlib_style(fig, ax, *, title: str = "",
     if title:
         ax.set_title(title, **plot_title_font())
     if xlabel:
-        ax.set_xlabel(xlabel, fontsize=scaled_pt(9.5), fontweight="medium",
+        ax.set_xlabel(xlabel, fontsize=scaled_pt(9.5), fontweight="normal",
                       fontfamily=family, labelpad=_px(6),
                       color=Colors.TEXT_SECONDARY)
     if ylabel:
-        ax.set_ylabel(ylabel, fontsize=scaled_pt(9.5), fontweight="medium",
+        ax.set_ylabel(ylabel, fontsize=scaled_pt(9.5), fontweight="normal",
                       fontfamily=family, labelpad=_px(6),
                       color=Colors.TEXT_SECONDARY)
 
@@ -1574,6 +1764,37 @@ def configure_matplotlib_style(fig, ax, *, title: str = "",
         else:
             spine.set_linewidth(0.9)
             spine.set_color(Colors.BORDER)
+
+
+def set_counts_scale(ax, log: bool) -> None:
+    """Switch the y (counts) axis between linear and logarithmic, in the house style.
+
+    matplotlib's log axis labels only the decades, as powers of ten; a spectrum
+    from its dark level to full scale spans under three decades, which leaves
+    one or two labels. Here the 1-2-5 steps are labelled in plain counts (100,
+    200, 500, 1000, ...), with the grid on the decades only. Linear goes back
+    to matplotlib's defaults, which is what ``configure_matplotlib_style`` uses.
+    """
+    from matplotlib.ticker import FuncFormatter, LogLocator
+
+    if not log:
+        ax.set_yscale("linear")
+        return
+    ax.set_yscale("log")
+    plain = FuncFormatter(lambda value, _pos: f"{value:.0f}")
+    ax.yaxis.set_major_locator(LogLocator(base=10.0))
+    ax.yaxis.set_major_formatter(plain)
+    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=(2.0, 5.0)))
+    ax.yaxis.set_minor_formatter(plain)
+    ax.tick_params(axis="y", which="minor", labelsize=scaled_pt(8.5),
+                   length=_px(4), width=0.8, colors=Colors.TEXT_SECONDARY,
+                   direction="out")
+    # New ticks copy their label from the first one of their kind. Asking for
+    # the tick labels instead would run the log locator on limits that may
+    # still start at zero, which it refuses.
+    family = matplotlib_font_family()
+    for tick in (ax.yaxis.majorTicks[0], ax.yaxis.minorTicks[0]):
+        tick.label1.set_fontfamily(family)
 
 
 def style_legend(ax, **kwargs):

@@ -109,7 +109,7 @@ class Hama3_Spectrometer():
         self.gain_roe=-1 #(E) Gain of the roe AD converter; -1 = do not set, 0=set to Low gain, 1=set to High gain at connection time.
         self.offset_roe=-1 #(E) Offset of the roe AD converter; -1 = do not set, any other value will be set at connection time.
         self.eff_saturation_limit=2**self.nbits-1 #(E) Effective saturation limit of the detector [max counts] (integer). Measurements containing counts above this limit will be considered as saturated.
-        self.cycle_timeout_ms=4000 #(I) Timeout to have 1 cycle of data ready (integer, milliseconds). If the data does not arrive after the integration time + this timeout, a timeout error will be raised.
+        self.cycle_timeout_ms=4000 #(I) Margin for the dll data timeout (integer, milliseconds). The dll times out a whole capture (pack of cycles), not one cycle, so measure_pack() sets the timeout to the pack's duration plus this margin (see pack_timeout_ms()).
 
         #Working mode:
         self.abort_on_saturation=True #(E) boolean - If True, the measurement will be aborted as soon as saturated signal
@@ -134,6 +134,7 @@ class Hama3_Spectrometer():
         self.spec_id=None #(E) Will store the spectrometer id, used by some dll functions in order to point to one specific spectrometer device (byte string)
         self.parlist=None #(E) Will be used to store the low level parameter list (internal configuration parameters of the spectrometer).
         self.it_ms=None #(E) Will store the currently set integration time in milliseconds. Use set_it() to change it.
+        self.data_timeout_ms=None #(I) Will store the data timeout currently set in the dll, in milliseconds. Use set_data_timeout() to change it.
         self.logger=None #(E) Will store the logger object for one specific spectrometer (logging.Logger object, see initialize_spec_logger())
         self.product_id=None #(I) Will store the spectrometer product id, used by the dll to initialize itself for a specific spectrometer model
         self.devtype=None #(I) Will store the spectrometer device type (ROE type, ie AS5216 or AS7010) (string). Used for internal recovery protocols.
@@ -333,13 +334,11 @@ class Hama3_Spectrometer():
 
             #Set data arrival timeout:
             if res=="OK":
-                #We measure cycle by cycle, so this is the timeout for each cycle.
-                #If after waiting for the integration time, the measurement does not arrive in another
-                #cycle_timeout_ms, then a timeout error will be raised.
-                resdll=self.dll_handler.DcIc_SetDataTimeout(self.spec_id, c_int(int(self.cycle_timeout_ms)))
-                res=self.get_error(resdll)
+                #A starting value only: measure_pack() sizes the timeout to every pack of cycles it requests.
+                self.data_timeout_ms=None #A new connection starts from the dll default.
+                res=self.set_data_timeout(self.cycle_timeout_ms)
                 if res!="OK":
-                    res="connect, could not set cycle timeout. error:"+str(res)
+                    res="connect, could not set the data timeout. error:"+str(res)
 
 
         #Create side threads with the "data arrival watchdog" and the "data handling watchdog":
@@ -1280,6 +1279,38 @@ class Hama3_Spectrometer():
         self.meas_end_time=0 #Unix time in seconds when the measurement ended (data arrival time of the last measured cycle)
         self.data_handling_end_time=0 #Unix time in seconds when the data handling ended (all cycles received + handled + final data handling)
 
+    def pack_timeout_ms(self, ncy_pack):
+        """
+        timeout_ms=pack_timeout_ms(ncy_pack)
+        Data timeout for a pack of ncy_pack cycles [ms]: the pack's exposure, with 10 ms per cycle for
+        the line readout, plus cycle_timeout_ms of margin.
+        """
+        it_ms=float(self.it_ms if self.it_ms is not None else self.max_it_ms)
+        return int(self.cycle_timeout_ms + ncy_pack * (it_ms + 10.0))
+
+    def set_data_timeout(self, timeout_ms):
+        """
+        res=set_data_timeout(timeout_ms)
+        Set the longest time the dll waits for the data of a capture, in milliseconds.
+
+        The dll reads all the data of a capture (DcIc_Capture) in one USB read and counts this timeout
+        down from the start of that read (seen in the disassembly of DcIcUSB.dll), so it bounds the whole
+        pack of cycles, not one cycle. A pack that takes longer fails with "Timeout error" (code 12).
+        The value is only sent to the dll when it changes.
+        """
+        timeout_ms=int(timeout_ms)
+        if self.simulation_mode or timeout_ms==self.data_timeout_ms:
+            return "OK"
+        resdll=self.dll_handler.DcIc_SetDataTimeout(self.spec_id, c_int(timeout_ms))
+        res=self.get_error(resdll)
+        if res=="OK":
+            self.data_timeout_ms=timeout_ms
+            if self.debug_mode>=2:
+                self.logger.debug("Data timeout set to "+str(timeout_ms)+" ms")
+        else:
+            res="set_data_timeout, could not set the data timeout to "+str(timeout_ms)+" ms, error: "+res
+        return res
+
     def measure_pack(self,ncy_pack):
         """
         res,data,arrival_time=measure_pack(ncy_pack)
@@ -1301,6 +1332,11 @@ class Hama3_Spectrometer():
 
         _ = self.abort(ignore_errors=True,log=False,disable_docatch=False) #This is in theory not needed,
         # but if it is not here then the wait function returns a timeout error every X calls.
+
+        #The data timeout bounds the whole pack, so it must cover the pack's duration (50 cycles at 100 ms = 5 s).
+        res=self.set_data_timeout(self.pack_timeout_ms(ncy_pack))
+        if res!="OK":
+            return "Could not set the data timeout, "+res+".", None, None
 
         # Prepare buffer for actual measurement. The buffer is reused between packs of the same
         # size (the data is copied out before it is queued), avoiding a zeroed 400 KB allocation per pack.

@@ -21,6 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from domain.measurement import MeasurementData
 from scilab_version import APP_NAME, DISPLAY_VERSION, PRODUCT_NAME
 from hardware.controllers import FilterWheelController, LaserController
+from services import light_sources
 from services.acquisition_guard import AcquisitionGuard
 from tabs.ui_pump import ThrottledRedraw, UiPump
 
@@ -124,17 +125,8 @@ class SpectroApp(tk.Tk):
     DEFAULT_SPECTROMETER_TYPE = "Auto"
     DEFAULT_ALL_LASERS = ["377", "405", "445", "488", "517", "532", "640", "685", "Hg_Ar"]
     DEFAULT_COM_PORTS = {"OBIS": "COM10", "CUBE": "COM1", "RELAY": "COM11", "HEADSENSOR": "", "STAGE": ""}
-    DEFAULT_LASER_POWERS = {
-        "377": 12.0,
-        "405": 0.05,
-        "445": 0.03,
-        "488": 0.03,
-        "517": 30.0,
-        "532": 30.0,
-        "640": 0.05,
-        "685": 0.03,
-        "Hg_Ar": 0.0,
-    }
+    # Setpoints in mW (see services.light_sources for the controller/channel table).
+    DEFAULT_LASER_POWERS = {tag: float(cfg["power_mw"]) for tag, cfg in light_sources.DEFAULT_SOURCES.items()}
     DEFAULT_START_IT = {"532": 20.0, "517": 80.0, "Hg_Ar": 20.0, "default": 2.4}
 
     N_SIG = 50
@@ -147,12 +139,18 @@ class SpectroApp(tk.Tk):
     TARGET_MID = 62500
 
     IT_MIN = 0.2
-    IT_MAX = 3000.0
+    # Auto-IT ceiling in ms; None = the connected spectrometer's own maximum
+    # (max_it_ms), e.g. 4000 ms on Hama3/Ava1, so a weak source is not stopped
+    # below what the hardware can do. (Up to 3.4.4.0: a fixed 3000 ms.)
+    IT_MAX = None
     # Auto-IT walks toward the target band in additive steps of at most these
-    # amounts per single-frame capture, so a dim source can take hundreds of frames.
+    # amounts per single-frame capture, so a dim source can take thousands of frames.
     IT_STEP_UP = 0.3
     IT_STEP_DOWN = 0.1
-    MAX_IT_ADJUST_ITERS = 1000
+    # No frame limit: auto-IT keeps stepping until the peak reaches the band, the
+    # IT ceiling is hit, or Stop is pressed. (Up to 3.4.4.0: 1000 frames, which
+    # held a dim source to about 300 ms above its start IT.)
+    MAX_IT_ADJUST_ITERS = None
     SAT_THRESH = 65400
     # Bench-validated speed options, persisted in the settings file (see setup tab).
     DEFAULT_MEASUREMENT_FLAGS = {"smart_source_off": False, "cube_prearm": False, "framed_serial_reads": False}
@@ -163,20 +161,29 @@ class SpectroApp(tk.Tk):
     RESULTS_ROOT: Optional[Path] = None
 
     def _configure_initial_geometry(self) -> None:
+        """The restore size and the minimum, in logical pixels, so a 125 % screen gets the same window as a 100 % one.
+
+        Runs after the theme, which sets the type scale the logical pixel
+        includes. Below the minimum the plots lose their working height (see
+        ``control_strip_height``); a small screen gets what it can fit.
+        """
+        from tabs.theme import logical_px
+
         screen_width = max(800, self.winfo_screenwidth())
         screen_height = max(600, self.winfo_screenheight())
 
-        target_width = min(1500, int(screen_width * 0.96), max(820, screen_width - 80))
-        target_height = min(950, int(screen_height * 0.92), max(620, screen_height - 80))
+        target_width = min(logical_px(self, 1500), int(screen_width * 0.96), max(820, screen_width - 80))
+        target_height = min(logical_px(self, 950), int(screen_height * 0.92), max(620, screen_height - 80))
 
-        min_width = min(target_width, 960 if screen_width >= 1100 else max(720, int(screen_width * 0.78)))
-        min_height = min(target_height, 680 if screen_height >= 760 else max(540, int(screen_height * 0.8)))
+        min_width = min(target_width, logical_px(self, 960))
+        min_height = min(target_height, logical_px(self, 640))
 
         self.minsize(min_width, min_height)
 
         offset_x = max(0, (screen_width - target_width) // 2)
         offset_y = max(0, (screen_height - target_height) // 2)
-        self.geometry(f"{target_width}x{target_height}+{offset_x}+{offset_y}")
+        self._restore_geometry = f"{target_width}x{target_height}+{offset_x}+{offset_y}"
+        self.geometry(self._restore_geometry)
 
     def _adopt_default_root(self) -> None:
         """Make this window Tkinter's default root while the splash still exists.
@@ -233,7 +240,6 @@ class SpectroApp(tk.Tk):
             self.RESULTS_ROOT = Path(get_writable_path("results"))
 
         self.title(f"{PRODUCT_NAME} {DISPLAY_VERSION}")
-        self._configure_initial_geometry()
 
         # Multi-resolution icon first (16-256 px, generated from the SciGlob
         # mark); the old 32 px-only file is the fallback.
@@ -247,6 +253,7 @@ class SpectroApp(tk.Tk):
         # Apply centralized UI theme
         from tabs.theme import apply_theme
         apply_theme(self)
+        self._configure_initial_geometry()
 
         # Every worker -> UI hand-off goes through this queue; it is drained by
         # one after() loop on the Tk thread, so no other thread ever calls Tk.
@@ -273,7 +280,13 @@ class SpectroApp(tk.Tk):
         self.measurement_flags: Dict[str, bool] = dict(self.DEFAULT_MEASUREMENT_FLAGS)
 
         self.lasers = LaserController(self.hw.com_ports)
+        self.lasers.configure_sources(self.laser_configs)
         self.filterwheel = FilterWheelController(self.hw.com_ports["HEADSENSOR"])
+        # Tabs register how to rebuild their source lists (checkboxes, the run
+        # checklist) here; Setup's table and the lit-source chip listen for
+        # state changes. Both run on the Tk thread.
+        self._laser_ui_rebuilders: List = []
+        self._source_listeners: List = []
 
         self.stage = StageController() if StageController else None
         self.stage_config_path = ""
@@ -285,6 +298,8 @@ class SpectroApp(tk.Tk):
         # Sources currently emitting, as reported by every switching path (the
         # checkboxes, the measurement run, All off): drives the app-bar chip.
         self.lit_sources: set = set()
+        # Sources whose switch command is still on the wire (toggle_laser).
+        self._switching_sources: set = set()
         # Progress of the measurement run: written by the orchestrator's
         # callbacks, read by the Measurements card and the app-bar chip.
         self.run_progress = RunProgress()
@@ -379,10 +394,38 @@ class SpectroApp(tk.Tk):
         self._bind_shortcuts()
         self._add_tooltips()
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
-        self.status.set("Ready. Connect a spectrometer in Setup (Ctrl+1) to begin.")
+        self.status.set("Ready. Connect a spectrometer in Setup (Ctrl+1) to begin. F1 lists the shortcuts.")
 
         self._warm_up_tabs()
         self._show_window()
+
+    def _maximized_client_size(self) -> Optional[Tuple[int, int]]:
+        """The client area a maximised window gets on this screen (Windows), or None.
+
+        The work area is the screen less the taskbar; a maximised window's
+        client area is that less its caption, the frame itself sits off-screen.
+        """
+        if not sys.platform.startswith("win"):
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            rect = wintypes.RECT()
+            SPI_GETWORKAREA = 0x0030
+            if not ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+                return None
+            metrics = ctypes.windll.user32.GetSystemMetrics
+            SM_CYCAPTION, SM_CYSIZEFRAME, SM_CXPADDEDBORDER = 4, 33, 92
+            caption = metrics(SM_CYCAPTION) + metrics(SM_CYSIZEFRAME) + metrics(SM_CXPADDEDBORDER)
+            width = int(rect.right - rect.left)
+            height = int(rect.bottom - rect.top) - int(caption)
+            if width < 400 or height < 300:
+                return None
+            return width, height
+        except Exception as exc:  # pragma: no cover - Windows only
+            LOGGER.debug("Work area unavailable: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Application title strip
@@ -424,12 +467,14 @@ class SpectroApp(tk.Tk):
 
         titles = ttk.Frame(inner, style="Surface.TFrame")
         titles.pack(side="left")
-        ttk.Label(titles, text="Spectrometer Characterization System",
-                  font=Fonts.H2, background=Colors.BG_SURFACE,
-                  foreground=Colors.TEXT_PRIMARY).pack(anchor="w")
-        ttk.Label(titles, text=f"{APP_NAME} {self.APP_VERSION}", font=Fonts.CAPTION,
-                  background=Colors.BG_SURFACE,
-                  foreground=Colors.TEXT_MUTED).pack(anchor="w")
+        self._app_bar_title = ttk.Label(titles, text=self._APP_BAR_TITLE,
+                                        font=Fonts.H2, background=Colors.BG_SURFACE,
+                                        foreground=Colors.TEXT_PRIMARY)
+        self._app_bar_title.pack(anchor="w")
+        self._app_bar_caption = ttk.Label(titles, text=f"{APP_NAME} {self.APP_VERSION}", font=Fonts.CAPTION,
+                                          background=Colors.BG_SURFACE,
+                                          foreground=Colors.TEXT_MUTED)
+        self._app_bar_caption.pack(anchor="w")
 
         # -- Right: instrument, lit-source and run chips ------------------
         chip_pad = (logical_px(self, 12), 0)
@@ -453,8 +498,60 @@ class SpectroApp(tk.Tk):
                                  on_click=lambda: self.nb.select(self.measure_tab),
                                  pack_kwargs={"side": "right", "padx": chip_pad})
 
+        # The chips grow with the run ("Measuring 445 nm · 3/9 · 64.20 ms") and
+        # on a narrow window ran into the product name, clipping both. When
+        # they would, the name gives way to the short app name.
+        from tkinter import font as tkfont
+
+        heading = tkfont.Font(root=self, font=Fonts.H2)
+        caption = tkfont.Font(root=self, font=Fonts.CAPTION)
+        self._app_bar = bar
+        self._app_bar_inner = inner
+        self._app_bar_padding = 2 * logical_px(self, 14)
+        self._app_bar_title_slack = (max(heading.measure(self._APP_BAR_TITLE),
+                                         caption.measure(f"{APP_NAME} {self.APP_VERSION}"))
+                                     - max(heading.measure(APP_NAME), caption.measure(self.APP_VERSION)))
+        self._app_bar_fit_id = None
+        bar.bind("<Configure>", lambda _event: self._schedule_app_bar_fit(), add="+")
+        for widget in (chip, self._laser_chip, self._run_chip.chip):
+            for event in ("<Configure>", "<Map>", "<Unmap>"):
+                widget.bind(event, lambda _event: self._schedule_app_bar_fit(), add="+")
+
         gradient_rail(self, height=3, start=Colors.ACCENT_DEEP, end="#22d3ee",
                       background=Colors.BG_SURFACE).pack(fill="x", side="top")
+
+    _APP_BAR_TITLE = "Spectrometer Characterization System"
+
+    def _schedule_app_bar_fit(self) -> None:
+        # Coalesced and a geometry pass late: a chip's new width reaches the
+        # strip's requested width only on the pass after the chip's own.
+        if self._app_bar_fit_id is not None:
+            try:
+                self.after_cancel(self._app_bar_fit_id)
+            except tk.TclError:
+                pass
+        try:
+            self._app_bar_fit_id = self.after(30, self._fit_app_bar)
+        except tk.TclError:
+            self._app_bar_fit_id = None
+
+    def _fit_app_bar(self) -> None:
+        """Full product name while the chips leave room for it, the app name otherwise."""
+        self._app_bar_fit_id = None
+        try:
+            width = self._app_bar.winfo_width()
+            if width <= 1:
+                return
+            needed = self._app_bar_inner.winfo_reqwidth() + self._app_bar_padding
+            compact = self._app_bar_title.cget("text") == APP_NAME
+            if not compact and needed > width:
+                self._app_bar_title.configure(text=APP_NAME)
+                self._app_bar_caption.configure(text=self.APP_VERSION)
+            elif compact and needed + self._app_bar_title_slack <= width:
+                self._app_bar_title.configure(text=self._APP_BAR_TITLE)
+                self._app_bar_caption.configure(text=f"{APP_NAME} {self.APP_VERSION}")
+        except tk.TclError:
+            pass
 
     def refresh_instrument_chip(self) -> None:
         """Mirror the spectrometer state into the title strip."""
@@ -525,6 +622,7 @@ class SpectroApp(tk.Tk):
         except tk.TclError:
             pass
         self._refresh_laser_chip()
+        self._notify_source_listeners()
 
     def note_all_sources_off(self) -> None:
         """Record that every source was switched off. Safe from any thread."""
@@ -538,6 +636,7 @@ class SpectroApp(tk.Tk):
             except tk.TclError:
                 pass
         self._refresh_laser_chip()
+        self._notify_source_listeners()
 
     def all_sources_off(self) -> None:
         """App-bar 'All off': stop a running measurement, then switch every source off."""
@@ -551,7 +650,7 @@ class SpectroApp(tk.Tk):
             if worker is not None and worker.is_alive():
                 worker.join(timeout=10.0)   # it switches its own source off on the way out
             if hasattr(self.lasers, "all_off"):
-                return list(self.lasers.all_off() or [])
+                return list(self.lasers.all_off(self.obis_channels(), self.relay_numbers()) or [])
             for tag in list(self.lit_sources):
                 self.set_source_state(tag, False)
             return []
@@ -582,6 +681,85 @@ class SpectroApp(tk.Tk):
         self.bind_all("<Control-s>", lambda _event: self._shortcut(self._save_settings_quietly))
         self.bind_all("<Control-l>", lambda _event: self._shortcut(self._toggle_live))
         self.bind_all("<F12>", lambda _event: self._shortcut(self.log_drawer.toggle))
+        self.bind_all("<F1>", lambda _event: self._shortcut(self.show_help))
+
+    SHORTCUTS = (
+        ("Ctrl+1 … Ctrl+6", "Setup, Live View, Measurements, Check Resolution, Analysis, EEPROM"),
+        ("Ctrl+L", "Start or stop Live View"),
+        ("Ctrl+S", "Save the settings"),
+        ("F5", "Refresh the list of serial ports"),
+        ("F12", "Show or hide the event log"),
+        ("F1", "This window"),
+        ("Enter / Esc", "Skip the fiber-switch countdown during a run"),
+        ("Left / Right, Esc", "Previous / next plot and close, in the plot viewer"),
+    )
+
+    def show_help(self) -> None:
+        """F1: the keyboard shortcuts, the version and where this installation keeps its files."""
+        from tabs.theme import Colors, Fonts, Spacing, harmonize, logical_px
+        from tabs.ui_utils import center_over
+
+        window = getattr(self, "_help_window", None)
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            return
+        window = tk.Toplevel(self)
+        window.title(f"About {APP_NAME}")
+        window.transient(self)
+        window.resizable(False, False)
+        window.configure(bg=Colors.BG_SURFACE)
+        tk.Frame(window, bg=Colors.ACCENT, height=3, bd=0, highlightthickness=0).pack(fill="x", side="top")
+        body = ttk.Frame(window, style="Surface.TFrame", padding=Spacing.PAD_XL)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"{PRODUCT_NAME}", font=Fonts.H2).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(body, text=f"{APP_NAME} {DISPLAY_VERSION}  ·  SciGlob", style="Secondary.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, Spacing.PAD_MD))
+
+        ttk.Label(body, text="Keyboard shortcuts", style="FieldLabel.TLabel").grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        row = 3
+        for keys, what in self.SHORTCUTS:
+            ttk.Label(body, text=keys, style="Mono.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 18), pady=1)
+            ttk.Label(body, text=what).grid(row=row, column=1, sticky="w", pady=1)
+            row += 1
+
+        ttk.Label(body, text="Files", style="FieldLabel.TLabel").grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(Spacing.PAD_MD, 4))
+        row += 1
+        locations = (
+            ("Settings", Path(self.SETTINGS_FILE)),
+            ("Results", Path(self.RESULTS_ROOT)),
+        )
+        for label, path in locations:
+            ttk.Label(body, text=label, style="Mono.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 18), pady=1)
+            cell = ttk.Frame(body, style="Surface.TFrame")
+            cell.grid(row=row, column=1, sticky="w", pady=1)
+            ttk.Label(cell, text=str(path), wraplength=logical_px(self, 420), justify="left").pack(side="left")
+            ttk.Button(cell, text="Open", style="Small.TButton",
+                       command=lambda p=path: self._open_folder_of(p)).pack(side="left", padx=(10, 0))
+            row += 1
+
+        buttons = ttk.Frame(body, style="Surface.TFrame")
+        buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(Spacing.PAD_LG, 0))
+        ttk.Button(buttons, text="Event log (F12)", command=self.log_drawer.toggle).pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Close", style="Accent.TButton", command=window.destroy).pack(side="left")
+        window.bind("<Escape>", lambda _event: window.destroy())
+        harmonize(window, Colors.BG_SURFACE)
+        center_over(window, self, min_width=logical_px(self, 520))
+        self._help_window = window
+
+    def _open_folder_of(self, path: Path) -> None:
+        """Open a folder (or the folder holding a file) in Explorer, creating the results folder if needed."""
+        target = Path(path)
+        if target.suffix:
+            target = target.parent
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        self._open_path_with_default_app(target, "Open folder")
 
     def _shortcut(self, action) -> str:
         if callable(action):
@@ -613,8 +791,8 @@ class SpectroApp(tk.Tk):
             "dll_entry": "Vendor DLL for DLL-backed backends (Ava1, Hama2/3/4, Hama6, MiniSpec, OcOpt1, Jeti1). "
                          "Leave empty to use the bundled or installed default; not used by Hama5 (USB) or the "
                          "Simulated backend.",
-            "auto_it_entry": "Starting integration time (ms) for the auto-exposure search. Leave empty to use the "
-                             "per-source defaults; the controller then jumps to the target band in a few frames.",
+            "auto_it_button": "Per source: the integration time the auto-exposure search starts from and the "
+                              "largest change per frame. Blank fields use the defaults.",
             "spec_type_combo": "Auto probes each hardware backend in turn. Pick Simulated to exercise the whole "
                                "workflow without instruments.",
         }
@@ -674,7 +852,16 @@ class SpectroApp(tk.Tk):
         draw (0.3-1 s at 4K) at the moment the operator wanted the page. Now
         a tab switch is only the switch.
         """
+        # The window maps maximised, but while it is withdrawn its geometry is
+        # the restore size, so without this the tabs settle at the restore
+        # size and lay themselves out again (plot redraw included) the first
+        # time each is shown. Warm up at the size the maximised window will
+        # have, then put the restore geometry back for when it is un-maximised.
+        restore = getattr(self, "_restore_geometry", None)
+        full = self._maximized_client_size()
         try:
+            if full is not None:
+                self.geometry(f"{full[0]}x{full[1]}+0+0")
             current = self.nb.select()
             for tab_id in self.nb.tabs():
                 self._build_tab(tab_id)
@@ -684,6 +871,12 @@ class SpectroApp(tk.Tk):
             self.update()
         except tk.TclError:
             LOGGER.exception("Tab warm-up interrupted")
+        finally:
+            if full is not None and restore:
+                try:
+                    self.geometry(restore)
+                except tk.TclError:
+                    pass
 
     def _on_tab_changed(self, _event=None) -> None:
         try:
@@ -731,17 +924,87 @@ class SpectroApp(tk.Tk):
         except Exception:
             return True
 
-    def _build_default_laser_configs(self) -> Dict[str, Dict[str, float]]:
-        configs = {}
-        for laser in self.DEFAULT_ALL_LASERS:
-            if laser == "377":
-                laser_type = "CUBE"
-            elif laser in {"517", "532", "Hg_Ar"}:
-                laser_type = "RELAY"
-            else:
-                laser_type = "OBIS"
-            configs[laser] = {"type": laser_type, "power": self.DEFAULT_LASER_POWERS.get(laser, 0.01)}
-        return configs
+    def _build_default_laser_configs(self) -> Dict[str, Dict[str, object]]:
+        return light_sources.default_sources()
+
+    # ------------------------------------------------------------------
+    # The source table: {tag: {"type", "channel", "power_mw"}}. Every switching
+    # path and every list of sources reads it; Setup edits it.
+    # ------------------------------------------------------------------
+
+    def source_config(self, tag: str) -> Dict[str, object]:
+        config = self.laser_configs.get(str(tag))
+        if config is None:
+            raise RuntimeError(f"Unsupported source '{tag}': it is not in the Setup source table.")
+        return config
+
+    def source_power_mw(self, tag: str) -> float:
+        """The setpoint for a source, in mW. Plain data: safe from any thread."""
+        try:
+            return float(self.source_config(tag).get("power_mw", 0.0) or 0.0)
+        except RuntimeError:
+            return float(self.DEFAULT_LASER_POWERS.get(str(tag), 0.0))
+
+    def set_source_power_mw(self, tag: str, power_mw: float) -> None:
+        self.source_config(tag)["power_mw"] = max(0.0, float(power_mw))
+        self.hw.laser_power[str(tag)] = max(0.0, float(power_mw))
+
+    def obis_channels(self) -> List[int]:
+        return sorted({int(cfg["channel"]) for cfg in self.laser_configs.values()
+                       if str(cfg.get("type", "")).upper() == light_sources.OBIS and cfg.get("channel")})
+
+    def relay_numbers(self) -> List[int]:
+        return sorted({int(cfg["channel"]) for cfg in self.laser_configs.values()
+                       if str(cfg.get("type", "")).upper() == light_sources.RELAY and cfg.get("channel")}
+                      | {1, 2, 3, 4})
+
+    def apply_source_power(self, tag: str, power_mw: float) -> Optional[float]:
+        """Send a new setpoint to the laser now. Blocking serial I/O; not for the Tk thread.
+
+        OBIS lasers take the setpoint whether they are lit or not and report
+        it back, which is returned in mW. The CUBE only takes ``P=`` while it
+        is armed, so a lit CUBE is re-armed; relays have no power. The table
+        is updated by the caller (on the Tk thread) once this succeeds.
+        """
+        config = self.source_config(tag)
+        kind = str(config.get("type", "")).upper()
+        power_mw = max(0.0, float(power_mw))
+        if kind == light_sources.OBIS:
+            channel = int(config["channel"])
+            self.lasers.ensure_open(kind)
+            self.lasers.obis_set_power(channel, light_sources.power_watts(power_mw))
+            return self.lasers.obis_setpoint_w(channel) * 1000.0
+        if kind == light_sources.CUBE:
+            if str(tag) in self.lit_sources:
+                self.lasers.ensure_open(kind)
+                self.lasers.cube_arm(power_mw)
+            return power_mw
+        return None
+
+    def read_source_report(self, tag: str) -> Dict[str, object]:
+        """What the laser itself says: setpoint, output, range and emission (OBIS only). Blocking."""
+        config = self.source_config(tag)
+        kind = str(config.get("type", "")).upper()
+        if kind != light_sources.OBIS:
+            return {}
+        channel = int(config["channel"])
+        self.lasers.ensure_open(kind)
+        low_w, high_w = self.lasers.obis_power_limits_w(channel)
+        return {
+            "setpoint_mw": self.lasers.obis_setpoint_w(channel) * 1000.0,
+            "output_mw": self.lasers.obis_output_w(channel) * 1000.0,
+            "min_mw": low_w * 1000.0,
+            "max_mw": high_w * 1000.0,
+            "on": bool(self.lasers.obis_is_on(channel)),
+            "wavelength_nm": self.lasers.obis_wavelength_nm(channel),
+        }
+
+    def _notify_source_listeners(self) -> None:
+        for listener in list(self._source_listeners):
+            try:
+                listener()
+            except Exception:
+                LOGGER.exception("Source listener failed")
 
     def _post_error(self, title: str, ex: Exception) -> None:
         """Log an exception and show it to the operator. Safe from any thread."""
@@ -818,38 +1081,40 @@ class SpectroApp(tk.Tk):
             if not isinstance(self.lasers, SimulatedLaserController):
                 self._hardware_lasers = self.lasers
                 self.lasers = SimulatedLaserController(self.spec.bench)
+                self.lasers.configure_sources(self.laser_configs)
             return
         hardware = getattr(self, "_hardware_lasers", None)
         if hardware is not None:
             self.lasers = hardware
             self._hardware_lasers = None
+            self.lasers.configure_sources(self.laser_configs)
 
     def set_source_state(self, tag: str, turn_on: bool) -> None:
         """Turn one light source on or off. Blocking serial I/O; not for the Tk thread."""
-        self.lasers.ensure_open_for_tag(tag)
-        obis_map = self.lasers.OBIS_MAP
-        if tag in obis_map:
-            channel = obis_map[tag]
+        config = self.source_config(tag)
+        kind = str(config.get("type", "")).upper()
+        power_mw = self.source_power_mw(tag)
+        self.lasers.ensure_open(kind)
+        if kind == light_sources.OBIS:
+            channel = int(config["channel"])
             if turn_on:
-                self.lasers.obis_set_power(channel, float(self._get_power(tag)))
+                self.lasers.obis_set_power(channel, light_sources.power_watts(power_mw))
                 self.lasers.obis_on(channel)
             else:
                 self.lasers.obis_off(channel)
-        elif tag == "377":
+        elif kind == light_sources.CUBE:
             if turn_on:
-                value = float(self._get_power(tag))
-                milliwatts = value * 1000.0 if value <= 0.3 else value
-                self.lasers.cube_on(power_mw=milliwatts)
+                self.lasers.cube_on(power_mw=power_mw)
             else:
                 self.lasers.cube_off()
-        elif tag in self.RELAY_CHANNEL_MAP:
-            relay = self.RELAY_CHANNEL_MAP[tag]
+        elif kind == light_sources.RELAY:
+            relay = int(config["channel"])
             if turn_on:
                 self.lasers.relay_on(relay)
             else:
                 self.lasers.relay_off(relay)
         else:
-            raise RuntimeError(f"Unsupported source '{tag}'.")
+            raise RuntimeError(f"Unsupported source '{tag}' (controller {kind}).")
         self.note_source_state(tag, turn_on)
 
     def toggle_laser(self, tag: str, turn_on: bool) -> None:
@@ -860,24 +1125,38 @@ class SpectroApp(tk.Tk):
         """
         from tabs.ui_utils import run_in_worker
 
+        tag = str(tag)
+        switching = self._switching_sources
+        if tag in switching:
+            # A second click while the first command is still on the wire: the
+            # box goes back to the state the source is really in.
+            try:
+                self.laser_var(tag).set(tag in self.lit_sources)
+            except tk.TclError:
+                pass
+            self.status.toast(f"{source_label(tag)} is still switching", kind="warning")
+            return
         try:
             self._update_ports_from_ui()  # reads Tk entries: main thread only
         except Exception as exc:
             self._post_error(f"Laser {tag}", exc)
             return
+        switching.add(tag)
 
         def _revert(exc):
+            switching.discard(tag)
             try:
                 self.laser_var(tag).set(not turn_on)
             except Exception:
                 pass
-            self.status.progress_end(f"{tag}: switching failed", kind="error")
+            self.status.progress_end(f"{source_label(tag)}: switching failed", kind="error")
             self._post_error(f"Laser {tag}", exc)
 
         def _done(_result):
+            switching.discard(tag)
             self.status.progress_end(f"{source_label(tag)} {'on' if turn_on else 'off'}", kind="success")
 
-        self.status.progress_begin(f"Switching {tag} {'on' if turn_on else 'off'}…")
+        self.status.progress_begin(f"Switching {source_label(tag)} {'on' if turn_on else 'off'}…")
         run_in_worker(self, lambda: self.set_source_state(tag, turn_on), on_done=_done, on_error=_revert, name=f"laser-{tag}")
 
     def _on_closing(self) -> None:
@@ -893,24 +1172,21 @@ class SpectroApp(tk.Tk):
                 LOGGER.exception("Error while closing application")
         self.destroy()
 
-    def _live_reset_view(self) -> None:
-        try:
-            self.live_limits_locked = False
-            if hasattr(self, "live_ax"):
-                self.live_ax.relim()
-                self.live_ax.autoscale_view()
-            blit = getattr(self, "_live_blit", None)
-            if blit is not None:
-                blit.request_full()
-            if hasattr(self, "live_canvas"):
-                self.live_canvas.draw_idle()
-        except Exception as exc:
-            self._post_error("Reset Zoom", exc)
-
     def rebuild_laser_ui(self) -> None:
-        self.available_lasers = list(self.laser_configs.keys())
-        if "Hg_Ar" not in self.available_lasers:
-            self.available_lasers.append("Hg_Ar")
+        """After the source table changed: every source list in the app follows it."""
+        if light_sources.LAMP_TAG not in self.laser_configs:
+            self.laser_configs[light_sources.LAMP_TAG] = light_sources.default_sources()[light_sources.LAMP_TAG]
+        self.available_lasers = self.laser_tags()
+        for controller in (self.lasers, getattr(self, "_hardware_lasers", None)):
+            if controller is not None and hasattr(controller, "configure_sources"):
+                controller.configure_sources(self.laser_configs)
+        for rebuild in list(self._laser_ui_rebuilders):
+            try:
+                rebuild()
+            except Exception:
+                LOGGER.exception("Rebuilding a source list failed")
+        self._refresh_laser_chip()
+        self._notify_source_listeners()
 
     def update_target_peak(self, value) -> None:
         try:
@@ -928,6 +1204,7 @@ class SpectroApp(tk.Tk):
         self.analysis_artifacts = []
         self.analysis_summary_lines = []
         self._analysis_metrics = None
+        self._analysis_metrics_path = None
         self._latest_results_dir = None
         self._latest_csv_path = None
         self._latest_results_timestamp = None
@@ -1003,6 +1280,8 @@ class SpectroApp(tk.Tk):
         self.analysis_artifacts = result.artifacts if result else []
         self.analysis_summary_lines = result.summary_lines if result else []
         self._analysis_metrics = result.metrics if result else None
+        # The numbers next to the plots feed the Key results card of the run tab.
+        self._analysis_metrics_path = getattr(result, "metrics_path", None) if result else None
         self._latest_results_timestamp = timestamp
 
         # This runs on the measurement worker; widget state changes go through the pump.
@@ -1075,6 +1354,7 @@ class SpectroApp(tk.Tk):
                     # Inject into the standard analysis display
                     self.analysis_artifacts = [artifact]
                     self.analysis_summary_lines = summary_lines
+                    self._analysis_metrics_path = None
                     self._latest_results_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     self.refresh_analysis_view()
 
@@ -1133,12 +1413,29 @@ class SpectroApp(tk.Tk):
         if notebook is None:
             return
 
+        from tabs.analysis_results import build_key_results, load_metrics
         from tabs.theme import Colors, logical_px, style_text
-        from tabs.ui_utils import ScrollableFrame
+        from tabs.ui_utils import ScrollableFrame, Tooltip
+
+        timestamp = getattr(self, "_latest_results_timestamp", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # The same results again (Analyse last run pressed twice, or after a
+        # Check spectrometer): show the tab that already has them.
+        for existing in self.analysis_measurement_tabs.values():
+            if existing.get("timestamp") == timestamp and existing.get("artifacts") == list(self.analysis_artifacts):
+                try:
+                    notebook.select(existing["tab"])
+                    self.nb.select(self.analysis_tab)
+                except tk.TclError:
+                    pass
+                return
 
         self.analysis_measurement_counter += 1
-        timestamp = getattr(self, "_latest_results_timestamp", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
-        tab_name = f"Run #{self.analysis_measurement_counter} ({timestamp})"
+        try:
+            clock = datetime.strptime(timestamp, "%Y%m%d_%H%M%S").strftime("%H:%M:%S")
+        except ValueError:
+            clock = timestamp
+        tab_name = f"Run {self.analysis_measurement_counter}  ·  {clock}"
 
         # Remove welcome tab if it exists (destroy, not just forget, so Tk frees it)
         welcome = getattr(self, "analysis_welcome_tab", None)
@@ -1161,20 +1458,39 @@ class SpectroApp(tk.Tk):
         scroll.pack(fill="both", expand=True)
         scrollable_frame = scroll.content
 
-        # Preview grid: as many columns as the width allows, previews sized to fill them.
+        # Preview grid. The width comes from the main notebook, which is always
+        # mapped: the run tab's own notebook keeps the size it had when the
+        # Analysis page was last shown (the warm-up size, if never), and a grid
+        # laid out for that came up as two columns of small previews on a 4K
+        # screen. Columns of about 640 logical px hold a 150 dpi plot at near
+        # its native size.
         num_plots = len(self.analysis_artifacts)
-        notebook_width = max(600, notebook.winfo_width() or self.winfo_width() or 0)
-        cols = 1 if num_plots == 1 else min(num_plots, max(2, notebook_width // logical_px(self, 760)))
-        preview_width = max(420, min(1400, notebook_width // cols - logical_px(self, 70)))
-        preview_size = (preview_width, int(preview_width * PREVIEW_MAX_SIZE[1] / PREVIEW_MAX_SIZE[0]))
+        notebook_width = max(600, self.nb.winfo_width() - logical_px(self, 48))
+        cols = max(1, min(max(1, num_plots), int(round(notebook_width / logical_px(self, 640)))))
+        preview_width = max(360, notebook_width // cols - logical_px(self, 56))
+        preview_size = (preview_width, int(preview_width * 0.62))
         preview_targets = []
+        items = []
+        grid_row = 0
+
+        metrics = load_metrics(getattr(self, "_analysis_metrics_path", None))
+        if metrics:
+            try:
+                key_results = build_key_results(scrollable_frame, metrics, root=self)
+            except Exception:
+                LOGGER.exception("Key results card could not be built")
+                key_results = None
+            if key_results is not None:
+                key_results.grid(row=grid_row, column=0, columnspan=cols, padx=10, pady=(10, 0), sticky="ew")
+                grid_row += 1
 
         for idx, artifact in enumerate(self.analysis_artifacts):
-            row = idx // cols
+            row = grid_row + idx // cols
             col = idx % cols
 
             art_name = getattr(artifact, "name", f"Plot {idx + 1}")
             art_path = Path(str(getattr(artifact, "path", "")))
+            items.append((str(art_name), art_path))
 
             plot_frame = ttk.LabelFrame(scrollable_frame, text=art_name, padding=12)
             plot_frame.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
@@ -1196,7 +1512,8 @@ class SpectroApp(tk.Tk):
             preview_label = ttk.Label(plot_frame, text="Loading preview…", anchor="center", style="Muted.TLabel")
             preview_label.pack(fill="both", expand=True, padx=5, pady=5)
             if art_path.is_file():
-                preview_targets.append((preview_label, art_path))
+                preview_targets.append((preview_label, art_path, idx))
+                Tooltip(preview_label, "Click to view at full size; Left and Right step through the plots.")
             else:
                 preview_label.configure(text="Plot file missing.")
 
@@ -1204,7 +1521,7 @@ class SpectroApp(tk.Tk):
             scrollable_frame.grid_columnconfigure(c, weight=1, uniform="plots")
 
         # Summary section at the bottom
-        summary_row = (num_plots + cols - 1) // cols
+        summary_row = grid_row + (num_plots + cols - 1) // cols
         summary_frame = ttk.LabelFrame(scrollable_frame, text="Analysis Summary", padding=12)
         summary_frame.grid(row=summary_row, column=0, columnspan=cols, padx=10, pady=10, sticky="ew")
 
@@ -1219,6 +1536,8 @@ class SpectroApp(tk.Tk):
         record = {
             "tab": measurement_tab,
             "timestamp": timestamp,
+            "artifacts": list(self.analysis_artifacts),
+            "items": items,
             "csv_path": str(self._latest_csv_path) if self._latest_csv_path else None,
             "images": [],
         }
@@ -1253,7 +1572,7 @@ class SpectroApp(tk.Tk):
                 continue
             shutil.copy2(src, dest_dir / src.name)
             copied += 1
-        messagebox.showinfo("Export Plots", f"Exported {copied} plot(s) to:\n{dest_dir}")
+        self.status.toast(f"Exported {copied} plot{'s' if copied != 1 else ''} to {dest_dir}")
 
     def export_analysis_summary(self):
         if not self.analysis_summary_lines:
@@ -1269,7 +1588,7 @@ class SpectroApp(tk.Tk):
         if not path:
             return
         Path(path).write_text("\n".join(self.analysis_summary_lines) + "\n", encoding="utf-8")
-        messagebox.showinfo("Export Summary", f"Saved summary to:\n{path}")
+        self.status.toast(f"Summary saved: {Path(path).name}")
 
     def open_results_folder(self):
         if self._latest_results_dir is None or not self._latest_results_dir.exists():
@@ -1316,15 +1635,15 @@ class SpectroApp(tk.Tk):
                 return
             resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
             decoded = []
-            for label, path in targets:
+            for label, path, index in targets:
                 try:
                     with Image.open(path) as raw_image:
                         preview = raw_image.convert("RGB")
                     preview.thumbnail(size, resampling)
-                    decoded.append((label, path, preview))
+                    decoded.append((label, path, index, preview))
                 except Exception:
                     LOGGER.exception("Unable to build analysis preview for %s", path)
-                    decoded.append((label, path, None))
+                    decoded.append((label, path, index, None))
             self.pump.post(self._attach_analysis_previews, decoded, record)
 
         threading.Thread(target=_decode, daemon=True, name="analysis-previews").start()
@@ -1335,7 +1654,7 @@ class SpectroApp(tk.Tk):
             from PIL import ImageTk
         except Exception:
             return
-        for label, path, preview in decoded:
+        for label, path, index, preview in decoded:
             try:
                 if not label.winfo_exists():
                     continue
@@ -1343,12 +1662,25 @@ class SpectroApp(tk.Tk):
                     label.configure(text=f"Saved plot:\n{path.name}")
                     continue
                 photo = ImageTk.PhotoImage(preview, master=self)
-                label.configure(image=photo, text="")
+                label.configure(image=photo, text="", cursor="hand2")
                 label.image = photo
-                label.bind("<Button-1>", lambda _event, p=path: self._open_path_with_default_app(p, "Analysis Plot"))
+                label.bind("<Button-1>", lambda _event, r=record, i=index: self.open_analysis_image(r, i))
                 record["images"].append(photo)
             except tk.TclError:
                 continue
+
+    def open_analysis_image(self, record, index: int) -> None:
+        """Show a run's plot at full size inside the application (Left/Right step through the run)."""
+        from tabs.analysis_results import open_image_viewer
+
+        items = record.get("items") or []
+        if not items:
+            return
+        try:
+            open_image_viewer(self, items, index,
+                              open_externally=lambda p: self._open_path_with_default_app(Path(p), "Analysis Plot"))
+        except Exception as exc:
+            self._post_error("Plot viewer", exc)
 
     def _open_path_with_default_app(self, path: Path, title: str) -> None:
         if not path.exists():
@@ -1364,22 +1696,35 @@ class SpectroApp(tk.Tk):
         except Exception as exc:
             self._post_error(title, exc)
 
+    # The auto-IT title (IT and peak) follows the frames at this rate at most:
+    # every title change costs a full redraw, and short exposures arrive far faster.
+    AUTO_IT_TITLE_MIN_S = 0.25
+
     def _render_auto_it_plot(self, payload) -> None:
         """Main thread: draw the latest Auto-IT frame on the Measurements plot."""
+        import time
+
         plot_tag, plot_spectrum, plot_it_ms, plot_peak = payload
         hint = getattr(self, "meas_empty_text", None)
         if hint is not None and hint.get_visible():
             hint.set_visible(False)
         xs = np.arange(len(plot_spectrum))
         self.meas_sig_line.set_data(xs, plot_spectrum)
-        self.meas_ax.set_xlim(0, max(10, len(plot_spectrum) - 1))
-        self.meas_ax.set_ylim(0, 65000)
-        from tabs.theme import plot_title_font
+        xlim = (0, max(10, len(plot_spectrum) - 1))
+        if tuple(self.meas_ax.get_xlim()) != xlim:
+            self.meas_ax.set_xlim(*xlim)
+        if tuple(self.meas_ax.get_ylim()) != (0, 65000):
+            self.meas_ax.set_ylim(0, 65000)
+        state = self.__dict__.setdefault("_auto_it_title", {"tag": None, "at": 0.0})
+        now = time.monotonic()
+        if state["tag"] != plot_tag or now - state["at"] >= self.AUTO_IT_TITLE_MIN_S:
+            from tabs.theme import plot_title_font
 
-        self.meas_ax.set_title(
-            f"Auto-IT: {plot_tag} nm | IT={plot_it_ms:.2f} ms | Peak={plot_peak:.0f}",
-            **plot_title_font(pad=8),
-        )
+            self.meas_ax.set_title(
+                f"Auto-IT: {source_label(plot_tag)} | IT={plot_it_ms:.2f} ms | Peak={plot_peak:,.0f}",
+                **plot_title_font(pad=8),
+            )
+            state["tag"], state["at"] = plot_tag, now
 
     def _update_auto_it_plot(self, tag, spectrum, it_ms, peak):
         """Worker thread: queue the newest Auto-IT frame; at most one redraw per pump tick."""

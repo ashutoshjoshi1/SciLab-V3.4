@@ -122,6 +122,9 @@ class SimulatedLaserController:
     OBIS_MAP = {"405": 5, "445": 4, "488": 3, "640": 2, "685": 6}
     RELAY_MAP = {2: "517", 1: "532", 4: "Hg_Ar"}
 
+    # What the simulated laser box reports for every slot, in watts.
+    OBIS_LIMITS_W = (0.001, 0.100)
+
     def __init__(self, bench: Optional[SimulatedBench] = None) -> None:
         self.bench = bench or DEFAULT_BENCH
         self.obis = _NullSerial("OBIS")
@@ -129,6 +132,8 @@ class SimulatedLaserController:
         self.relay = _NullSerial("RELAY")
         self.log: List[Tuple[str, ...]] = []   # every command issued, for assertions in tests
         self._tag_by_channel = {channel: tag for tag, channel in self.OBIS_MAP.items()}
+        self._tag_by_relay = dict(self.RELAY_MAP)
+        self._setpoints_w: Dict[int, float] = {}
 
     # -- port management (no-ops) ------------------------------------------------
 
@@ -137,9 +142,23 @@ class SimulatedLaserController:
         self.cube.configure(port=com_ports.get("CUBE", ""))
         self.relay.configure(port=com_ports.get("RELAY", ""))
 
+    def configure_sources(self, sources: Mapping[str, Mapping[str, object]]) -> None:
+        """Route channels to tags the way the application's source table says."""
+        obis = {int(cfg["channel"]): tag for tag, cfg in sources.items()
+                if str(cfg.get("type", "")).upper() == "OBIS" and cfg.get("channel")}
+        relays = {int(cfg["channel"]): tag for tag, cfg in sources.items()
+                  if str(cfg.get("type", "")).upper() == "RELAY" and cfg.get("channel")}
+        if obis:
+            self._tag_by_channel = obis
+        if relays:
+            self._tag_by_relay = relays
+
     def open_all(self) -> None:
         for device in (self.obis, self.cube, self.relay):
             device.open()
+
+    def ensure_open(self, kind: str) -> None:
+        return None
 
     def ensure_open_for_tag(self, tag: str) -> None:
         return None
@@ -148,6 +167,31 @@ class SimulatedLaserController:
 
     def obis_set_power(self, channel: int, power_watts: float) -> None:
         self.log.append(("obis_set_power", str(channel), f"{float(power_watts):.4f}"))
+        low, high = self.OBIS_LIMITS_W
+        if not low <= float(power_watts) <= high:
+            raise RuntimeError(f"OBIS refused 'SOUR{int(channel)}:POW:LEV:IMM:AMPL {float(power_watts):.4f}': "
+                               f"ERR-220 (invalid parameter (out of range?))")
+        self._setpoints_w[int(channel)] = float(power_watts)
+
+    def obis_setpoint_w(self, channel: int) -> float:
+        return self._setpoints_w.get(int(channel), self.OBIS_LIMITS_W[0])
+
+    def obis_output_w(self, channel: int) -> float:
+        tag = self._tag_by_channel.get(int(channel))
+        return self.obis_setpoint_w(channel) if tag in self.bench.active() else 0.0
+
+    def obis_power_limits_w(self, channel: int) -> Tuple[float, float]:
+        return self.OBIS_LIMITS_W
+
+    def obis_is_on(self, channel: int) -> bool:
+        return self._tag_by_channel.get(int(channel)) in self.bench.active()
+
+    def obis_wavelength_nm(self, channel: int) -> Optional[float]:
+        tag = self._tag_by_channel.get(int(channel))
+        try:
+            return float(tag) if tag is not None else None
+        except ValueError:
+            return None
 
     def obis_on(self, channel: int) -> None:
         tag = self._tag_by_channel.get(int(channel))
@@ -181,18 +225,18 @@ class SimulatedLaserController:
     # -- Relays ------------------------------------------------------------------
 
     def relay_on(self, relay_number: int) -> None:
-        tag = self.RELAY_MAP.get(int(relay_number))
+        tag = self._tag_by_relay.get(int(relay_number))
         self.log.append(("relay_on", str(relay_number)))
         if tag is not None:
             self.bench.set_source(tag, True)
 
     def relay_off(self, relay_number: int) -> None:
-        tag = self.RELAY_MAP.get(int(relay_number))
+        tag = self._tag_by_relay.get(int(relay_number))
         self.log.append(("relay_off", str(relay_number)))
         if tag is not None:
             self.bench.set_source(tag, False)
 
-    def all_off(self) -> List[str]:
+    def all_off(self, obis_channels=None, relay_numbers=None) -> List[str]:
         self.log.append(("all_off",))
         self.bench.all_off()
         return []

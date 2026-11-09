@@ -180,10 +180,8 @@ class CheckSpectrometerService:
         auto_it_ms = self._auto_it(spec, sat_limit, warnings)
 
         # Step 2 — final acquisition: 3 s, single repetition
-        spec.set_it(_MEASURE_IT_MS)
-        result = spec.measure(ncy=1)
-        if result != "OK":
-            LOGGER.warning("Check spectrometer measure returned: %s", result)
+        self._check(spec.set_it(_MEASURE_IT_MS), "set_it")
+        self._acquire_frame(spec)
 
         signal_mean = np.asarray(spec.rcm, dtype=float)
         signal_std = np.asarray(spec.rcs, dtype=float)
@@ -260,6 +258,28 @@ class CheckSpectrometerService:
         )
 
     # ------------------------------------------------------------------
+    # Acquisition helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check(result, action: str) -> None:
+        """Backends report failure by returning a string, not by raising."""
+        if isinstance(result, str) and result and result != "OK":
+            raise RuntimeError(f"{action} failed: {result}")
+
+    def _acquire_frame(self, spec) -> None:
+        """One frame, complete: ``measure`` is non-blocking on every real backend.
+
+        Reading ``rcm`` straight after ``measure`` gave the previous frame,
+        so the fit, the plot and the CSV came from the last auto-IT frame
+        while the summary claimed the 3 s acquisition.
+        """
+        self._check(spec.measure(ncy=1), "measure")
+        waiter = getattr(spec, "wait_for_measurement", None)
+        if callable(waiter):
+            self._check(waiter(), "wait_for_measurement")
+
+    # ------------------------------------------------------------------
     # Step 1 — auto-IT to ~60% saturation, no dark correction
     # ------------------------------------------------------------------
 
@@ -274,10 +294,8 @@ class CheckSpectrometerService:
         current_it = float(getattr(spec, "it_ms", 10.0)) or 10.0
 
         for _ in range(_AUTO_IT_MAX_ITERS):
-            spec.set_it(current_it)
-            res = spec.measure(ncy=1)
-            if res != "OK":
-                break
+            self._check(spec.set_it(current_it), "set_it")
+            self._acquire_frame(spec)
 
             rcm = np.asarray(spec.rcm, dtype=float)
             if rcm.size == 0:
