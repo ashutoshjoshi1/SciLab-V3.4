@@ -10,7 +10,7 @@ the installer. The single source of truth is
 
 ## [Unreleased]
 
-## [3.4.9.0] — 2026-11-09
+## [3.4.8.1] — 2026-11-09
 
 A review of every page for function, smoothness and finish. Live View gains
 frame averaging, dark subtraction and a frame export; the Analysis page opens
@@ -604,4 +604,4 @@ remains the fuller account. Released before this changelog existed.
 v3.3 and earlier predate this changelog. See the git history.
 
 [Unreleased]: https://github.com/ashutoshjoshi1/SciLab-V3.4/compare/main...HEAD
-[3.4.9.0]: https://github.com/ashutoshjoshi1/SciLab-V3.4/releases/tag/v3.4.9.0
+[3.4.8.1]: https://github.com/ashutoshjoshi1/SciLab-V3.4/releases/tag/v3.4.8.1
