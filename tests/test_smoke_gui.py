@@ -666,3 +666,83 @@ def test_help_window_switch_guard_and_eta(tk_app):
     assert pump_until(tk_app, lambda: "left" not in tk_app.run_progress_panel.elapsed_label.cget("text"), timeout=5.0)
     tk_app._run_chip.hide()
     assert not errors(tk_app), tk_app.dialogs
+
+
+def _toolbar_zoom(canvas, ax, x_from, x_to, y_from, y_to):
+    """Drive matplotlib's zoom tool with the events the Tk backend would send."""
+    from matplotlib.backend_bases import MouseButton, MouseEvent
+
+    toolbar = canvas.toolbar
+    toolbar.zoom()
+    x0, y0 = ax.transData.transform((x_from, y_from))
+    x1, y1 = ax.transData.transform((x_to, y_to))
+    MouseEvent("button_press_event", canvas, x0, y0, button=MouseButton.LEFT)._process()
+    MouseEvent("motion_notify_event", canvas, x1, y1, button=MouseButton.LEFT, buttons={MouseButton.LEFT})._process()
+    MouseEvent("button_release_event", canvas, x1, y1, button=MouseButton.LEFT)._process()
+    toolbar.zoom()
+
+
+def test_toolbar_home_resets_the_live_view(tk_app):
+    """Home on the plot toolbar is Reset Zoom: the whole trace again, with the autoscale unlocked."""
+    import numpy as np
+
+    tk_app.nb.select(tk_app.live_tab)
+    tk_app.update()
+    tk_app.live_invert_x.set(False)
+    tk_app.live_log_y.set(False)
+    tk_app._live_reset_view()
+    tk_app.update()
+    ax, canvas, toolbar = tk_app.live_ax, tk_app.live_canvas, tk_app.live_toolbar
+    assert canvas.toolbar is toolbar
+
+    npix = 2048
+    frame = np.full(npix, 600.0)
+    frame[900] = 20000.0
+    tk_app._update_live_plot(np.arange(npix, dtype=float), frame)
+    assert pump_until(tk_app, lambda: tk_app.live_line.get_ydata()[900] == 20000.0, timeout=5.0)
+    full_x = ax.get_xlim()
+    assert full_x == (0, npix - 1)
+
+    # Before any zoom, matplotlib's Home had nothing to go back to; ours resets anyway.
+    ax.set_xlim(300, 700)
+    tk_app.live_limits_locked = True
+    toolbar.home()
+    tk_app.update()
+    assert ax.get_xlim() == full_x and not tk_app.live_limits_locked
+
+    # A real zoom with the toolbar tool locks the view; Home brings the whole trace back.
+    _toolbar_zoom(canvas, ax, 800, 1000, 100, 15000)
+    tk_app.update()
+    low, high = ax.get_xlim()
+    assert 750 < low < 850 and 950 < high < 1050, (low, high)
+    assert tk_app.live_limits_locked
+    toolbar.home()
+    tk_app.update()
+    assert ax.get_xlim() == full_x and not tk_app.live_limits_locked
+    assert toolbar._nav_stack() is None            # the zoom history is dropped with the reset
+    # The trace keeps following the signal after Home.
+    taller = frame.copy()
+    taller[900] = 40000.0
+    tk_app._update_live_plot(np.arange(npix, dtype=float), taller)
+    assert pump_until(tk_app, lambda: ax.get_ylim()[1] > 40000.0, timeout=5.0)
+    assert not errors(tk_app), tk_app.dialogs
+
+
+def test_toolbar_home_resets_check_resolution(tk_app):
+    tk_app.nb.select(tk_app.check_res_tab)
+    tk_app.update()
+    ax, toolbar = tk_app.check_res_ax, tk_app.check_res_toolbar
+    ax.set_xlim(100, 200)                          # panned away from the line fitted earlier in the session
+    tk_app._check_res_locked = True
+    toolbar.home()
+    tk_app.update()
+    assert not tk_app._check_res_locked
+    low, high = ax.get_xlim()
+    fit_x = tk_app.check_res_ax.lines[2].get_xdata()      # the fitted points of the last frame
+    if len(fit_x):
+        # Back to the default view: tight on the fitted points of the last frame, not the full detector.
+        assert low <= fit_x.min() and high >= fit_x.max() and high - low < 200, (low, high)
+    else:
+        assert low == 0 and high >= 2047
+    assert toolbar._nav_stack() is None
+    assert not errors(tk_app), tk_app.dialogs

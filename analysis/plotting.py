@@ -18,6 +18,19 @@ SAVE_DPI = 150
 HEATMAP_DOWNSAMPLE = 4
 
 
+def _vertical_pixel_ticks(ax, npix: int, step: int = 100) -> None:
+    """A tick every ``step`` pixels (per 2048 pixels) with the labels upright (vertical).
+
+    Twenty-one horizontal labels across a 2048-pixel axis overlap or touch at
+    the sizes these figures use; turned 90 degrees they stay apart and readable.
+    The step grows with the pixel count, so a 4096-pixel axis gets the same
+    twenty-one labels (every 200 pixels) rather than forty-one.
+    """
+    step = int(step) * max(1, int(round(max(int(npix), 1) / 2048.0)))
+    ax.set_xticks(np.arange(0, max(int(npix), 1) + step // 2, step))
+    ax.tick_params(axis="x", labelrotation=90)
+
+
 def _save_figure(fig: Figure, path: Path, artifact_name: str) -> AnalysisArtifact:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=SAVE_DPI, bbox_inches="tight")
@@ -39,7 +52,7 @@ def render_characterization_artifacts(
         fig_norm = Figure(figsize=(12, 6))
         ax_norm = fig_norm.add_subplot(111)
         ax_norm.set_yscale("log")
-        ax_norm.set_xticks(np.arange(0, npix, 100))
+        _vertical_pixel_ticks(ax_norm, npix)
         ax_norm.set_ylim(1e-5, 1.4)
         for sample in computation.laser_lsfs:
             ax_norm.plot(sample.values, label=f"{sample.wavelength_nm:.1f} nm")
@@ -59,7 +72,7 @@ def render_characterization_artifacts(
     if computation.corrected_640_spectra:
         fig_640 = Figure(figsize=(12, 6))
         ax_640 = fig_640.add_subplot(111)
-        ax_640.set_xticks(np.arange(0, max(npix, 1), 100))
+        _vertical_pixel_ticks(ax_640, npix)
         for spectrum in computation.corrected_640_spectra:
             ax_640.plot(spectrum.values, label=f"{spectrum.label} @ {spectrum.integration_time_ms:.1f} ms")
         ax_640.set_title(f"Spectrometer= {serial_number}: Dark-Corrected 640 nm Measurements")
@@ -120,7 +133,7 @@ def render_characterization_artifacts(
         fig_sdf = Figure(figsize=(12, 6))
         ax_sdf = fig_sdf.add_subplot(111)
         ax_sdf.set_xlim(0, max(npix, 1))
-        ax_sdf.set_xticks(np.arange(0, max(npix, 1), 100))
+        _vertical_pixel_ticks(ax_sdf, npix)
         for column in computation.sdf_reference_pixels:
             ax_sdf.plot(computation.sdf_matrix[:, int(column)], label=f"{int(column)} pixel")
         ax_sdf.set_xlabel("Pixels")
@@ -178,8 +191,8 @@ def render_characterization_artifacts(
         )
         ax_disp.set_xlabel("Pixel", fontsize=18)
         ax_disp.set_ylabel("Wavelength (nm)", fontsize=18)
-        ax_disp.set_xticks(np.arange(0, npix + 50, 100))
         ax_disp.tick_params(axis="both", labelsize=16)
+        _vertical_pixel_ticks(ax_disp, npix)
         ax_disp.set_title(f"Spectrometer= {serial_number}: Dispersion Fit")
         ax_disp.grid(True)
         ax_disp.legend(fontsize=14)

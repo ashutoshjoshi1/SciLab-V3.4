@@ -36,15 +36,39 @@ class CharacterizationConfig:
         507.30,
         546.08,
     )
+    # Every window below that is given in pixels was tuned on a 2048-pixel
+    # detector. A detector with more pixels over the same wavelength range has
+    # proportionally more pixels per nanometre, so the analysis scales these
+    # windows by ``pixel_count / reference_pixel_count`` (a 4096-pixel head gets
+    # twice the pixels; a 2048-pixel head is unchanged). Without this a
+    # 4096-pixel instrument's slit fit saw half the wavelength span around each
+    # line and its SDF in-band region cut into the line itself.
+    reference_pixel_count: int = 2048
+    # In-band region (pixels at the reference pixel count) left out of the
+    # stray-light normalisation of each LSF.
     ib_region_size: int = 20
     sat_threshold: float = 65400.0
+    # Half-window (pixels at the reference pixel count) cut around each matched
+    # Hg-Ar line.
     win_hg: int = 30
-    # Hg-Ar peak detection (scipy.signal.find_peaks). Both values were tuned on a
-    # 2048-pixel, ~0.155 nm/px instrument; adjust them for a different grating.
+    # Hg-Ar peak detection (scipy.signal.find_peaks); the distance is in pixels
+    # at the reference pixel count.
     peak_prominence_fraction: float = 0.014
     peak_min_distance_px: int = 20
-    # Half-window (pixels) around each line used for the slit-function fit.
+    # Half-window (pixels at the reference pixel count) around each line used
+    # for the slit-function fit.
     fit_window_px: int = 25
+
+    def pixel_scale(self, pixel_count: int) -> float:
+        """Pixels per reference pixel for a detector of ``pixel_count`` pixels (1.0 at 2048)."""
+        reference = int(self.reference_pixel_count or 0)
+        if reference <= 0 or int(pixel_count) <= 0:
+            return 1.0
+        return float(pixel_count) / float(reference)
+
+    def scaled_px(self, value: int, pixel_count: int) -> int:
+        """A pixel window designed at the reference pixel count, for ``pixel_count`` pixels (never below 1)."""
+        return max(1, int(round(int(value) * self.pixel_scale(pixel_count))))
     # Bounds for the slit-function fit: a2 (width, nm), a3 (shape exponent), c1 (baseline).
     slit_a2_bounds: Tuple[float, float] = (1e-3, 10.0)
     slit_a3_bounds: Tuple[float, float] = (0.5, 12.0)

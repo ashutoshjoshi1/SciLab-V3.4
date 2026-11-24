@@ -41,6 +41,22 @@ _TITLE_MIN_S = 1.0
 _XLIM_SLACK_PX = 3.0
 
 
+class _CheckResToolbar(NavigationToolbar2Tk):
+    """matplotlib's toolbar with Home doing what Reset Zoom does (see live_view_tab._LiveToolbar)."""
+
+    toolitems = tuple(
+        (text, "Reset the view: back to the fit window, following the line again", image, callback)
+        if callback == "home" else (text, tip, image, callback)
+        for text, tip, image, callback in NavigationToolbar2Tk.toolitems
+    )
+    reset_view = None
+
+    def home(self, *args):
+        if self.reset_view is not None:
+            return self.reset_view()
+        return super().home(*args)
+
+
 def build(app):
     app.check_res_running = threading.Event()
     app._check_res_pending_it = None
@@ -106,7 +122,7 @@ def build(app):
     canvas = FigureCanvasTkAgg(fig, master=plot_container)
     relax_canvas_size(canvas, 620, 340, dpi=screen_dpi(app))
     bind_figure_margins(canvas, fig)
-    app.check_res_toolbar = mount_toolbar(canvas, plot_container, NavigationToolbar2Tk)
+    app.check_res_toolbar = mount_toolbar(canvas, plot_container, _CheckResToolbar)
     canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
 
     # The four series are blitted over a cached background (ticks, grid,
@@ -263,13 +279,19 @@ def build(app):
         app._check_res_locked = False
         _view_state["xlim"] = None
         snapshot = _view_state["last_snapshot"]
-        if snapshot is not None:
-            try:
+        try:
+            app.check_res_toolbar.update()   # drop the zoom history the toolbar kept
+            if snapshot is not None:
                 _render_snapshot(snapshot)
-                app.check_res_toolbar.update()   # drop the zoom history the toolbar kept
-                blit.draw()
-            except Exception as exc:
-                app._post_error("Reset Zoom", exc)
+            else:
+                ax.set_xlim(0, max(10, int(getattr(app, "npix", 0) or 0) or 2048))
+                ax.set_ylim(-0.05, 1.15)
+                blit.request_full()
+            blit.draw()
+        except Exception as exc:
+            app._post_error("Reset Zoom", exc)
+
+    app.check_res_toolbar.reset_view = _reset_zoom
 
     def _start():
         if app.check_res_running.is_set():

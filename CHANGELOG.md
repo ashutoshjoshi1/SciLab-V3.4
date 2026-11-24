@@ -94,6 +94,28 @@ choice widgets, port fields and plot redraws are brought up to date.
 
 ### Fixed
 
+- **The toolbar's Home button on the Live View and Check Resolution plots
+  resets the view.** matplotlib's Home only went back to the limits it had
+  recorded when the first zoom began, did nothing before any zoom, and left
+  the autoscale locked, so the trace could sit outside the view it returned
+  to. Home now does what Reset Zoom does: the whole spectrum (or the fit
+  window), following the signal again, in the current direction and scale.
+- **Analysis on a 4096-pixel detector.** Every window the analysis cuts in
+  pixels was sized for a 2048-pixel detector: the slit-function fit took
+  ±25 px around each line, the SDF stray-light normalisation left out a
+  20 px in-band region, each Hg-Ar line was cut at ±30 px and peaks had to be
+  20 px apart. On a 4096-pixel head over the same wavelength range each of
+  these covered half the span it should, so the slit fit saw too little
+  baseline (wrong a2, a3 and FWHM on the Slit Functions plot and the
+  resolution curve) and the in-band region cut into the line. The windows
+  now scale with the pixel count (`CharacterizationConfig.reference_pixel_count`,
+  2048): a 4096-pixel instrument gets twice the pixels, a 2048-pixel one is
+  unchanged and its golden numbers are identical.
+- **Analysis plots: the pixel-axis labels are upright.** A tick every 100
+  pixels across 2048 pixels put 21 labels on the Dispersion Fit, Normalized
+  LSFs, SDF and 640 nm plots, where they overlapped (Dispersion Fit) or
+  touched; they are rotated 90° and read cleanly, and the step grows with
+  the pixel count (every 200 px on a 4096-pixel axis).
 - Reading or writing the EEPROM now holds the spectrometer token for the
   duration of the DLL call, so a Live View or run cannot start on the same
   handle meanwhile (it only checked the token beforehand).

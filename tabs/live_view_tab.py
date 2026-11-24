@@ -32,14 +32,29 @@ _MAX_AVERAGE_FRAMES = 64   # rolling average depth the operator may ask for
 
 
 class _LiveToolbar(NavigationToolbar2Tk):
-    """matplotlib's toolbar, whose sliders button opens the Live View chart settings."""
+    """matplotlib's toolbar: Home resets the live view, the sliders button opens the chart settings.
+
+    matplotlib's own Home only steps back to the limits it recorded when the
+    first zoom began, and leaves the autoscale locked, so on a streaming plot
+    it looked dead: nothing happened before a zoom, and after one the trace
+    could sit outside the view it went back to. Here Home is Reset Zoom: the
+    whole trace again, autoscale on, in the current direction and scale.
+    """
 
     toolitems = tuple(
         (text, "Chart settings: invert the spectrum, logarithmic counts, margins", image, callback)
-        if callback == "configure_subplots" else (text, tip, image, callback)
+        if callback == "configure_subplots" else
+        (text, "Reset the view: the whole spectrum, following the signal again", image, callback)
+        if callback == "home" else (text, tip, image, callback)
         for text, tip, image, callback in NavigationToolbar2Tk.toolitems
     )
     open_settings = None  # set by the tab once the toolbar is mounted
+    reset_view = None     # set by the tab: the Reset Zoom action
+
+    def home(self, *args):
+        if self.reset_view is not None:
+            return self.reset_view()
+        return super().home(*args)
 
     def configure_subplots(self, *args):
         if self.open_settings is not None:
@@ -126,6 +141,7 @@ def build(app):
         # Toolbar first, canvas second: see mount_toolbar.
         app.live_toolbar = mount_toolbar(app.live_canvas, plot_container, _LiveToolbar)
         app.live_toolbar.open_settings = _open_chart_settings
+        app.live_toolbar.reset_view = _reset_live_view
         app.live_canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
 
         # Blit only the trace lines and the peak mark over a cached background; a

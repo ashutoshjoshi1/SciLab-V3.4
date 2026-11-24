@@ -844,10 +844,11 @@ All analysis constants live on `CharacterizationConfig` with the historical valu
 | `laser_sequence` | 377, 405, 445, 488, 517, 532, 640, 685 | tags analysed as LSFs (Hg-Ar handled separately) |
 | `laser_reference_map` | 377 -> 375.0, 405 -> 403.46, others nominal | true line wavelength per tag |
 | `known_lines_nm` | 289.36 .. 546.08 (11 Hg-Ar lines) | lamp peak matching; a second attempt drops the last line |
+| `reference_pixel_count` | 2048 | the pixel count the pixel windows below were tuned at; they are scaled by `pixel_count / 2048` (3.4.8.1), so a 4096-pixel head gets twice the pixels and a 2048-pixel head is unchanged |
 | `ib_region_size` | 20 px | in-band region zeroed for stray-light normalisation of the SDF |
 | `sat_threshold` | 65,400 | LSF rejection |
 | `win_hg` | 30 px | half window for lamp LSFs |
-| `peak_prominence_fraction`, `peak_min_distance_px` | 0.014, 20 | `find_peaks` tuning for a 2048-pixel, ~0.155 nm/px instrument |
+| `peak_prominence_fraction`, `peak_min_distance_px` | 0.014, 20 px | `find_peaks` tuning for a ~0.155 nm/px instrument at 2048 pixels |
 | `fit_window_px` | 25 px | half window for slit-function fits |
 | `slit_a2_bounds`, `slit_a3_bounds`, `slit_c1_bounds` | (0.001, 10) nm, (0.5, 12), (-0.5, 0.5) | fit bounds |
 | `slit_example_wavelengths_nm`, `slit_example_a2_clip` | 350, 400, 480 nm; (0.2, 5.0) | illustrative curves |

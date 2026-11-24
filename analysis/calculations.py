@@ -351,6 +351,13 @@ def compute_characterization(
         )
 
     npix = len(pixel_cols)
+    # The pixel windows below were designed for a 2048-pixel detector; a head
+    # with more pixels over its range gets proportionally wider windows (see
+    # CharacterizationConfig.reference_pixel_count).
+    ib_size_px = config.scaled_px(config.ib_region_size, npix)
+    win_hg_px = config.scaled_px(config.win_hg, npix)
+    peak_min_distance_px = config.scaled_px(config.peak_min_distance_px, npix)
+    fit_window_px = config.scaled_px(config.fit_window_px, npix)
 
     laser_lsfs: List[LsfSample] = []
     pixel_locations: List[int] = []
@@ -444,7 +451,7 @@ def compute_characterization(
         summary_lines.append("Unable to compute Hg-Ar corrected signal.")
     else:
         prominence = config.peak_prominence_fraction * np.max(signal_corr) if np.max(signal_corr) > 0 else 0
-        peaks, _ = find_peaks(signal_corr, prominence=prominence, distance=config.peak_min_distance_px)
+        peaks, _ = find_peaks(signal_corr, prominence=prominence, distance=peak_min_distance_px)
         peaks = np.sort(peaks)
         candidates = [config.known_lines_nm, config.known_lines_nm[:-1]]
         solutions = [best_ordered_linear_match(peaks, candidate) for candidate in candidates]
@@ -469,8 +476,8 @@ def compute_characterization(
     hg_ar_lamp_lsfs: List[LsfSample] = []
     if signal_corr is not None and len(peaks) > 0:
         for pixel_value, wavelength_nm in zip(matched_pixels, matched_wavelengths):
-            start = max(int(pixel_value - config.win_hg), 0)
-            end = min(int(pixel_value + config.win_hg + 1), npix)
+            start = max(int(pixel_value - win_hg_px), 0)
+            end = min(int(pixel_value + win_hg_px + 1), npix)
             segment = signal_corr[start:end]
             segment = segment - segment.min()
             denom = max(1e-12, segment.max())
@@ -487,7 +494,7 @@ def compute_characterization(
 
     sdf_matrix = np.zeros((npix, npix))
     for sample in laser_lsfs:
-        normalized = normalize_lsf_stray_light(np.asarray(sample.values, dtype=float), sample.pixel_index, config.ib_region_size)
+        normalized = normalize_lsf_stray_light(np.asarray(sample.values, dtype=float), sample.pixel_index, ib_size_px)
         sdf_matrix[:, sample.pixel_index] = normalized
 
     for idx in range(len(pixel_locations_arr) - 1, 0, -1):
@@ -510,7 +517,7 @@ def compute_characterization(
     # Fill the parts of each shifted column that fell off the detector with the
     # edge value of its reference LSF. One vectorized mask per column instead of
     # a Python loop over every (row, column) pair (~4 M iterations at npix=2048).
-    half_ib = config.ib_region_size // 2
+    half_ib = ib_size_px // 2
     for idx in range(len(pixel_locations_arr) - 1, -1, -1):
         current_pixel = int(pixel_locations_arr[idx])
         stop_column = int(pixel_locations_arr[idx - 1]) + 1 if idx > 0 else 0
@@ -599,7 +606,7 @@ def compute_characterization(
     all_lsfs: List[np.ndarray] = []
     all_peak_pixels: List[int] = []
     all_wavelengths: List[float] = []
-    win = int(config.fit_window_px)
+    win = int(fit_window_px)
     for sample in laser_lsfs:
         start = max(0, sample.pixel_index - win)
         end = min(len(sample.values), sample.pixel_index + win + 1)
